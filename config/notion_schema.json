@@ -1,0 +1,70 @@
+{
+  "_README": "Paste EXACT Notion property names, character-for-character. The sync layer reads ONLY this file for property mapping — nothing is guessed. Empty string = not yet provided; sync for that field is skipped (and surfaced as a config gap on the health page) until filled. Keys on the left are stable internal names used by the dashboard; values on the right are your literal Notion property titles.",
+
+  "VEHICLES": {
+    "stage": {
+      "property": "",
+      "type": "status",
+      "options": {
+        "sourced": "Sourced",
+        "bid": "Bid",
+        "won": "Won",
+        "in_transit_japan": "In Transit Japan",
+        "customs": "Customs",
+        "arrived": "Arrived",
+        "reconditioning": "Reconditioning",
+        "ready_for_sale": "Ready for Sale",
+        "sold": "Sold"
+      },
+      "_note": "Set property to the exact Notion field name. Correct the option labels on the right to match Notion's exact option text if they differ."
+    },
+    "stage_transition_timestamps": {
+      "_note": "Exact Notion date-property name that stores WHEN the vehicle entered each stage. These are separate fields per your requirement so duration analytics don't parse edit history.",
+      "sourced_at": "",
+      "bid_at": "",
+      "won_at": "",
+      "in_transit_japan_at": "",
+      "customs_at": "",
+      "arrived_at": "",
+      "reconditioning_at": "",
+      "ready_for_sale_at": "",
+      "sold_at": ""
+    },
+    "fields": {
+      "title": "",
+      "auction_url": "",
+      "sold_price_usd": "",
+      "landed_cost_usd": "",
+      "won_date": "",
+      "sold_date": "",
+      "days_on_market": "",
+      "customer_relation": ""
+    }
+  },
+
+  "CUSTOMERS": {
+    "fields": {
+      "title": "",
+      "email": "",
+      "phone": "",
+      "irq_relation": "",
+      "vehicles_relation": ""
+    }
+  },
+
+  "IRQS": {
+    "fields": {
+      "title": "",
+      "created_at": "",
+      "status": "",
+      "assignee": "",
+      "customer_relation": ""
+    },
+    "status_options": {
+      "_note": "Exact Notion option labels for the IRQ status field.",
+      "open": "",
+      "closed": ""
+    },
+    "assigned_to_me_value": ""
+  }
+}

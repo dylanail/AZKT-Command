@@ -1,0 +1,13 @@
+[Unit]
+Description=AZKT usage collector (OpenClaw transcript -> append-only ledger)
+After=network.target
+
+[Service]
+WorkingDirectory=/opt/azkt-command
+Environment=PYTHONPATH=/opt/azkt-command
+ExecStart=/opt/azkt-command/.venv/bin/python -m usage.collector --watch --interval 30
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

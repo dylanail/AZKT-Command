@@ -1,0 +1,30 @@
+# ─── OpenClaw agent inventory ─────────────────────────────────────────────
+# FILL FROM THE CONTEXT DOC. The shim will refuse to start an agent whose
+# port is still 0 / agent_id is empty, so nothing here is silently guessed.
+#
+#   agent_id : the OpenClaw agents.list[].id for this agent
+#   workspace: that agent's workspace dir (holds SOUL.md = system prompt)
+#   port     : loopback port for THIS agent's HTTP shim (from context doc)
+#
+# The four agents named in the brief: watcher, scout, inventory, inbox.
+
+agents:
+  - key: watcher
+    agent_id: ""          # TODO: from context doc / openclaw.json agents.list
+    workspace: ""         # TODO: e.g. ~/.openclaw/workspace-watcher
+    port: 0               # TODO: suggested port from context doc
+
+  - key: scout
+    agent_id: ""
+    workspace: ""
+    port: 0
+
+  - key: inventory
+    agent_id: ""
+    workspace: ""
+    port: 0
+
+  - key: inbox
+    agent_id: ""
+    workspace: ""
+    port: 0

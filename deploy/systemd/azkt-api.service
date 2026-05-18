@@ -1,0 +1,13 @@
+[Unit]
+Description=AZKT Command API (FastAPI, loopback)
+After=network.target postgresql.service
+
+[Service]
+WorkingDirectory=/opt/azkt-command
+Environment=PYTHONPATH=/opt/azkt-command
+ExecStart=/opt/azkt-command/.venv/bin/python -m backend.app.main
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

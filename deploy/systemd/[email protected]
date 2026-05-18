@@ -1,0 +1,16 @@
+# Templated: enable per agent, e.g.
+#   systemctl enable --now azkt-shim@watcher azkt-shim@scout \
+#                          azkt-shim@inventory azkt-shim@inbox
+[Unit]
+Description=AZKT OpenClaw shim (%i, loopback)
+After=network.target
+
+[Service]
+WorkingDirectory=/opt/azkt-command
+Environment=PYTHONPATH=/opt/azkt-command
+ExecStart=/opt/azkt-command/.venv/bin/python -m shim.run_shim %i
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

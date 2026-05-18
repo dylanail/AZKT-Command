@@ -1,0 +1,11 @@
+{
+  "_README": "Per-model Anthropic pricing in USD per 1,000,000 tokens. Editable; surfaced read-only in Settings. Cost = (input_tokens/1e6 * input) + (output_tokens/1e6 * output). cache_write/cache_read optional; fall back to input/output if a call doesn't report them. Update when Anthropic pricing changes.",
+  "currency": "USD",
+  "per_mtok": {
+    "claude-opus-4-7": { "input": 15.00, "output": 75.00, "cache_write": 18.75, "cache_read": 1.50 },
+    "claude-sonnet-4-6": { "input": 3.00, "output": 15.00, "cache_write": 3.75, "cache_read": 0.30 },
+    "claude-haiku-4-5": { "input": 1.00, "output": 5.00, "cache_write": 1.25, "cache_read": 0.10 }
+  },
+  "default_model": "claude-sonnet-4-6",
+  "_note": "Verify these rates against current Anthropic pricing before trusting cost figures. Unknown model IDs fall back to default_model and are flagged on the cost page."
+}

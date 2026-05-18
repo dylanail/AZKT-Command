@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+
+# Env / secrets
+.env
+.env.local
+*.local.yaml
+
+# Runtime data
+usage/*.jsonl
+data/
+*.db
+*.sqlite3
+
+# Node / frontend (added in frontend phase)
+node_modules/
+dist/
+
+# OS
+.DS_Store

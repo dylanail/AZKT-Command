@@ -1,0 +1,31 @@
+# ─── Notification tiers ───────────────────────────────────────────────────
+# FILL FROM THE CONTEXT DOC's notification tier breakdown. Only Tier "push"
+# rules are allowed to hit the phone; everything else stays in-dashboard.
+# The brief names three push triggers explicitly — encoded below as defaults
+# you should confirm/replace against the doc's exact tiers and thresholds.
+
+tiers:
+  push:        # time-sensitive only — reaches the iPhone
+    - id: auction_closing_unbid
+      description: "Auction closing in under N minutes and we have not bid"
+      window_minutes: 60          # TODO confirm against context doc
+    - id: irq_assigned_unanswered
+      description: "IRQ assigned to me sitting unanswered"
+      threshold_minutes: 120      # TODO confirm against context doc
+    - id: agent_erroring
+      description: "An agent erroring continuously"
+      threshold_minutes: 5        # TODO confirm against context doc
+
+  dashboard:   # everything else — lives only in the dashboard, never pushed
+    - id: new_irq
+    - id: stale_irq_7d
+    - id: notion_sync_lag
+    - id: daily_spend_threshold
+    - id: single_call_over_dollar
+
+# Cost alerting thresholds (brief: alert if a single call > $1, or daily spend
+# crosses a threshold you set). single_call/daily_spend surface in-dashboard
+# unless the context doc places them in the push tier — confirm.
+cost_alerts:
+  single_call_usd: 1.00
+  daily_spend_usd: 0            # TODO: set your daily spend ceiling
