@@ -6,6 +6,7 @@ import Login from "./screens/Login";
 import Home from "./screens/Home";
 import Agents from "./screens/Agents";
 import AgentDetail from "./screens/AgentDetail";
+import ChatHistory from "./screens/ChatHistory";
 import Approvals from "./screens/Approvals";
 import Pipeline from "./screens/Pipeline";
 import Costs from "./screens/Costs";
@@ -55,6 +56,7 @@ function QuickAdd({ close }: { close: () => void }) {
 const NAV = [
   { to: "/", ic: "▦", label: "Home" },
   { to: "/agents", ic: "◉", label: "Agents" },
+  { to: "/chat", ic: "✉", label: "Chat" },
   { to: "/approvals", ic: "✓", label: "Approve" },
   { to: "/pipeline", ic: "▤", label: "Pipeline" },
   { to: "/costs", ic: "$", label: "Costs" },
@@ -73,6 +75,7 @@ export default function App() {
         <Route path="/" element={<Home />} />
         <Route path="/agents" element={<Agents />} />
         <Route path="/agents/:key" element={<AgentDetail />} />
+        <Route path="/chat" element={<ChatHistory />} />
         <Route path="/approvals" element={<Approvals />} />
         <Route path="/pipeline" element={<Pipeline />} />
         <Route path="/costs" element={<Costs />} />

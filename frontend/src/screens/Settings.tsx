@@ -44,30 +44,88 @@ function IntegrationForm({ name, connected }: { name: string; connected: boolean
 
 function Passkeys() {
   const { addPasskey } = useAuth();
+  const keys = useAsync<any[]>(() => api.get("/auth/credentials"));
+  const [name, setName] = useState("");
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState("");
+
   const add = async () => {
     setBusy(true);
     setMsg("");
     try {
-      await addPasskey();
-      setMsg("New passkey added to this account.");
+      await addPasskey(name.trim() || "passkey");
+      setName("");
+      setMsg("New passkey added — follow the on-device prompt to finish (Face ID etc.).");
+      await keys.reload();
     } catch (e) {
       setMsg((e as Error).message);
     } finally {
       setBusy(false);
     }
   };
+
+  const rename = async (id: string, current: string) => {
+    const label = window.prompt("Rename passkey", current);
+    if (!label || !label.trim()) return;
+    try {
+      await api.post(`/auth/credentials/${id}/rename`, { label: label.trim() });
+      await keys.reload();
+    } catch (e) {
+      setMsg((e as Error).message);
+    }
+  };
+
+  const revoke = async (id: string, label: string) => {
+    if (!window.confirm(`Revoke passkey "${label}"? That device can no longer sign in.`)) return;
+    try {
+      await api.del(`/auth/credentials/${id}`);
+      await keys.reload();
+    } catch (e) {
+      setMsg((e as Error).message);
+    }
+  };
+
+  const list = keys.data ?? [];
   return (
     <div className="card">
       <h3>Passkeys</h3>
       <p className="muted" style={{ marginTop: 0, fontSize: 13 }}>
-        Register another device (phone, laptop, security key) so you can sign
-        in from anywhere.
+        Each device (phone Face ID, laptop, security key) is its own passkey.
+        Name new ones so you can revoke a lost device later.
       </p>
+
+      {list.map((k) => (
+        <div key={k.id} className="spread" style={{ padding: "8px 0", borderTop: "1px solid var(--line, #1e2630)" }}>
+          <div>
+            <div style={{ fontSize: 14 }}>{k.label || "passkey"}</div>
+            <div className="muted" style={{ fontSize: 11 }}>
+              {k.created_at ? new Date(k.created_at).toLocaleDateString() : ""}
+              {k.transports ? ` · ${k.transports}` : ""}
+            </div>
+          </div>
+          <div className="btn-row">
+            <button onClick={() => rename(k.id, k.label || "passkey")}>Rename</button>
+            <button
+              className="btn-red"
+              disabled={list.length <= 1}
+              title={list.length <= 1 ? "Add another passkey before revoking your only one" : ""}
+              onClick={() => revoke(k.id, k.label || "passkey")}
+            >
+              Revoke
+            </button>
+          </div>
+        </div>
+      ))}
+
+      <input
+        placeholder="New passkey name (e.g. iPhone 16, MacBook)"
+        value={name}
+        onChange={(e) => setName(e.target.value)}
+        style={{ marginTop: 12 }}
+      />
       <button
         className="btn-green"
-        style={{ width: "100%" }}
+        style={{ width: "100%", marginTop: 8 }}
         disabled={busy}
         onClick={add}
       >
@@ -78,11 +136,81 @@ function Passkeys() {
   );
 }
 
+function NotionCard() {
+  const status = useAsync<any>(() => api.get("/api/notion/status"));
+  const [busy, setBusy] = useState(false);
+  const [out, setOut] = useState<string>("");
+
+  const introspect = async () => {
+    setBusy(true);
+    setOut("");
+    try {
+      const r = await api.post("/api/notion/introspect");
+      const lines: string[] = [];
+      for (const [db, info] of Object.entries<any>(r.databases || {})) {
+        lines.push(`=== ${db} ===`);
+        if (info.error) {
+          lines.push(`  ${info.error} ${info.detail || ""}`);
+        } else {
+          for (const p of info.properties || [])
+            lines.push(`  ${p.type}\t${p.name}`);
+        }
+      }
+      setOut(lines.join("\n") + `\n\nDraft written: ${r.draft_written}`);
+    } catch (e) {
+      setOut((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const gaps: string[] = status.data?.schema_gaps ?? [];
+  return (
+    <div className="card">
+      <h3>Notion sync</h3>
+      {status.data && (
+        <div className="muted" style={{ fontSize: 13 }}>
+          Last sync: {status.data.last_sync_at
+            ? new Date(status.data.last_sync_at).toLocaleString()
+            : "never"} · polling every {status.data.env?.poll_seconds}s
+        </div>
+      )}
+      {gaps.length ? (
+        <div className="pill-warn" style={{ marginTop: 8 }}>
+          {gaps.length} unmapped: {gaps.slice(0, 6).join(", ")}
+          {gaps.length > 6 ? "…" : ""}
+        </div>
+      ) : (
+        <div className="muted" style={{ marginTop: 8 }}>All Notion mappings set.</div>
+      )}
+      <p className="muted" style={{ fontSize: 13, marginTop: 10 }}>
+        To wire it: set <code>NOTION_TOKEN</code> + the three DB ids in
+        <code> .env</code>, run introspection to get exact property names,
+        then transcribe them into <code>config/notion_schema.json</code>. The
+        <strong> main</strong> agent can do all of this via the
+        <code> /api/notion/*</code> endpoints.
+      </p>
+      <button
+        style={{ width: "100%", marginTop: 4 }}
+        disabled={busy}
+        onClick={introspect}
+      >
+        {busy ? "Asking Notion…" : "Run introspection"}
+      </button>
+      {out && (
+        <pre className="muted" style={{
+          marginTop: 8, fontSize: 12, whiteSpace: "pre-wrap",
+          maxHeight: 240, overflow: "auto",
+        }}>{out}</pre>
+      )}
+    </div>
+  );
+}
+
 export default function Settings() {
   const { logout } = useAuth();
   const integ = useAsync<any>(() => api.get("/api/integrations"));
   const costs = useAsync<any>(() => api.get("/api/costs/summary"));
-  const health = useAsync<any>(() => api.get("/api/health/overview"));
 
   return (
     <>
@@ -90,22 +218,12 @@ export default function Settings() {
       <div className="scroll">
         <div className="card">
           <h3>Quick links</h3>
+          <Link to="/chat"><div style={{ padding: "8px 0" }}>All chat history →</div></Link>
           <Link to="/customers"><div style={{ padding: "8px 0" }}>Customers →</div></Link>
           <Link to="/health"><div style={{ padding: "8px 0" }}>System health →</div></Link>
         </div>
 
-        <div className="card">
-          <h3>Notion mapping</h3>
-          {health.data?.notion_schema_gaps?.length ? (
-            <div className="pill-warn">
-              {health.data.notion_schema_gaps.length} unset. Edit
-              <code> config/notion_schema.json </code> on the droplet — exact
-              property names, no guessing.
-            </div>
-          ) : (
-            <div className="muted">All Notion mappings set.</div>
-          )}
-        </div>
+        <NotionCard />
 
         <h3 style={{ margin: "8px 4px", color: "var(--muted)" }}>Integrations</h3>
         {["gohighlevel", "twilio", "square"].map((n) => (
