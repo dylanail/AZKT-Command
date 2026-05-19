@@ -46,23 +46,48 @@ _PAGE = """<!doctype html>
 <body>
   <div class="card">
     <h1>AZKT</h1>
-    <p class="sub">Arizona Kei Trucks · Command — passkey enrollment</p>
-    <label for="tok">One-time setup token (from <code>.env</code>)</label>
-    <input id="tok" autocomplete="off" autocapitalize="off" autocorrect="off"
-           spellcheck="false" placeholder="SETUP_TOKEN" />
-    <button id="go">Create passkey on this device</button>
-    <p class="sub" style="margin:14px 0 0">
-      Uses Face&nbsp;ID, Touch&nbsp;ID, Windows&nbsp;Hello, or a security key —
-      whatever this device supports.
-    </p>
+    <p class="sub">Arizona Kei Trucks · Command</p>
+
+    <div id="loading" class="sub">Checking this device…</div>
+
+    <div id="setup" style="display:none">
+      <label for="tok">One-time setup token (from <code>.env</code>)</label>
+      <input id="tok" autocomplete="off" autocapitalize="off" autocorrect="off"
+             spellcheck="false" placeholder="SETUP_TOKEN" />
+      <button id="create">Create passkey on this device</button>
+      <p class="sub" style="margin:14px 0 0">
+        Uses Face&nbsp;ID, Touch&nbsp;ID, Windows&nbsp;Hello, or a security key —
+        whatever this device supports.
+      </p>
+    </div>
+
+    <div id="signin" style="display:none">
+      <p class="sub" style="margin:0 0 4px">An account already exists on this server.</p>
+      <button id="login">Sign in with your passkey</button>
+    </div>
+
+    <div id="done" style="display:none">
+      <p class="sub" style="margin:0 0 14px">You're signed in.</p>
+      <a id="dash" href="/"><button>Open the dashboard</button></a>
+      <button id="addkey" style="background:#1e2630;margin-top:10px">
+        Add another passkey to this account
+      </button>
+      <button id="signout" style="background:#2a1416;color:#ff8a8a;margin-top:10px">
+        Sign out
+      </button>
+    </div>
+
     <div id="m" class="msg"></div>
   </div>
 <script>
 const $ = (id) => document.getElementById(id);
 const show = (cls, html) => { const m=$("m"); m.className="msg "+cls; m.innerHTML=html; m.style.display="block"; };
+const view = (which) => {
+  for (const id of ["loading","setup","signin","done"])
+    $(id).style.display = (id === which) ? "block" : "none";
+};
 
 const q = new URLSearchParams(location.search).get("token");
-if (q) $("tok").value = q;
 
 function b64uToBuf(s) {
   s = s.replace(/-/g,"+").replace(/_/g,"/");
@@ -86,39 +111,107 @@ async function jp(path, body) {
   return r.json();
 }
 
-$("go").onclick = async () => {
+async function refresh() {
+  const s = await fetch("/auth/state", { credentials:"include" }).then(r => r.json());
+  if (s.authed) { view("done"); return; }
+  if (s.registered) { view("signin"); return; }
+  if (q) $("tok").value = q;
+  view("setup");
+}
+
+// First registration: needs the one-time setup token.
+async function doRegister(body) {
+  if (!window.PublicKeyCredential) throw new Error("This browser has no passkey support.");
+  const opts = await jp("/auth/register/options", body);
+  opts.challenge = b64uToBuf(opts.challenge);
+  opts.user.id = b64uToBuf(opts.user.id);
+  if (opts.excludeCredentials) {
+    opts.excludeCredentials = opts.excludeCredentials.map(c => ({ ...c, id: b64uToBuf(c.id) }));
+  }
+  const cred = await navigator.credentials.create({ publicKey: opts });
+  const r = cred.response;
+  await jp("/auth/register/verify", {
+    id: cred.id,
+    rawId: bufToB64u(cred.rawId),
+    type: cred.type,
+    authenticatorAttachment: cred.authenticatorAttachment || undefined,
+    clientExtensionResults: cred.getClientExtensionResults(),
+    response: {
+      clientDataJSON: bufToB64u(r.clientDataJSON),
+      attestationObject: bufToB64u(r.attestationObject),
+      transports: r.getTransports ? r.getTransports() : [],
+    },
+  });
+}
+
+$("create").onclick = async () => {
   const token = $("tok").value.trim();
   if (!token) { show("err","Enter the setup token first."); return; }
-  if (!window.PublicKeyCredential) { show("err","This browser has no passkey support."); return; }
-  $("go").disabled = true;
+  $("create").disabled = true;
   show("ok","Starting…");
   try {
-    const opts = await jp("/auth/register/options", { handle:"owner", setup_token:token });
+    await doRegister({ handle:"owner", setup_token:token });
+    await refresh();
+    show("ok","Passkey created. You're signed in.");
+  } catch (e) {
+    show("err", (e && e.message) ? e.message : String(e));
+    $("create").disabled = false;
+  }
+};
+
+$("login").onclick = async () => {
+  if (!window.PublicKeyCredential) { show("err","This browser has no passkey support."); return; }
+  $("login").disabled = true;
+  show("ok","Waiting for your passkey…");
+  try {
+    const opts = await jp("/auth/login/options");
     opts.challenge = b64uToBuf(opts.challenge);
-    opts.user.id = b64uToBuf(opts.user.id);
-    if (opts.excludeCredentials) {
-      opts.excludeCredentials = opts.excludeCredentials.map(c => ({ ...c, id: b64uToBuf(c.id) }));
+    if (opts.allowCredentials) {
+      opts.allowCredentials = opts.allowCredentials.map(c => ({ ...c, id: b64uToBuf(c.id) }));
     }
-    const cred = await navigator.credentials.create({ publicKey: opts });
+    const cred = await navigator.credentials.get({ publicKey: opts });
     const r = cred.response;
-    await jp("/auth/register/verify", {
+    await jp("/auth/login/verify", {
       id: cred.id,
       rawId: bufToB64u(cred.rawId),
       type: cred.type,
-      authenticatorAttachment: cred.authenticatorAttachment || undefined,
       clientExtensionResults: cred.getClientExtensionResults(),
       response: {
         clientDataJSON: bufToB64u(r.clientDataJSON),
-        attestationObject: bufToB64u(r.attestationObject),
-        transports: r.getTransports ? r.getTransports() : [],
+        authenticatorData: bufToB64u(r.authenticatorData),
+        signature: bufToB64u(r.signature),
+        userHandle: r.userHandle ? bufToB64u(r.userHandle) : undefined,
       },
     });
-    show("ok","Passkey registered. You're signed in — <a href='/'>open the dashboard</a>.");
+    await refresh();
+    show("ok","Signed in.");
   } catch (e) {
     show("err", (e && e.message) ? e.message : String(e));
-    $("go").disabled = false;
+    $("login").disabled = false;
   }
 };
+
+// Adding a device while signed in needs no setup token (server requires
+// an authenticated session instead).
+$("addkey").onclick = async () => {
+  $("addkey").disabled = true;
+  show("ok","Follow your browser's prompt for the new passkey…");
+  try {
+    await doRegister({ handle:"owner" });
+    show("ok","New passkey added to this account.");
+  } catch (e) {
+    show("err", (e && e.message) ? e.message : String(e));
+  } finally {
+    $("addkey").disabled = false;
+  }
+};
+
+$("signout").onclick = async () => {
+  try { await jp("/auth/logout"); } catch (e) { /* ignore */ }
+  await refresh();
+};
+
+refresh().catch(e => show("err", (e && e.message) ? e.message : String(e)));
 </script>
 </body>
 </html>

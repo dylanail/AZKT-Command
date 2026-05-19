@@ -117,8 +117,8 @@ def main():
     assert c.get("/").status_code == 200
     print("OK  / serves the same page (bare dash domain works)")
 
-    # 2. Fresh DB: not registered yet.
-    assert c.get("/auth/state").json() == {"registered": False}
+    # 2. Fresh DB: not registered yet, no session.
+    assert c.get("/auth/state").json() == {"registered": False, "authed": False}
 
     # 3. Wrong setup token is rejected.
     bad = c.post("/auth/register/options",
@@ -166,11 +166,22 @@ def main():
     assert "azkt_session" in c.cookies, "session cookie not issued"
     print("OK  register/verify accepts the page's payload + issues a session")
 
-    # 7. The session actually authorizes a protected route.
-    assert c.get("/auth/state").json() == {"registered": True}
+    # 7. The session actually authorizes a protected route, and /auth/state
+    #    reports it so the enroll page can skip the setup form post-login.
+    assert c.get("/auth/state").json() == {"registered": True, "authed": True}
     prot = c.get("/api/agents")
     assert prot.status_code != 401, "session did not authorize /api/agents"
     print("OK  enrolled session authorizes a protected route")
+
+    # 7b. A session-less client sees registered-but-not-authed (-> login view).
+    anon = httpx.Client(base_url=BASE, timeout=10, verify=False)
+    assert anon.get("/auth/state").json() == {"registered": True, "authed": False}
+    print("OK  /auth/state distinguishes a logged-in vs anonymous visitor")
+
+    # 7c. An authed session can add another passkey with no setup token.
+    r = c.post("/auth/register/options", json={"handle": "owner"})
+    assert r.status_code == 200, (r.status_code, r.text)
+    print("OK  authed session may add another passkey (no token needed)")
 
     # 8. Second registration without a session is closed (single user).
     closed = httpx.Client(base_url=BASE, verify=False).post(

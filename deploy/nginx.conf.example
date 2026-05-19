@@ -22,24 +22,39 @@ server {
 
     # ssl_certificate / ssl_certificate_key via certbot
 
-    # Interim (no Vite build on the box yet): the backend serves a minimal
-    # build-free passkey enrollment page at / and /enroll, plus /auth + /api.
-    # WebAuthn requires this to be reached on the dash.* origin, so proxy it
-    # here exactly like the api host. Cookies stay first-party (same origin).
+    # The SPA bundle is the dashboard. `scripts/deploy.sh` runs `npm run
+    # build` so frontend/dist exists; serve it at / with an index.html
+    # fallback so client-side routes (passkey login -> dashboard) resolve
+    # instead of hitting the backend's setup page.
+    root /opt/azkt-command/frontend/dist;
+    index index.html;
+
     location / {
+        try_files $uri /index.html;
+    }
+
+    # Build-free passkey page fallback (used before the bundle exists, or
+    # for adding a device from a bare browser). Must stay on this origin.
+    location = /enroll {
         proxy_pass http://127.0.0.1:8787;
         proxy_set_header Host $host;
         proxy_set_header X-Forwarded-Proto https;
         proxy_set_header X-Forwarded-For $remote_addr;
     }
 
-    # Frontend phase: once `npm run build` produces frontend/dist, replace the
-    # location / above with the static bundle and proxy only the API paths:
-    #
-    #   root /opt/azkt-command/frontend/dist;
-    #   location / { try_files $uri /index.html; }
-    #   location /auth { proxy_pass http://127.0.0.1:8787; }
-    #   location /api  { proxy_pass http://127.0.0.1:8787; }
+    location /auth {
+        proxy_pass http://127.0.0.1:8787;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-Forwarded-For $remote_addr;
+    }
+
+    location /api {
+        proxy_pass http://127.0.0.1:8787;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-Forwarded-For $remote_addr;
+    }
 }
 
 # The four agent shims (ports from config/agents.yaml) and the FastAPI app

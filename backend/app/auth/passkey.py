@@ -67,9 +67,17 @@ async def current_user(request: Request, db: AsyncSession = Depends(get_db)) -> 
 
 
 @router.get("/state")
-async def state(db: AsyncSession = Depends(get_db)):
+async def state(request: Request, db: AsyncSession = Depends(get_db)):
     count = await db.scalar(select(func.count()).select_from(User))
-    return {"registered": count > 0}
+    authed = False
+    raw = request.cookies.get(SESSION_COOKIE)
+    if raw:
+        try:
+            data = _signer.loads(raw)
+            authed = await db.get(User, data["uid"]) is not None
+        except (BadSignature, KeyError):
+            authed = False
+    return {"registered": count > 0, "authed": authed}
 
 
 @router.post("/register/options")
