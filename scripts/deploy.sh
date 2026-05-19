@@ -4,7 +4,7 @@
 # say "redeploy" — no manual git pulling.
 set -euo pipefail
 
-BRANCH="${BRANCH:-claude/build-azkt-dashboard-wymkf}"
+BRANCH="${BRANCH:-main}"
 ROOT="${ROOT:-/opt/azkt-command}"
 cd "$ROOT"
 

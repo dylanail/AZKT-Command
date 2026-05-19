@@ -1,13 +1,21 @@
 # Templated: enable per agent, e.g.
 #   systemctl enable --now azkt-shim@watcher azkt-shim@scout \
-#                          azkt-shim@inventory azkt-shim@inbox
+#                          azkt-shim@inventory azkt-shim@inbox azkt-shim@main
 [Unit]
 Description=AZKT OpenClaw shim (%i, loopback)
 After=network.target
 
 [Service]
-WorkingDirectory=/opt/azkt-command
+# The shim shells out to `systemctl --user` to read/control the OpenClaw
+# agent timers (azkt-*.timer). That only returns real state when it runs as
+# the SAME user that owns those --user units (root on this droplet) with the
+# user bus reachable. Without these env vars timer state comes back null.
+# Requires: loginctl enable-linger root
+User=root
 Environment=PYTHONPATH=/opt/azkt-command
+Environment=XDG_RUNTIME_DIR=/run/user/0
+Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/0/bus
+WorkingDirectory=/opt/azkt-command
 ExecStart=/opt/azkt-command/.venv/bin/python -m shim.run_shim %i
 Restart=always
 RestartSec=3
