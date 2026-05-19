@@ -50,7 +50,11 @@ _PAGE = """<!doctype html>
     <label for="tok">One-time setup token (from <code>.env</code>)</label>
     <input id="tok" autocomplete="off" autocapitalize="off" autocorrect="off"
            spellcheck="false" placeholder="SETUP_TOKEN" />
-    <button id="go">Register this device with Face ID</button>
+    <button id="go">Create passkey on this device</button>
+    <p class="sub" style="margin:14px 0 0">
+      Uses Face&nbsp;ID, Touch&nbsp;ID, Windows&nbsp;Hello, or a security key —
+      whatever this device supports.
+    </p>
     <div id="m" class="msg"></div>
   </div>
 <script>
