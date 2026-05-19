@@ -91,6 +91,7 @@ async def register_options(request: Request, db: AsyncSession = Depends(get_db))
         await current_user(request, db)  # only an authed user can add devices
 
     handle = body.get("handle", "owner")
+    label = (body.get("label") or "").strip()[:80] or "passkey"
     user = (await db.execute(select(User).where(User.handle == handle))).scalar_one_or_none()
     uid = user.id if user else handle
     opts = generate_registration_options(
@@ -108,7 +109,7 @@ async def register_options(request: Request, db: AsyncSession = Depends(get_db))
         ),
     )
     resp = Response(options_to_json(opts), media_type="application/json")
-    resp.set_cookie("reg_chal", _chal.dumps({"c": _b64(opts.challenge), "h": handle}),
+    resp.set_cookie("reg_chal", _chal.dumps({"c": _b64(opts.challenge), "h": handle, "l": label}),
                     httponly=True, secure=True, samesite="strict", max_age=300)
     return resp
 
@@ -137,6 +138,7 @@ async def register_verify(request: Request, db: AsyncSession = Depends(get_db)):
         credential_id=verification.credential_id,
         public_key=verification.credential_public_key,
         sign_count=verification.sign_count,
+        label=ch.get("l") or "passkey",
         created_at=datetime.now(timezone.utc),
     ))
     await db.commit()
@@ -193,3 +195,51 @@ async def logout():
     resp = Response(json.dumps({"ok": True}), media_type="application/json")
     resp.delete_cookie(SESSION_COOKIE)
     return resp
+
+
+# ── Passkey management (authed: name / list / revoke devices) ───────────────
+@router.get("/credentials")
+async def list_credentials(request: Request, db: AsyncSession = Depends(get_db)):
+    user = await current_user(request, db)
+    rows = (await db.execute(
+        select(Credential).where(Credential.user_id == user.id)
+        .order_by(Credential.created_at)
+    )).scalars().all()
+    return [{
+        "id": c.id,
+        "label": c.label,
+        "transports": c.transports,
+        "sign_count": c.sign_count,
+        "created_at": c.created_at.isoformat() if c.created_at else None,
+    } for c in rows]
+
+
+@router.post("/credentials/{cid}/rename")
+async def rename_credential(cid: str, request: Request, db: AsyncSession = Depends(get_db)):
+    user = await current_user(request, db)
+    body = await request.json()
+    label = (body.get("label") or "").strip()[:80]
+    if not label:
+        raise HTTPException(400, "label required")
+    cred = await db.get(Credential, cid)
+    if cred is None or cred.user_id != user.id:
+        raise HTTPException(404, "no such passkey")
+    cred.label = label
+    await db.commit()
+    return {"ok": True, "label": cred.label}
+
+
+@router.delete("/credentials/{cid}")
+async def revoke_credential(cid: str, request: Request, db: AsyncSession = Depends(get_db)):
+    user = await current_user(request, db)
+    cred = await db.get(Credential, cid)
+    if cred is None or cred.user_id != user.id:
+        raise HTTPException(404, "no such passkey")
+    remaining = await db.scalar(
+        select(func.count()).select_from(Credential).where(Credential.user_id == user.id)
+    )
+    if remaining <= 1:
+        raise HTTPException(400, "cannot revoke your only passkey — add another first")
+    await db.delete(cred)
+    await db.commit()
+    return {"ok": True}

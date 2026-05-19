@@ -12,8 +12,10 @@ from .core.config import settings
 from .db import Base, SessionLocal, engine
 from .models import AgentState  # noqa: F401  (ensure metadata import)
 from .routers.agents import router as agents_router
+from .routers.chat import router as chat_router
 from .routers.enroll import router as enroll_router
 from .routers.misc import router as misc_router
+from .routers.notion import router as notion_router
 from .routers.vehicles import router as vehicles_router
 from .services import agents as agent_svc
 from .services import notifications, notion_sync
@@ -34,6 +36,8 @@ app.include_router(enroll_router)
 app.include_router(agents_router)
 app.include_router(vehicles_router)
 app.include_router(misc_router)
+app.include_router(chat_router)
+app.include_router(notion_router)
 
 
 @app.get("/healthz")

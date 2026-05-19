@@ -16,6 +16,7 @@ usage/*.jsonl
 data/
 *.db
 *.sqlite3
+config/notion_schema.draft.json
 
 # Node / frontend (added in frontend phase)
 node_modules/
