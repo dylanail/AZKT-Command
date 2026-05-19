@@ -10,6 +10,7 @@ type AuthState = {
   registered: boolean;
   login: () => Promise<void>;
   register: (setupToken: string) => Promise<void>;
+  addPasskey: () => Promise<void>;
   logout: () => Promise<void>;
 };
 
@@ -59,6 +60,14 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     await probe();
   };
 
+  // Already authenticated: the server gates this on the session cookie,
+  // not the setup token, so no token is sent.
+  const addPasskey = async () => {
+    const opts = await jp("/auth/register/options", { handle: "owner" });
+    const att = await startRegistration(opts);
+    await jp("/auth/register/verify", att);
+  };
+
   const login = async () => {
     const opts = await jp("/auth/login/options");
     const asr = await startAuthentication(opts);
@@ -72,7 +81,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   };
 
   return (
-    <Ctx.Provider value={{ ready, authed, registered, login, register, logout }}>
+    <Ctx.Provider value={{ ready, authed, registered, login, register, addPasskey, logout }}>
       {children}
     </Ctx.Provider>
   );

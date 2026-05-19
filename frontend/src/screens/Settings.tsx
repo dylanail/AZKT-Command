@@ -42,6 +42,42 @@ function IntegrationForm({ name, connected }: { name: string; connected: boolean
   );
 }
 
+function Passkeys() {
+  const { addPasskey } = useAuth();
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState("");
+  const add = async () => {
+    setBusy(true);
+    setMsg("");
+    try {
+      await addPasskey();
+      setMsg("New passkey added to this account.");
+    } catch (e) {
+      setMsg((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <div className="card">
+      <h3>Passkeys</h3>
+      <p className="muted" style={{ marginTop: 0, fontSize: 13 }}>
+        Register another device (phone, laptop, security key) so you can sign
+        in from anywhere.
+      </p>
+      <button
+        className="btn-green"
+        style={{ width: "100%" }}
+        disabled={busy}
+        onClick={add}
+      >
+        {busy ? "Follow your browser prompt…" : "Add another passkey"}
+      </button>
+      {msg && <div className="muted" style={{ marginTop: 8, fontSize: 13 }}>{msg}</div>}
+    </div>
+  );
+}
+
 export default function Settings() {
   const { logout } = useAuth();
   const integ = useAsync<any>(() => api.get("/api/integrations"));
@@ -89,6 +125,8 @@ export default function Settings() {
             Edit <code>config/pricing.json</code> on the droplet.
           </div>
         </div>
+
+        <Passkeys />
 
         <button className="btn-red" style={{ width: "100%" }} onClick={logout}>
           Sign out
