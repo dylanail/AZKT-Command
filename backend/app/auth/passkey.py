@@ -22,7 +22,11 @@ from webauthn import (
     verify_authentication_response,
     verify_registration_response,
 )
-from webauthn.helpers.structs import AuthenticatorSelectionCriteria, UserVerificationRequirement
+from webauthn.helpers.structs import (
+    AuthenticatorSelectionCriteria,
+    ResidentKeyRequirement,
+    UserVerificationRequirement,
+)
 
 from ..core.config import settings
 from ..db import get_db
@@ -87,7 +91,12 @@ async def register_options(request: Request, db: AsyncSession = Depends(get_db))
         user_name=handle,
         user_id=uid.encode(),
         authenticator_selection=AuthenticatorSelectionCriteria(
-            user_verification=UserVerificationRequirement.REQUIRED  # Face ID
+            # Login is usernameless (no allowCredentials), so the credential
+            # MUST be discoverable or it can't be found at sign-in. Safari/iOS
+            # do this by default; desktop Chrome + security keys do not.
+            resident_key=ResidentKeyRequirement.REQUIRED,
+            require_resident_key=True,
+            user_verification=UserVerificationRequirement.REQUIRED,  # biometric
         ),
     )
     resp = Response(options_to_json(opts), media_type="application/json")
