@@ -1,30 +1,61 @@
-# ─── OpenClaw agent inventory ─────────────────────────────────────────────
-# FILL FROM THE CONTEXT DOC. The shim will refuse to start an agent whose
-# port is still 0 / agent_id is empty, so nothing here is silently guessed.
+# ─── OpenClaw agent inventory (filled from droplet discovery) ─────────────
+# Reality of this droplet:
+#  - The 4 worker agents are driven by systemd --user TIMERS, not OpenClaw
+#    heartbeat (heartbeat globally disabled) — so health = timer state.
+#  - `main` is the DM/orchestrator: no timer, health = gateway reachability.
+#  - Chat/run go through the OpenClaw Gateway (OpenAI-compatible API) on
+#    127.0.0.1:18789, agent addressed via the `model` field = agent_id.
+#  - Gateway token lives ONLY in .env on the droplet (OPENCLAW_GATEWAY_TOKEN).
 #
-#   agent_id : the OpenClaw agents.list[].id for this agent
-#   workspace: that agent's workspace dir (holds SOUL.md = system prompt)
-#   port     : loopback port for THIS agent's HTTP shim (from context doc)
-#
-# The four agents named in the brief: watcher, scout, inventory, inbox.
+# timer_unit / service_unit are systemd --user units. Leave timer_unit ""
+# for agents with no timer (main). The brief's four agents are watcher,
+# scout, inventory, inbox; `main` is included as the orchestrator DM.
+
+gateway_url: http://127.0.0.1:18789
 
 agents:
   - key: watcher
-    agent_id: ""          # TODO: from context doc / openclaw.json agents.list
-    workspace: ""         # TODO: e.g. ~/.openclaw/workspace-watcher
-    port: 0               # TODO: suggested port from context doc
+    agent_id: watcher
+    workspace: /root/.openclaw/workspace-watcher
+    model: claude-opus-4-7
+    port: 8801
+    timer_unit: azkt-watcher.timer
+    service_unit: azkt-watcher.service
 
   - key: scout
-    agent_id: ""
-    workspace: ""
-    port: 0
+    agent_id: scout
+    workspace: /root/.openclaw/workspace-scout
+    model: claude-opus-4-7
+    port: 8802
+    timer_unit: azkt-scout.timer
+    service_unit: azkt-scout.service
 
   - key: inventory
-    agent_id: ""
-    workspace: ""
-    port: 0
+    agent_id: inventory
+    workspace: /root/.openclaw/workspace-inventory
+    model: claude-sonnet-4-5
+    port: 8803
+    timer_unit: azkt-inventory.timer
+    service_unit: azkt-inventory.service
 
   - key: inbox
-    agent_id: ""
-    workspace: ""
-    port: 0
+    agent_id: inbox
+    workspace: /root/.openclaw/workspace-inbox
+    model: claude-opus-4-7
+    port: 8804
+    # NOTE: this timer is the known silent failure — dead since 2026-05-05.
+    # The shim health check flags this; restarting it is a deploy step.
+    timer_unit: azkt-inbox-loop.timer
+    service_unit: azkt-inbox-loop.service
+
+  - key: main
+    agent_id: main
+    workspace: /root/.openclaw/workspace
+    model: claude-opus-4-7
+    port: 8805
+    timer_unit: ""              # DM/orchestrator — no timer
+    service_unit: ""
+
+# OpenClaw cron jobs (separate from the systemd timers) — surfaced read-only:
+#  - inbox active-learning  : daily 06:30 America/Phoenix
+#  - daily brief / waiting threads : daily 07:00 America/Phoenix

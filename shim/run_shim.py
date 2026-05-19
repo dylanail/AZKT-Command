@@ -32,10 +32,16 @@ def main() -> None:
     if not a.get("agent_id") or not a.get("workspace") or not a.get("port"):
         raise SystemExit(
             f"agent '{key}' is not configured in {CONFIG}: fill agent_id, "
-            f"workspace and port from the context doc before starting. "
-            f"(Refusing to guess.)"
+            f"workspace and port before starting. (Refusing to guess.)"
         )
-    app = create_app(key, a["agent_id"], a["workspace"])
+    app = create_app(
+        key,
+        a["agent_id"],
+        a["workspace"],
+        a.get("model", ""),
+        a.get("timer_unit", "") or "",
+        a.get("service_unit", "") or "",
+    )
     # LOOPBACK ONLY. Public access is exclusively via the reverse proxy.
     uvicorn.run(app, host="127.0.0.1", port=int(a["port"]), log_level="info")
 
