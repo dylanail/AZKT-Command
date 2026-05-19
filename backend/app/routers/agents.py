@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..auth.passkey import current_user
+from ..db import get_db
+from ..models import ChatMessage
 from ..services import agents
 
 router = APIRouter(prefix="/api/agents", tags=["agents"], dependencies=[Depends(current_user)])
@@ -36,9 +40,26 @@ async def run(key: str):
     return (await agents.call(key, "POST", "/run"))["body"]
 
 
+@router.get("/{key}/messages")
+async def messages(key: str, db: AsyncSession = Depends(get_db)):
+    rows = (await db.execute(
+        select(ChatMessage).where(ChatMessage.agent_key == key)
+        .order_by(ChatMessage.created_at)
+    )).scalars().all()
+    return [{"role": m.role, "content": m.content, "usage": m.usage,
+             "at": m.created_at.isoformat() if m.created_at else None} for m in rows]
+
+
 @router.post("/{key}/chat")
-async def chat(key: str, body: dict):
-    return (await agents.call(key, "POST", "/chat", {"message": body.get("message", "")}))["body"]
+async def chat(key: str, body: dict, db: AsyncSession = Depends(get_db)):
+    msg = body.get("message", "")
+    db.add(ChatMessage(agent_key=key, role="user", content=msg))
+    res = (await agents.call(key, "POST", "/chat", {"message": msg}))["body"]
+    reply = res.get("reply", "") if isinstance(res, dict) else ""
+    db.add(ChatMessage(agent_key=key, role="assistant", content=reply,
+                        usage=(res or {}).get("usage", {})))
+    await db.commit()
+    return res
 
 
 @router.post("/{key}/schedule/{state}")

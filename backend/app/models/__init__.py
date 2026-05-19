@@ -150,3 +150,12 @@ class Setting(Base):
     __tablename__ = "settings"
     key: Mapped[str] = mapped_column(String, primary_key=True)
     value: Mapped[dict] = mapped_column(JSON, default=dict)
+
+
+class ChatMessage(Base, BusinessRow):
+    """Persistent per-agent chat so conversations scroll back."""
+    __tablename__ = "chat_messages"
+    agent_key: Mapped[str] = mapped_column(String, index=True)
+    role: Mapped[str] = mapped_column(String)  # user | assistant
+    content: Mapped[str] = mapped_column(Text)
+    usage: Mapped[dict] = mapped_column(JSON, default=dict)

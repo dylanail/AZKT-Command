@@ -4,9 +4,10 @@ Personal command center for Arizona Kei Trucks. Single user. Postgres is the
 source of truth; Notion is a bidirectional mirror. Backend + OpenClaw agents
 stay on loopback — only the reverse proxy is public.
 
-> **Status: backend + agent shims + token-usage retrofit complete.**
-> Frontend (installable iPhone PWA with Face ID) is intentionally **not yet
-> built** — verify the backend first, per the build plan.
+> **Status: full stack built** — backend + agent shims + token-usage
+> retrofit + installable iPhone PWA (Face ID, pull-to-refresh, quick-add,
+> Kanban, per-agent chat with persistent history). One-command deploy:
+> `scripts/deploy.sh`.
 
 ## You must fill these before it works (nothing is guessed)
 
@@ -46,7 +47,17 @@ PYTHONPATH=. python -m shim.run_shim watcher     # once agents.yaml is filled
 PYTHONPATH=. python -m usage.collector --watch
 ```
 
-Production: `deploy/systemd/*` units + `deploy/nginx.conf.example`.
+Frontend (dev): `cd frontend && npm install && npm run dev` (proxies to the
+loopback API). Production build: `npm run build` → `frontend/dist` served by
+nginx at `dash.arizonakeitrucks.com`.
+
+Production deploy/reload (run on the droplet, or have your agent run it):
+
+```bash
+ROOT=/opt/azkt-command scripts/deploy.sh   # pull, build, restart, reload nginx
+```
+
+Units: `deploy/systemd/*` + `deploy/nginx.conf.example`.
 
 ## Out of scope for v1 (by design)
 
