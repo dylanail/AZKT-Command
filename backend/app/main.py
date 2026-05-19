@@ -12,6 +12,7 @@ from .core.config import settings
 from .db import Base, SessionLocal, engine
 from .models import AgentState  # noqa: F401  (ensure metadata import)
 from .routers.agents import router as agents_router
+from .routers.enroll import router as enroll_router
 from .routers.misc import router as misc_router
 from .routers.vehicles import router as vehicles_router
 from .services import agents as agent_svc
@@ -29,6 +30,7 @@ app.add_middleware(
 )
 
 app.include_router(auth_router)
+app.include_router(enroll_router)
 app.include_router(agents_router)
 app.include_router(vehicles_router)
 app.include_router(misc_router)
