@@ -38,6 +38,18 @@ class CostItem(Base, BusinessRow):
     notes: Mapped[str] = mapped_column(Text, default="")
     restated_from_id: Mapped[str | None] = mapped_column(String, nullable=True)
     restatement_note: Mapped[str | None] = mapped_column(String, nullable=True)
+    # added by the finance domain (add-only): observation history, invoice components, fx provenance, allocation state
+    observations: Mapped[list] = mapped_column(JSON, default=list)  # [{kind, amount, currency, at, source_ref, evidence_id, by}]
+    restatements: Mapped[list] = mapped_column(JSON, default=list)  # [{at, by, field, old, new, note}]
+    tax_amount: Mapped[Decimal | None] = mapped_column(Numeric(18, 2), nullable=True)
+    freight_amount: Mapped[Decimal | None] = mapped_column(Numeric(18, 2), nullable=True)
+    discount_amount: Mapped[Decimal | None] = mapped_column(Numeric(18, 2), nullable=True)
+    fx_actual: Mapped[bool] = mapped_column(Boolean, default=False)  # usd_amount is an actual bank conversion
+    dedupe_key: Mapped[str | None] = mapped_column(String, nullable=True, index=True)  # retry-safe creation
+    allocation_state: Mapped[str] = mapped_column(String, default="none")  # none|balanced|proposed|unbalanced
+    vendor_norm: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
+    credits: Mapped[list] = mapped_column(JSON, default=list)  # [{credit_id, amount, at, reason, evidence_id}]
+    is_pass_through: Mapped[bool] = mapped_column(Boolean, default=False)
 
     @property
     def active_amount(self) -> Decimal | None:
@@ -73,6 +85,15 @@ class CostEvidence(Base, BusinessRow):
     reviewed_by: Mapped[str | None] = mapped_column(String, nullable=True)
     reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     is_settlement: Mapped[bool] = mapped_column(Boolean, default=False)  # only if ledger schema records verified settlement
+    # added by the finance domain (add-only): revisions, candidates, credit flag, ledger link
+    revision: Mapped[int] = mapped_column(Integer, default=1)
+    supersedes_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    is_current: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    candidates: Mapped[list] = mapped_column(JSON, default=list)  # [{cost_item_id, reasons, score}]
+    is_credit: Mapped[bool] = mapped_column(Boolean, default=False)
+    ledger_row_id: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
+    review_note: Mapped[str | None] = mapped_column(String, nullable=True)
+    applied: Mapped[dict] = mapped_column(JSON, default=dict)  # what the match applied to the item (observation kind/amount)
 
 
 class CostAllocation(Base, BusinessRow):
@@ -86,6 +107,13 @@ class CostAllocation(Base, BusinessRow):
     basis: Mapped[str] = mapped_column(String, default="explicit")  # explicit|equal|weighted
     confirmed_by: Mapped[str | None] = mapped_column(String, nullable=True)
     confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # added by the finance domain (add-only): review state, components, traceable credits
+    state: Mapped[str] = mapped_column(String, default="confirmed", index=True)  # proposed|confirmed
+    weight: Mapped[Decimal | None] = mapped_column(Numeric(18, 6), nullable=True)
+    components: Mapped[dict] = mapped_column(JSON, default=dict)  # {base, tax, freight}
+    amount_credited: Mapped[Decimal] = mapped_column(Numeric(18, 2), default=Decimal("0"))
+    credits: Mapped[list] = mapped_column(JSON, default=list)  # [{credit_id, amount, at, reason}] traceable to this allocation
+    review_reasons: Mapped[list] = mapped_column(JSON, default=list)
 
 
 class Payment(Base, BusinessRow):
@@ -120,6 +148,19 @@ class Payment(Base, BusinessRow):
     disputes: Mapped[list] = mapped_column(JSON, default=list)
     raw: Mapped[dict] = mapped_column(JSON, default=dict)
     is_payout: Mapped[bool] = mapped_column(Boolean, default=False)  # bank payouts are not customer revenue
+    # added by the finance domain (add-only): claim provenance, provider event dedupe, allocation cache
+    report_flags: Mapped[list] = mapped_column(JSON, default=list)  # e.g. sender_not_provider, subject_claims_paid
+    report_source: Mapped[dict] = mapped_column(JSON, default=dict)  # {sender, subject, claimed_by, ...}
+    provider_event_ids: Mapped[list] = mapped_column(JSON, default=list)
+    allocated_amount: Mapped[Decimal] = mapped_column(Numeric(18, 2), default=Decimal("0"))  # confirmed allocations
+    exceptions: Mapped[list] = mapped_column(JSON, default=list)  # [{kind, at, detail}]
+    method: Mapped[str | None] = mapped_column(String, nullable=True)  # cash|zelle|wire|check|card|other
+    evidence_asset_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    evidence_ref: Mapped[str | None] = mapped_column(String, nullable=True)
+
+    @property
+    def available_amount(self) -> Decimal:
+        return (self.amount or Decimal("0")) - (self.refunded_amount or Decimal("0"))
 
 
 class Invoice(Base, BusinessRow):
@@ -140,6 +181,12 @@ class Invoice(Base, BusinessRow):
     provider_invoice_id: Mapped[str | None] = mapped_column(String, nullable=True)
     satisfied_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     notes: Mapped[str] = mapped_column(Text, default="")
+    # added by the finance domain (add-only): terms provenance, dedupe, handoff record
+    dedupe_key: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
+    terms_source: Mapped[str] = mapped_column(String, default="explicit")  # agreement|import_request|explicit
+    handoff: Mapped[dict] = mapped_column(JSON, default=dict)  # {done, at, kind, id, payment_id, allocation_id, reversals:[...]}
+    reopened_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    exceptions: Mapped[list] = mapped_column(JSON, default=list)
 
 
 class PaymentAllocation(Base, BusinessRow):
@@ -154,6 +201,15 @@ class PaymentAllocation(Base, BusinessRow):
     confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     reversed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     reason: Mapped[str | None] = mapped_column(String, nullable=True)
+    # added by the finance domain (add-only): ambiguity groups, explicit conversion, flags
+    candidate_group: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
+    ambiguous: Mapped[bool] = mapped_column(Boolean, default=False)
+    applied_amount: Mapped[Decimal | None] = mapped_column(Numeric(18, 2), nullable=True)  # in invoice currency
+    applied_currency: Mapped[str | None] = mapped_column(String, nullable=True)
+    conversion: Mapped[dict] = mapped_column(JSON, default=dict)  # {rate, source, date}
+    flags: Mapped[list] = mapped_column(JSON, default=list)  # currency_mismatch|partial|overpayment|ambiguous
+    proposed_by: Mapped[str | None] = mapped_column(String, nullable=True)
+    reversal_kind: Mapped[str | None] = mapped_column(String, nullable=True)  # refund|dispute|correction
 
 
 class Sale(Base, BusinessRow):
@@ -183,6 +239,16 @@ class Sale(Base, BusinessRow):
     handoff_evidence: Mapped[list] = mapped_column(JSON, default=list)
     restatements: Mapped[list] = mapped_column(JSON, default=list)  # [{at, note, field, old, new}]
     notes: Mapped[str] = mapped_column(Text, default="")
+    # added by the finance domain (add-only): terms provenance, dedupe, credits history, exceptions
+    terms: Mapped[dict] = mapped_column(JSON, default=dict)
+    terms_flags: Mapped[list] = mapped_column(JSON, default=list)  # e.g. "terms not configured"
+    dedupe_key: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
+    source_ref: Mapped[str | None] = mapped_column(String, nullable=True)  # payment/invoice that reserved
+    expired_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    credits_history: Mapped[list] = mapped_column(JSON, default=list)  # [{credit_id, amount, reason, at, by, evidence_ref}]
+    exceptions: Mapped[list] = mapped_column(JSON, default=list)  # [{kind, at, detail}]
+    completion_evidence: Mapped[dict] = mapped_column(JSON, default=dict)
+    price_source: Mapped[str | None] = mapped_column(String, nullable=True)  # agreement|explicit
 
 
 class Agreement(Base, BusinessRow):
@@ -201,6 +267,13 @@ class Agreement(Base, BusinessRow):
     signed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     evidence_asset_id: Mapped[str | None] = mapped_column(String, nullable=True)
     supersedes_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    # added by the finance domain (add-only): price/vehicle/opportunity links and send evidence
+    vehicle_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    opportunity_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    price_amount: Mapped[Decimal | None] = mapped_column(Numeric(18, 2), nullable=True)
+    price_currency: Mapped[str | None] = mapped_column(String, nullable=True)
+    sent_evidence: Mapped[dict] = mapped_column(JSON, default=dict)  # {source_ref, at, by}
+    signed_evidence: Mapped[dict] = mapped_column(JSON, default=dict)  # {asset_id, signed_at, by}
 
 
 class Document(Base, BusinessRow):
@@ -213,6 +286,9 @@ class Document(Base, BusinessRow):
     visibility: Mapped[str] = mapped_column(String, default="owner")
     notes: Mapped[str] = mapped_column(Text, default="")
     conflict: Mapped[dict] = mapped_column(JSON, default=dict)
+    # added by the finance domain (add-only): source provenance and status history
+    sources: Mapped[list] = mapped_column(JSON, default=list)  # [{kind, ref, value, at}]
+    status_history: Mapped[list] = mapped_column(JSON, default=list)
 
 
 class LedgerMapping(Base, BusinessRow):
@@ -232,6 +308,13 @@ class LedgerMapping(Base, BusinessRow):
     preview: Mapped[dict] = mapped_column(JSON, default=dict)  # sample matches + exceptions
     activated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     activated_by: Mapped[str | None] = mapped_column(String, nullable=True)
+    # added by the finance domain (add-only): settlement declaration, detected schema, source revision
+    settlement_column: Mapped[str | None] = mapped_column(String, nullable=True)
+    settlement_verified: Mapped[bool] = mapped_column(Boolean, default=False)
+    detected: Mapped[dict] = mapped_column(JSON, default=dict)  # {headers, sample_rows, candidates}
+    source_revision: Mapped[str | None] = mapped_column(String, nullable=True)
+    last_import_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_import: Mapped[dict] = mapped_column(JSON, default=dict)
 
 
 class LedgerRow(Base, BusinessRow):
@@ -248,3 +331,12 @@ class LedgerRow(Base, BusinessRow):
     retrieved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     status: Mapped[str] = mapped_column(String, default="new", index=True)  # new|matched|ambiguous|ignored|changed|moved
     cost_evidence_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    # added by the finance domain (add-only): stable identity, value revisions, history
+    stable_key: Mapped[str | None] = mapped_column(String, nullable=True, index=True)  # sha(date|vendor|description)#n
+    value_hash: Mapped[str | None] = mapped_column(String, nullable=True)
+    revision: Mapped[int] = mapped_column(Integer, default=1)
+    history: Mapped[list] = mapped_column(JSON, default=list)  # [{revision, values, formulas, source_revision, at, row_number}]
+    parsed: Mapped[dict] = mapped_column(JSON, default=dict)  # normalized fields
+    last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    previous_row_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    exceptions: Mapped[list] = mapped_column(JSON, default=list)

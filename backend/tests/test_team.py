@@ -3,17 +3,19 @@ grant revoked before execution invalidates queued authorization (H03), disable/e
 from __future__ import annotations
 
 import hashlib
+import json
 
 import pytest
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from backend.app.auth.passkey import SESSION_COOKIE, session_token
-from backend.app.core.errors import Denied, ValidationFailed
-from backend.app.domain.commands import REGISTRY, command, dispatch
+from backend.app.core.errors import Blocked, Denied, ValidationFailed
+from backend.app.domain.actors import Actor
+from backend.app.domain.commands import REGISTRY, CommandContext, command, dispatch
 from backend.app.domain.policy import effective_perms
 from backend.app.models.auth import Invitation
-from backend.app.models.runtime import ActivityEntry, Approval, Event, ExternalAction, Permission
+from backend.app.models.runtime import ActivityEntry, Approval, CommandLog, Event, ExternalAction, Permission, WorkflowControl
 from backend.app.services import approvals as approvals_svc
 from backend.tests.conftest import actor_of, ctx_for, login, make_user, run_worker_once
 
@@ -269,3 +271,118 @@ async def test_me_update_prefs(db, client, mechanic):
     assert (await client.patch("/api/me/prefs", json={"unknown_field": 1})).status_code == 422
     r = await client.get("/api/me")
     assert r.json()["prefs"]["timezone"] == "Asia/Tokyo" and r.json()["role"] == "mechanic"
+
+
+# ── invitation links: issued once, never at rest ─────────────────────────────
+async def test_invite_link_is_issued_once_and_never_persisted(db, client, owner):
+    login(client, owner)
+    key = "invite-idem-" + owner.id[:6]
+    body = {"display_name": "Link Once", "email": "linkonce@example.com", "role": "mechanic"}
+    # the frontend sends Idempotency-Key on every POST command: the token must not land in the command log
+    r = await client.post("/api/team/invite", json=body, headers={"Idempotency-Key": key})
+    assert r.status_code == 200, r.text
+    d = r.json()["data"]
+    tok = d["token"]
+    assert d["created"] and d["link_issued"] and tok and d["accept_path"] == f"/invite/{tok}"
+    assert await db.scalar(select(func.count()).select_from(CommandLog).where(CommandLog.request_id == key)) == 0
+    inv = await db.get(Invitation, d["invitation"]["id"])
+    assert inv.token_hash == hashlib.sha256(tok.encode()).hexdigest()
+    acts = (await db.execute(select(ActivityEntry).where(ActivityEntry.entity_id == inv.id))).scalars().all()
+    assert acts and all(tok not in json.dumps(a.details) and tok not in a.what for a in acts)
+    # a retry never mints a second token or a second row
+    r2 = await client.post("/api/team/invite", json=body, headers={"Idempotency-Key": key})
+    assert r2.status_code == 200 and r2.json()["data"]["created"] is False and r2.json()["data"]["token"] is None
+    assert await db.scalar(select(func.count()).select_from(Invitation).where(Invitation.email == "linkonce@example.com")) == 1
+    # reissue rotates the hash: the old link dies, the new one is returned exactly once, nothing at rest
+    assert (await client.get(f"/auth/invitation/{tok}")).status_code == 200
+    r3 = await client.post(f"/api/team/invitations/{inv.id}/reissue", json={"expected_version": d["invitation"]["version"]},
+                           headers={"Idempotency-Key": key + "-reissue"})
+    assert r3.status_code == 200, r3.text
+    tok2 = r3.json()["data"]["token"]
+    assert tok2 and tok2 != tok and r3.json()["data"]["link_issued"] is True
+    assert (await client.get(f"/auth/invitation/{tok}")).status_code == 404
+    assert (await client.get(f"/auth/invitation/{tok2}")).status_code == 200
+    assert await db.scalar(select(func.count()).select_from(CommandLog).where(CommandLog.request_id == key + "-reissue")) == 0
+    await db.refresh(inv)
+    assert inv.token_hash == hashlib.sha256(tok2.encode()).hexdigest() and inv.version == d["invitation"]["version"] + 1
+    assert "token" not in r3.json()["data"]["invitation"] and "token_hash" not in r3.json()["data"]["invitation"]
+
+
+async def test_agent_proposed_invitation_needs_owner_approval_and_leaks_no_link(db, client, owner):
+    # the AI Manager acting for Dylan proposes an invitation: owner-only -> exact approval, nothing created yet
+    res = await dispatch(ctx_for(db, owner, kind="agent"), "team.invite", {"display_name": "Proposed", "email": "proposed@example.com", "role": "mechanic"})
+    assert res.status == "needs_review" and res.approval_id
+    assert await db.scalar(select(func.count()).select_from(Invitation).where(Invitation.email == "proposed@example.com")) == 0
+    ok = await dispatch(ctx_for(db, owner), "approvals.approve", {"approval_id": res.approval_id, "expected_version": 1})
+    assert ok.status == "ok"
+    data = ok.data["result"]["data"]
+    assert data["created"] is True and data["link_issued"] is False and data["token"] is None and data["accept_path"] is None
+    inv = await db.get(Invitation, data["invitation"]["id"])
+    assert inv.status == "pending"
+    a = await db.get(Approval, res.approval_id)
+    await db.refresh(a)
+    assert a.status == "confirmed" and a.result["token"] is None and a.result["accept_path"] is None
+    login(client, owner)
+    r = await client.get(f"/api/approvals/{a.id}")
+    assert r.status_code == 200 and r.json()["result"]["token"] is None and r.json()["result"]["accept_path"] is None
+    # the owner issues the link directly, once
+    r = await client.post(f"/api/team/invitations/{inv.id}/reissue", json={})
+    assert r.status_code == 200, r.text
+    tok = r.json()["data"]["token"]
+    assert tok and (await client.get(f"/auth/invitation/{tok}")).status_code == 200
+    # an agent cannot obtain a link even through an approval: the approval execution is refused with a reason
+    res2 = await dispatch(ctx_for(db, owner, kind="agent"), "team.reissue_invitation", {"invitation_id": inv.id})
+    assert res2.status == "needs_review"
+    with pytest.raises(Blocked) as ei:
+        await dispatch(ctx_for(db, owner), "approvals.approve", {"approval_id": res2.approval_id, "expected_version": 1})
+    assert "signed-in owner" in str(ei.value)
+    await db.rollback()
+    a2 = await db.get(Approval, res2.approval_id)
+    await db.refresh(a2)
+    await db.refresh(inv)
+    assert a2.status == "pending" and inv.token_hash == hashlib.sha256(tok.encode()).hexdigest()
+    assert (await client.get(f"/auth/invitation/{tok}")).status_code == 200
+
+
+# ── owner-only matrix ────────────────────────────────────────────────────────
+async def test_owner_only_commands_refuse_every_non_owner_actor(db, owner, manager, mechanic):
+    cases = [("team.invite", {"display_name": "M", "email": "m-matrix@example.com", "role": "mechanic"}),
+             ("team.grant", {"user_id": mechanic.id, "perm": "costs.read"}),
+             ("team.update_person", {"user_id": mechanic.id, "scope": "all"}),
+             ("team.disable_person", {"user_id": mechanic.id}),
+             ("team.revoke_invitation", {"invitation_id": "none"}),
+             ("settings.update", {"key": "intake", "value": {"require_condition_note": False}}),
+             ("settings.pause", {"key": "global", "paused": True}),
+             ("settings.gate_rule_upsert", {"to_state": "in_recon", "requirement": "docs_complete"})]
+    # an MCP/HTTP client acting for the owner with broad scopes: owner-only keys have no client scope at all
+    ext = Actor(kind="external", user_id=owner.id, role="owner", scope="all", perms=actor_of(owner).perms, client_id="mcp-1",
+                client_scopes=["read:vehicles", "write:tasks", "read:costs", "write:contacts"])
+    for name, payload in cases:
+        for c in (ctx_for(db, manager), ctx_for(db, mechanic), ctx_for(db, manager, kind="agent"), ctx_for(db, mechanic, kind="agent"),
+                  CommandContext(db=db, actor=ext, correlation_id="matrix")):
+            with pytest.raises(Denied):
+                await dispatch(c, name, payload)
+        # the owner's AI Manager may propose but never execute: exact owner approval, no change yet
+        res = await dispatch(ctx_for(db, owner, kind="agent"), name, payload)
+        assert res.status == "needs_review" and res.approval_id, name
+    await db.refresh(mechanic)
+    assert mechanic.scope == "assigned" and mechanic.status == "active" and not (mechanic.perms or {})
+    assert await db.scalar(select(func.count()).select_from(Invitation).where(Invitation.email == "m-matrix@example.com")) == 0
+    ctrl = await db.get(WorkflowControl, "global")
+    assert ctrl is None or not ctrl.paused
+    from backend.app.services import settings_store
+    assert (await settings_store.get_effective(db, "intake"))["require_condition_note"] is True
+
+
+async def test_person_detail_hides_existence_outside_scope(db, client, owner, manager, mechanic):
+    login(client, mechanic)
+    assert (await client.get(f"/api/team/{owner.id}")).status_code == 403
+    assert (await client.get("/api/team/no-such-person")).status_code == 403
+    login(client, manager)
+    assert (await client.get(f"/api/team/{owner.id}")).status_code == 404  # out of scope reads as absent
+    assert (await client.get("/api/team/no-such-person")).status_code == 404
+    r = await client.get(f"/api/team/{manager.id}")
+    assert r.status_code == 200 and "perms" not in r.json() and "grants" not in r.json()
+    login(client, owner)
+    r = await client.get(f"/api/team/{mechanic.id}")
+    assert r.status_code == 200 and r.json()["perms"]["costs.read"] is False

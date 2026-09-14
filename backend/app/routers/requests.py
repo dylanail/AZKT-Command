@@ -14,7 +14,7 @@ from ..auth.deps import command_context, require
 from ..core.errors import NotFound, ValidationFailed
 from ..core.time import PHOENIX
 from ..db import get_db
-from ..domain.access import can_see_costs, sanitize_money, visible_vehicle_ids
+from ..domain.access import can_see_costs, can_see_finance_status, sanitize_money, visible_vehicle_ids
 from ..domain.actors import Actor
 from ..domain.commands import CommandContext, dispatch
 from ..models.contacts import Contact
@@ -23,13 +23,14 @@ from ..models.sourcing import IR_LIFECYCLE, Bid, Candidate, CandidateMatch, Impo
 from ..models.tasks import Task
 from ..models.vehicles import Vehicle
 from ..services import requirements as reqs
-from ..services.sourcing import (OPEN_STATUSES, gate_decision, serialize_bid, serialize_candidate, serialize_match,
-                                 serialize_request, serialize_translation)
+from ..services.sourcing import (OPEN_STATUSES, serialize_bid, serialize_candidate, serialize_match, serialize_request,
+                                 serialize_translation)
 
 router = APIRouter(prefix="/api/import-requests", tags=["import-requests"])
 
 MONEY_KEYS = ("budget_amount", "budget_currency")
-BID_MONEY_KEYS = ("max_amount", "fx_estimate", "packet")
+BID_MONEY_KEYS = ("max_amount", "fx_estimate", "packet", "result", "result_evidence")  # winning price is cost detail too
+AMOUNT_KEYS = ("amount", "currency", "remaining", "overpaid", "required", "received")
 COMMANDS = {
     "update": "import_requests.update", "revise-requirements": "import_requests.revise_requirements",
     "attach-opportunity": "import_requests.attach_opportunity", "set-agreement": "import_requests.set_agreement",
@@ -62,16 +63,36 @@ def _normalize(payload: dict) -> dict:
     return out
 
 
+def _strip_amounts(obj):
+    """Blank amount-like keys inside evidence dicts (recursively) while keeping ids, sources and statuses."""
+    if isinstance(obj, dict):
+        return {k: (None if k in AMOUNT_KEYS else _strip_amounts(v)) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_strip_amounts(x) for x in obj]
+    return obj
+
+
 def _request_view(actor: Actor, r: ImportRequest) -> dict:
-    return sanitize_money(actor, serialize_request(r), MONEY_KEYS)
+    """Budget and purchase price obey costs.read; the deposit amounts are finance status (finance.status or costs.read).
+    Statuses, evidence references and the gate decision stay visible to everyone with requests.read."""
+    d = serialize_request(r)
+    if not can_see_costs(actor):
+        d = sanitize_money(actor, d, MONEY_KEYS)
+        d["purchase_evidence"] = _strip_amounts(d["purchase_evidence"])
+    if not can_see_finance_status(actor):
+        d["deposit_rule"] = _strip_amounts(d["deposit_rule"])
+        d["deposit_evidence"] = _strip_amounts(d["deposit_evidence"])
+        gate = d["active_search_gate"]
+        gate["gates"] = [({**g, "reason": (f"Deposit {g['status']}" if not g["ok"] and g["status"] != "unset" else g["reason"])}
+                          if g["key"] == "deposit" else g) for g in gate["gates"]]
+        gate["reasons"] = [g["reason"] for g in gate["gates"] if not g["ok"]]
+        d["money_hidden"] = True
+    return d
 
 
 def _bid_view(actor: Actor, b: Bid) -> dict:
     d = serialize_bid(b)
-    if not can_see_costs(actor):
-        d = sanitize_money(actor, d, BID_MONEY_KEYS)
-        d["deadline_at"] = serialize_bid(b)["deadline_at"]  # deadline stays visible; only money is hidden
-    return d
+    return d if can_see_costs(actor) else sanitize_money(actor, d, BID_MONEY_KEYS)  # deadline/identity stay visible
 
 
 async def _scope_clause(db: AsyncSession, actor: Actor):
@@ -195,7 +216,7 @@ async def get_request(request_id: str, actor: Actor = Depends(require("requests.
                            "converted_id": o.converted_id, "deposit_confirmed_at": o.deposit_confirmed_at.isoformat() if o.deposit_confirmed_at else None}
     d = _request_view(actor, r)
     d["requirement_tiers"] = reqs.tiers(r.requirements or [])
-    d["gates"] = gate_decision(r)
+    d["gates"] = d["active_search_gate"]  # same structured decision, already money-sanitized for this actor
     return {
         "request": d, "contact": _contact_brief(contact), "purchased_vehicle": _vehicle_brief(vehicle), "opportunity": opportunity,
         "candidates": candidates, "candidate_ranking": reqs.rank([c for c in candidates if not c["mandatory_fail"]]),

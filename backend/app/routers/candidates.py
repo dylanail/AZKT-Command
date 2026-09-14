@@ -7,14 +7,14 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..auth.deps import command_context, require
 from ..core.errors import NotFound, ValidationFailed
 from ..core.time import TOKYO
 from ..db import get_db
-from ..domain.access import can_see_costs, sanitize_money
+from ..domain.access import can_see_costs, sanitize_money, visible_vehicle_ids
 from ..domain.actors import Actor
 from ..domain.commands import CommandContext, dispatch
 from ..models.runtime import Approval, ExternalAction
@@ -23,7 +23,7 @@ from ..services.sourcing import bid_gate, serialize_bid, serialize_candidate, se
 
 router = APIRouter(prefix="/api/candidates", tags=["candidates"])
 
-BID_MONEY_KEYS = ("max_amount", "fx_estimate", "packet")
+BID_MONEY_KEYS = ("max_amount", "fx_estimate", "packet", "result", "result_evidence")  # winning price is cost detail too
 MATCH_COMMANDS = {"pass": "candidates.pass", "interest": "candidates.record_interest",
                   "prepare-buyer-message": "candidates.prepare_buyer_message", "mark-sent": "candidates.mark_buyer_message_sent"}
 TRANSLATION_COMMANDS = {"detected": "translations.record_detected", "complete": "translations.mark_complete",
@@ -57,18 +57,39 @@ def _normalize(payload: dict) -> dict:
 def _bid_view(actor: Actor, b: Bid, gate: list[str] | None = None) -> dict:
     d = serialize_bid(b)
     if not can_see_costs(actor):
-        d = sanitize_money(actor, d, BID_MONEY_KEYS)
-        d["deadline_at"] = serialize_bid(b)["deadline_at"]
+        d = sanitize_money(actor, d, BID_MONEY_KEYS)  # deadline/identity stay visible
     if gate is not None:
         d["gate"] = {"decision": "Blocked" if gate else "Allowed", "reasons": gate}
     return d
 
 
-async def _load(db: AsyncSession, candidate_id: str) -> Candidate:
-    c = await db.get(Candidate, candidate_id)
+async def _scope(db: AsyncSession, actor: Actor) -> tuple[set[str] | None, set[str]]:
+    """Record scope for a scope=assigned person / record-limited client: (visible vehicle ids or None, visible request ids).
+    Such an actor only sees candidates tied to a visible purchased vehicle or matched to a request whose purchase is visible."""
+    limit = await visible_vehicle_ids(db, actor)
+    if limit is None:
+        return None, set()
+    rids = {r for (r,) in (await db.execute(select(ImportRequest.id).where(ImportRequest.purchased_vehicle_id.in_(list(limit))))).all()} if limit else set()
+    return limit, rids
+
+
+def _scope_clause(limit: set[str] | None, rids: set[str]):
+    if limit is None:
+        return None
+    return or_(Candidate.vehicle_id.in_(list(limit)),
+               Candidate.id.in_(select(CandidateMatch.candidate_id).where(CandidateMatch.import_request_id.in_(list(rids)))))
+
+
+async def _load(db: AsyncSession, actor: Actor, candidate_id: str) -> tuple[Candidate, set[str] | None, set[str]]:
+    limit, rids = await _scope(db, actor)
+    clauses = [Candidate.id == candidate_id]
+    sc = _scope_clause(limit, rids)
+    if sc is not None:
+        clauses.append(sc)
+    c = (await db.execute(select(Candidate).where(*clauses))).scalar_one_or_none()
     if c is None:
         raise NotFound("candidate not found")
-    return c
+    return c, limit, rids
 
 
 @router.get("")
@@ -76,6 +97,9 @@ async def list_candidates(status: str | None = None, request_id: str | None = No
                           lot_no: str | None = None, limit: int = Query(100, ge=1, le=500), offset: int = Query(0, ge=0),
                           actor: Actor = Depends(require("requests.read")), db: AsyncSession = Depends(get_db)):
     clauses: list = []
+    sc = _scope_clause(*(await _scope(db, actor)))
+    if sc is not None:
+        clauses.append(sc)
     if status:
         clauses.append(Candidate.status == status)
     if auction_house:
@@ -106,8 +130,10 @@ async def list_candidates(status: str | None = None, request_id: str | None = No
 
 @router.get("/{candidate_id}")
 async def get_candidate(candidate_id: str, actor: Actor = Depends(require("requests.read")), db: AsyncSession = Depends(get_db)):
-    c = await _load(db, candidate_id)
+    c, limit_ids, visible_rids = await _load(db, actor, candidate_id)
     matches = (await db.execute(select(CandidateMatch).where(CandidateMatch.candidate_id == c.id).order_by(CandidateMatch.created_at))).scalars().all()
+    if limit_ids is not None:  # a record-limited actor sees only the matches of requests within their scope
+        matches = [m for m in matches if m.import_request_id in visible_rids]
     rids = {m.import_request_id for m in matches}
     reqs_by_id = {r.id: r for r in (await db.execute(select(ImportRequest).where(ImportRequest.id.in_(rids)))).scalars().all()} if rids else {}
     translations = (await db.execute(select(Translation).where(Translation.candidate_id == c.id).order_by(Translation.created_at))).scalars().all()
@@ -128,8 +154,7 @@ async def get_candidate(candidate_id: str, actor: Actor = Depends(require("reque
         row["decision"] = "Blocked" if m.mandatory_fail else ("Needs review" if (m.mandatory_unknown or m.stale) else "Allowed")
         checks.append(row)
     bid_views = []
-    from ..domain.commands import CommandContext as _Ctx
-    ctx = _Ctx(db=db, actor=actor)
+    ctx = CommandContext(db=db, actor=actor)  # read-only context for the gate evaluation
     for b in bids:
         gate = await bid_gate(ctx, b) if b.status in ("draft", "pending_approval", "approved") else None
         bid_views.append(_bid_view(actor, b, gate))

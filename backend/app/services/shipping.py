@@ -20,7 +20,7 @@ from decimal import Decimal
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 
-from ..core.errors import Blocked, Conflict, DomainError, NotFound, Unsupported, ValidationFailed
+from ..core.errors import Blocked, Conflict, Denied, DomainError, NotFound, Unsupported, ValidationFailed
 from ..core.ids import stable_hash
 from ..core.money import parse_amount, quantize
 from ..core.time import PHOENIX, TOKYO, ensure_aware, fmt_local
@@ -41,6 +41,8 @@ VEHICLE_MILESTONE_MAP = {"vessel_departed": "on_vessel", "vessel_arrival": "arri
                          "release": "released", "carrier_booked": None, "pickup": None, "received": "received"}
 QUOTE_FOLLOWUP_DAYS = 2
 COMPARISON_WINDOW_DAYS = 180
+# progress statuses come only from sourced milestones (shipments.record_milestone); never set by hand
+MILESTONE_DERIVED_STATUSES = ("in_transit", "at_port", "released", "domestic", "received")
 VENDOR_EMAIL_SENDER = None   # adapter hook: async fn(payload: dict, action) -> receipt. None = no vendor email adapter.
 
 
@@ -196,9 +198,10 @@ async def bridge_vehicle_milestone(ctx: CommandContext, *, vehicle_id: str, kind
         try:
             res = await dispatch(ctx.child(), "vehicles.record_milestone", payload, commit=False)
             return {"bridged": True, "result": res.data}
-        except ValidationFailed as e:
-            ctx.record(f"Vehicle milestone not bridged (contract mismatch): {e.message}", entity_kind="vehicle", entity_id=vehicle_id,
-                       kind="system", state="unbridged", exception=True, details=e.detail)
+        except (ValidationFailed, Blocked, Denied) as e:
+            # the shipment fact stands; the vehicle timeline refused it (no sourced time, future date, record scope ...)
+            ctx.record(f"Vehicle milestone not bridged: {e.message}", entity_kind="vehicle", entity_id=vehicle_id,
+                       kind="system", state="unbridged", exception=True, details={**e.detail, "reason": e.code})
     ctx.emit("milestone.changed", aggregate_type="vehicle", aggregate_id=vehicle_id, payload={**payload, "origin": "shipment"})
     return {"bridged": False, "reason": "vehicles.record_milestone not available; milestone.changed emitted"}
 
@@ -272,7 +275,14 @@ async def shipments_update(ctx: CommandContext, inp: ShipmentUpdateIn) -> dict:
     if inp.status is not None:
         if inp.status not in SHIPMENT_STATUSES:
             raise ValidationFailed(f"status must be one of {SHIPMENT_STATUSES}")
+        if inp.status in MILESTONE_DERIVED_STATUSES:
+            raise Blocked(f"status {inp.status} is derived from a sourced milestone; record the milestone instead of setting progress by hand",
+                          allowed=[x for x in SHIPMENT_STATUSES if x not in MILESTONE_DERIVED_STATUSES])
+        if inp.status == "exception" and not (inp.exception_summary or s.exception_summary):
+            raise Blocked("an exception needs an exception_summary saying what is wrong")
         s.status = inp.status
+        if inp.status != "exception" and inp.exception_summary is None:
+            s.exception_summary = None
     if inp.add_vehicle_ids or inp.remove_vehicle_ids:
         add = await _check_vehicles(ctx, inp.add_vehicle_ids)
         ids = [v for v in (s.vehicle_ids or []) if v not in set(inp.remove_vehicle_ids)]
@@ -673,9 +683,7 @@ async def quotes_start_case(ctx: CommandContext, inp: QuoteStartIn) -> dict:
     return {"quote": serialize_quote(q), "created": True, "case_id": q.case_id, "needs_information": needs}
 
 
-def shared_payload(q: ShipmentQuote, fields: list[str]) -> dict:
-    """Exactly the data that will leave the business, from recorded facts only."""
-    facts = dict(q.request_payload or {})
+def _shared_from(facts: dict, fields: list[str]) -> dict:
     out: dict = {}
     for f in fields:
         if f in facts and facts[f] not in (None, {}, "unknown"):
@@ -683,11 +691,43 @@ def shared_payload(q: ShipmentQuote, fields: list[str]) -> dict:
     return out
 
 
+def shared_payload(q: ShipmentQuote, fields: list[str]) -> dict:
+    """Exactly the data that will leave the business, from the case's recorded facts only."""
+    return _shared_from(dict(q.request_payload or {}), fields)
+
+
+async def refresh_quote_facts(db, q: ShipmentQuote) -> tuple[dict, list[dict]]:
+    """Re-gather the case facts from the records as they are now (vehicle, buyer, dimensions, operability); route and
+    timing stay as recorded on the case. Nothing is written here."""
+    vehicle = await db.get(Vehicle, q.vehicle_id) if q.vehicle_id else None
+    shipment = await db.get(Shipment, q.shipment_id) if q.shipment_id else None
+    return await gather_quote_facts(db, vehicle=vehicle, shipment=shipment, destination=q.route_to, origin=q.route_from,
+                                    timing=dict(q.timing_window or {}) or None)
+
+
+def _jsonable(obj):
+    import json
+    return json.loads(json.dumps(obj, default=str))
+
+
+async def preview_quote_request(db, quote_id: str, fields: list[str]) -> dict:
+    """The exact data a quote request would share right now (read-only; used to bind the approval to it)."""
+    q = await db.get(ShipmentQuote, quote_id)
+    if q is None:
+        raise NotFound("quote not found")
+    facts, _ = await refresh_quote_facts(db, q)
+    return _jsonable(_shared_from(facts, fields))
+
+
+DEFAULT_QUOTE_FIELDS = ("vehicle", "dimensions", "operability", "route_from", "route_to", "timing")
+
+
 class QuoteRequestIn(BaseModel):
     quote_id: str
     recipients: list[str] = Field(min_length=1)
     channel: str = "email"                # email | web_form | manual
-    fields: list[str] = Field(default_factory=lambda: ["vehicle", "dimensions", "operability", "route_from", "route_to", "timing"])
+    fields: list[str] = Field(default_factory=lambda: list(DEFAULT_QUOTE_FIELDS))
+    data: dict | None = None              # the exact data reviewed (preview_quote_request); the approval binds it
     message: str | None = None
     binding: str = "nonbinding"
     follow_up_days: int = Field(default=QUOTE_FOLLOWUP_DAYS, ge=1, le=30)
@@ -699,6 +739,7 @@ def _quote_summary(p: QuoteRequestIn) -> str:
 
 def _quote_consequence(p: QuoteRequestIn) -> dict:
     return {"scope": "vendor quote request", "moves_money": False, "fields_shared": list(p.fields),
+            "data_shared": p.data, "message": p.message,
             "targets": {"recipients": list(p.recipients), "channel": p.channel}}
 
 
@@ -717,6 +758,8 @@ async def standing_field_scope_violation(db, inp: QuoteRequestIn) -> list[str]:
 
 
 async def quote_request_revalidate(ctx: CommandContext, inp: QuoteRequestIn, approval) -> list[str]:
+    """Immediately before execution: the quote is still requestable, the recipients/fields are the reviewed ones and the
+    recorded facts behind the shared data are still what the reviewer saw (spec §11.4)."""
     q = (await ctx.db.execute(select(ShipmentQuote).where(ShipmentQuote.id == inp.quote_id))).scalar_one_or_none()
     if q is None:
         return ["quote no longer exists"]
@@ -728,15 +771,15 @@ async def quote_request_revalidate(ctx: CommandContext, inp: QuoteRequestIn, app
         reasons.append("fields to share changed — review again")
     if sorted(r.lower() for r in (bound.get("recipients") or [])) != sorted(r.lower() for r in inp.recipients):
         reasons.append("recipients changed — review again")
-    payload = shared_payload(q, inp.fields)
+    fresh, _ = await refresh_quote_facts(ctx.db, q)
+    payload = _jsonable(_shared_from(fresh, inp.fields))
     missing = [f for f in inp.fields if f not in payload]
     if missing:
         reasons.append("data to share is no longer recorded: " + ", ".join(missing))
-    facts_hash = stable_hash({"payload": payload, "recipients": sorted(r.lower() for r in inp.recipients), "channel": inp.channel,
-                              "message": inp.message or ""})
-    bound_hash = (q.extra or {}).get("approval_scope_hashes", {}).get(approval.id)
-    if bound_hash and bound_hash != facts_hash:
-        reasons.append("recorded facts changed since this scope was reviewed — review again")
+    reviewed = _jsonable(inp.data) if inp.data is not None else _jsonable(shared_payload(q, inp.fields))
+    drift = [f for f in inp.fields if reviewed.get(f) != payload.get(f)]
+    if drift:
+        reasons.append("recorded facts changed since this scope was reviewed (" + ", ".join(drift) + ") — review again")
     return reasons
 
 
@@ -751,11 +794,24 @@ async def quotes_request(ctx: CommandContext, inp: QuoteRequestIn) -> dict:
         raise Blocked(f"quote is {q.status}")
     if inp.channel not in ("email", "web_form", "manual"):
         raise ValidationFailed("channel must be email|web_form|manual")
-    payload = shared_payload(q, inp.fields)
+    # the data shared is always the recorded facts as they are now; the case snapshot is refreshed from the records
+    facts, needs = await refresh_quote_facts(ctx.db, q)
+    if _jsonable(facts) != _jsonable(q.request_payload or {}):
+        q.request_payload, q.needs_information = facts, needs
+        q.dimensions = {k: v["value"] for k, v in (facts.get("dimensions") or {}).items()}
+        q.operability, q.size_class = facts.get("operability", "unknown"), (facts.get("vehicle") or {}).get("size_class", "unknown")
+        q.buyer_contact_id = (facts.get("buyer") or {}).get("contact_id") or q.buyer_contact_id
+        ctx.record("Quote case facts refreshed from records", entity_kind="shipment_quote", entity_id=q.id, kind="fact", state=q.status,
+                   details={"needs_information": needs})
+    payload = _jsonable(_shared_from(facts, inp.fields))
     missing = [f for f in inp.fields if f not in payload]
     if missing:
         raise Blocked("cannot share data that is not recorded; collect it first (no invented values)", missing=missing,
                       needs_information=list(q.needs_information or []))
+    if inp.data is not None and _jsonable(inp.data) != payload:
+        # the reviewer saw different data than the records hold now: exact approval binds content, never a substitute
+        raise Blocked("the reviewed data no longer matches the recorded facts — review again",
+                      reviewed=_jsonable(inp.data), recorded=payload, decision="Needs review")
     if ctx.approval is None and ctx.actor.kind != "system":
         outside = await standing_field_scope_violation(ctx.db, inp)
         if outside:
@@ -767,8 +823,8 @@ async def quotes_request(ctx: CommandContext, inp: QuoteRequestIn) -> dict:
                                                       "at": ctx.now.isoformat()}}
     payload_hash = stable_hash({"payload": payload, "recipients": sorted(r.lower() for r in inp.recipients), "channel": inp.channel,
                                 "message": inp.message or ""})
-    if q.request_payload_hash == payload_hash and q.status == "requested" and q.request_action_id:
-        prior = await ctx.db.get(ExternalAction, q.request_action_id)
+    prior = await ctx.db.get(ExternalAction, q.request_action_id) if q.request_action_id else None
+    if q.request_payload_hash == payload_hash and q.status == "requested" and prior is not None and prior.state != "cancelled":
         return {"quote": serialize_quote(q, prior), "external_action_id": q.request_action_id, "shared": payload, "sent": False,
                 "idempotent": True}
     act = await approvals_svc.intend_external_action(
@@ -776,6 +832,9 @@ async def quotes_request(ctx: CommandContext, inp: QuoteRequestIn) -> dict:
         dedupe_key=f"quote_request:{q.id}:{payload_hash}",
         payload={"quote_id": q.id, "recipients": list(inp.recipients), "channel": inp.channel, "data": payload, "message": inp.message,
                  "binding": inp.binding, "vendor_name": q.vendor_name})
+    if prior is not None and prior.id != act.id and prior.state == "intent":
+        # the re-scoped request replaces a request that has not left yet: never two sends for one logical request
+        await _cancel_superseded_intent(ctx, prior, reason=f"superseded by re-scoped quote request {act.id[:8]}")
     q.status, q.requested_at = "requested", ctx.now
     q.recipients, q.channel, q.binding = list(inp.recipients), inp.channel, inp.binding
     q.request_payload_hash, q.request_action_id = payload_hash, act.id
@@ -794,6 +853,14 @@ async def quotes_request(ctx: CommandContext, inp: QuoteRequestIn) -> dict:
     return {"quote": serialize_quote(q, act), "external_action_id": act.id, "shared": payload, "sent": False}
 
 
+async def _cancel_superseded_intent(ctx: CommandContext, prior: ExternalAction, *, reason: str) -> None:
+    if prior.approval_id:
+        await approvals_svc.invalidate(ctx.child(), approvals_svc.ApprovalRef(approval_id=prior.approval_id, reason=reason))
+    prior.state, prior.error = "cancelled", reason
+    ctx.record(f"Queued quote request cancelled: {reason}", entity_kind="shipment_quote", entity_id=prior.entity_id, kind="automation",
+               state="cancelled", details={"external_action_id": prior.id})
+
+
 async def _manual_send_task(db, act: ExternalAction, *, title: str, recipients: list[str], content: str) -> dict:
     """No email adapter: the exact content becomes a manual sending task (deduped per action). The receipt records
     that nothing was sent; it never claims delivery."""
@@ -807,7 +874,7 @@ async def _manual_send_task(db, act: ExternalAction, *, title: str, recipients: 
         "notes": "No email adapter is connected. Send this exact content to " + ", ".join(recipients) +
                  " and attach the confirmation; the system has not sent anything.",
         "evidence_required": [{"kind": "note", "label": "Confirmation the message was sent", "min": 1}],
-        "source_kind": "shipping", "source_id": act.id, "dedupe": True}, commit=False)
+        "source_kind": "shipping", "source_id": act.id, "dedupe": False}, commit=False)  # one task per fenced action, exact content
     return {"provider": "email", "sent": False, "state": "manual_send_required", "recipients": recipients,
             "task_id": res.data["task"]["id"], "note": "No email adapter is connected; a manual sending task holds the exact content. "
                                                        "This receipt does not claim delivery."}

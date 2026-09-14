@@ -192,3 +192,28 @@ async def test_verify_and_reject_are_owner_only_via_policy(client, db, owner, ma
     assert row.status == "completed"
     r = await client.post(f"/api/tasks/{t['id']}/nonsense", json={})
     assert r.status_code == 404
+
+
+async def test_external_client_task_visibility_follows_its_vehicle_grant(db, owner):
+    """A record-limited external client (spec §10.8, invariant 14) sees only tasks on the vehicles in its grant:
+    never the owner's private follow-ups or another customer's call, even though they carry no vehicle."""
+    from backend.app.domain.actors import Actor
+    from backend.app.domain.policy import effective_perms
+    from backend.app.models.vehicles import Vehicle
+    from backend.app.routers.tasks import visibility_clauses
+    tag = _u()
+    v1, v2 = Vehicle(stock_no=f"STK-X1{tag[:4]}", title="in scope"), Vehicle(stock_no=f"STK-X2{tag[:4]}", title="out of scope")
+    db.add_all([v1, v2])
+    await db.commit()
+    for title, vid in ((f"Ext in {tag}", v1.id), (f"Ext out {tag}", v2.id), (f"Ext none {tag}", None)):
+        await dispatch(ctx_for(db, owner), "tasks.create", {"title": title, "vehicle_id": vid, "owner_user_id": owner.id, "dedupe": False})
+    client = Actor(kind="external", user_id=owner.id, role="owner", scope="all", perms=effective_perms("owner", {}),
+                   client_id=f"client-{tag}", client_name="partner", client_scopes=["read:tasks"],
+                   client_record_scope={"vehicle_ids": [v1.id]})
+    clauses = await visibility_clauses(db, client, "all")
+    rows = (await db.execute(select(Task).where(Task.title.ilike(f"%{tag}%"), *clauses))).scalars().all()
+    assert [t.title for t in rows] == [f"Ext in {tag}"]
+    unlimited = Actor(kind="external", user_id=owner.id, role="owner", scope="all", perms=effective_perms("owner", {}),
+                      client_id=f"client-all-{tag}", client_scopes=["read:tasks"])
+    rows = (await db.execute(select(Task).where(Task.title.ilike(f"%{tag}%"), *await visibility_clauses(db, unlimited, "all")))).scalars().all()
+    assert len(rows) == 3

@@ -161,7 +161,7 @@ async def test_H05_global_pause_blocks_agents_not_humans(db, client, owner):
 # ── A02 ──────────────────────────────────────────────────────────────────────
 async def test_A02_activity_visibility_and_record_scope(db, client, owner, manager, mechanic):
     # owner-visible (team) + finance-visible + all-visible entries
-    await dispatch(ctx_for(db, owner), "team.invite", {"display_name": "Vis Test", "email": "vis@example.com", "role": "mechanic"})
+    inv_id = (await dispatch(ctx_for(db, owner), "team.invite", {"display_name": "Vis Test", "email": "vis@example.com", "role": "mechanic"})).data["invitation"]["id"]
     await dispatch(ctx_for(db, owner), "acttest.finance_note", {"text": "paid vendor"})
     # a task assigned to the mechanic: its activity is on the mechanic's record scope
     t = await dispatch(ctx_for(db, owner), "tasks.create", {"title": "Rotate tires on the mechanic's truck", "owner_user_id": mechanic.id,
@@ -169,14 +169,18 @@ async def test_A02_activity_visibility_and_record_scope(db, client, owner, manag
     task_id = t.data["task"]["id"]
     fin_hidden = (await db.execute(select(ActivityEntry).where(ActivityEntry.what == "finance: paid vendor"))).scalars().first()
     fin_all = (await db.execute(select(ActivityEntry).where(ActivityEntry.what == "finance-all: paid vendor"))).scalars().first()
-    owner_entry = (await db.execute(select(ActivityEntry).where(ActivityEntry.visibility == "owner"))).scalars().first()
-    # owner sees everything, including money and receipts in detail only
+    owner_entry = (await db.execute(select(ActivityEntry).where(ActivityEntry.entity_kind == "invitation", ActivityEntry.entity_id == inv_id))).scalars().first()
+    assert owner_entry.visibility == "owner"
+    # owner sees everything, including money and receipts in detail only (targeted filters: the feed may hold
+    # thousands of rows from other work, and the page is capped at 500)
     login(client, owner)
-    r = await client.get("/api/activity?limit=500")
+    r = await client.get("/api/activity?entity_kind=cost_item&entity_id=ci-1&limit=500")
     assert r.status_code == 200
     ids = {e["id"] for e in r.json()["items"]}
-    assert {fin_hidden.id, fin_all.id, owner_entry.id} <= ids and r.json()["money_hidden"] is False
+    assert {fin_hidden.id, fin_all.id} <= ids and r.json()["money_hidden"] is False
     assert all("receipt" not in e and "sources" not in e for e in r.json()["items"])
+    r = await client.get(f"/api/activity?entity_kind=invitation&entity_id={inv_id}")
+    assert owner_entry.id in {e["id"] for e in r.json()["items"]}
     r = await client.get(f"/api/activity/{fin_hidden.id}")
     assert r.json()["details"]["amount"] == "1234.56" and r.json()["receipt"]["provider_ref"] == "sq-1" and r.json()["sources"]
     # mechanic: 200, but only entries on assigned tasks/vehicles or own actions; never owner/finance rows; no money
@@ -186,8 +190,11 @@ async def test_A02_activity_visibility_and_record_scope(db, client, owner, manag
     items = r.json()["items"]
     ids = {e["id"] for e in items}
     assert fin_hidden.id not in ids and owner_entry.id not in ids and fin_all.id not in ids
-    assert any(e["entity_kind"] == "task" and e["entity_id"] == task_id for e in items)
     assert all(e["visibility"] == "all" for e in items) and r.json()["scoped"] is True
+    for path in ("/api/activity?entity_kind=cost_item&entity_id=ci-1", f"/api/activity?entity_kind=invitation&entity_id={inv_id}"):
+        assert (await client.get(path)).json()["total"] == 0, path
+    r = await client.get(f"/api/activity?entity_kind=task&entity_id={task_id}")
+    assert r.json()["total"] >= 1 and all(e["entity_id"] == task_id for e in r.json()["items"])
     r = await client.get(f"/api/activity/{fin_hidden.id}")
     assert r.status_code == 404 and "1234" not in r.text
     r = await client.get(f"/api/activity/{fin_all.id}")
@@ -200,9 +207,10 @@ async def test_A02_activity_visibility_and_record_scope(db, client, owner, manag
         assert r.status_code == 403 and r.json() == {"detail": "not allowed"}, path
     # manager (activity.read, no costs.read): sees the all-visible finance row with money scrubbed, never the finance-visible one
     login(client, manager)
-    r = await client.get("/api/activity?limit=500")
+    r = await client.get("/api/activity?entity_kind=cost_item&entity_id=ci-1&limit=500")
     ids = {e["id"] for e in r.json()["items"]}
-    assert fin_all.id in ids and fin_hidden.id not in ids and owner_entry.id not in ids and r.json()["money_hidden"] is True
+    assert fin_all.id in ids and fin_hidden.id not in ids and r.json()["money_hidden"] is True
+    assert (await client.get(f"/api/activity?entity_kind=invitation&entity_id={inv_id}")).json()["total"] == 0
     r = await client.get(f"/api/activity/{fin_all.id}")
     assert r.status_code == 200
     d = r.json()
@@ -229,3 +237,55 @@ async def test_activity_filters(db, client, owner, mechanic):
     r = await client.get("/api/activity?kind=access")
     assert all(e["kind"] == "access" for e in r.json()["items"])
     assert (await client.get("/api/activity/does-not-exist")).status_code == 404
+
+
+async def test_activity_unknown_visibility_fails_closed_for_non_owners(db, client, owner, manager, mechanic):
+    """A visibility label this build does not know is owner-only, and list and detail agree."""
+    ctx = ctx_for(db, owner)
+    e = ctx.record("Labelled with a visibility this build does not know", entity_kind="vehicle", entity_id="v-unknown-vis",
+                   kind="system", visibility="internal", details={"note": "owner-only until classified"})
+    await db.commit()
+    login(client, owner)
+    r = await client.get("/api/activity?q=visibility this build&limit=500")
+    assert e.id in {x["id"] for x in r.json()["items"]}
+    assert (await client.get(f"/api/activity/{e.id}")).status_code == 200
+    for u in (manager, mechanic):
+        login(client, u)
+        r = await client.get("/api/activity?q=visibility this build&limit=500")
+        assert r.status_code == 200 and e.id not in {x["id"] for x in r.json()["items"]}
+        assert (await client.get(f"/api/activity/{e.id}")).status_code == 404
+
+
+async def test_activity_money_scrub_keeps_references(db, client, owner, manager):
+    from backend.app.routers.activity import scrub_money
+    out = scrub_money({"amount": "12.50", "cost_item_id": "ci-9", "payment_state": "paid", "fee_kind": "port",
+                       "nested": {"total_amount": "1", "vendor_name": "Acme"}, "items": [{"price": "3"}]})
+    assert out["amount"] is None and out["money_hidden"] is True
+    assert out["cost_item_id"] == "ci-9" and out["payment_state"] == "paid" and out["fee_kind"] == "port"
+    assert out["nested"]["total_amount"] is None and out["nested"]["vendor_name"] == "Acme" and out["items"][0]["price"] is None
+
+
+async def test_gate_rule_edit_cannot_collide_with_another_rule(db, client, owner):
+    login(client, owner)
+    made = []
+    try:
+        r1 = await client.post("/api/settings/gate-rules", json={"to_state": "finalization", "requirement": "docs_complete"})
+        r2 = await client.post("/api/settings/gate-rules", json={"to_state": "finalization", "requirement": "inspection_logged"})
+        assert r1.status_code == 200 and r2.status_code == 200, (r1.text, r2.text)
+        made = [r1.json()["data"]["rule"], r2.json()["data"]["rule"]]
+        r3 = await client.post("/api/settings/gate-rules", json={"rule_id": made[1]["id"], "to_state": "finalization", "requirement": "docs_complete"})
+        assert r3.status_code == 409 and r3.json()["error"] == "conflict" and r3.json()["rule_id"] == made[0]["id"]
+        rows = (await db.execute(select(ShopGateRule).where(ShopGateRule.to_state == "finalization", ShopGateRule.requirement == "docs_complete"))).scalars().all()
+        assert len(rows) == 1
+        # the same upsert repeated (no rule_id) updates in place rather than adding a row
+        r4 = await client.post("/api/settings/gate-rules", json={"to_state": "finalization", "requirement": "docs_complete", "label": "Documents complete"})
+        assert r4.status_code == 200 and r4.json()["data"]["created"] is False
+        rows = (await db.execute(select(ShopGateRule).where(ShopGateRule.to_state == "finalization", ShopGateRule.requirement == "docs_complete")
+                                 .execution_options(populate_existing=True))).scalars().all()
+        assert len(rows) == 1 and rows[0].label == "Documents complete"
+    finally:
+        # leave finalization ungated for the rest of the suite
+        for rule in made:
+            await client.post(f"/api/settings/gate-rules/{rule['id']}/deactivate", json={})
+    db.expire_all()  # the app committed through its own session; drop this session's cached rows
+    assert not [x for x in await settings_store.effective_gate_rules(db, "finalization") if x["active"]]

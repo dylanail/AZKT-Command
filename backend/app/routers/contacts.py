@@ -79,7 +79,7 @@ async def resolve(email: str | None = None, phone: str | None = None, name: str 
 
 @router.get("/{contact_id}")
 async def get_contact(contact_id: str, actor: Actor = Depends(require("contacts.read")), db: AsyncSession = Depends(get_db)):
-    from ..routers.tasks import task_view
+    from ..routers.tasks import task_view, visibility_clauses
     c = await db.get(Contact, contact_id)
     if c is None:
         raise NotFound("contact not found")
@@ -89,8 +89,8 @@ async def get_contact(contact_id: str, actor: Actor = Depends(require("contacts.
     opps = (await db.execute(select(Opportunity).where(Opportunity.contact_id == c.id).order_by(Opportunity.created_at.desc()))).scalars().all()
     opportunities = []
     for o in opps:
-        if limit is not None and o.vehicle_id and o.vehicle_id not in limit:
-            continue
+        if limit is not None and o.vehicle_id not in limit:
+            continue   # record-limited actors see only leads on their visible vehicles (IRQ leads have none)
         d = sanitize_money(actor, serialize_opportunity(o), MONEY_KEYS)
         d["stage_label"] = STAGE_LABELS.get(o.stage, o.stage)
         opportunities.append(d)
@@ -107,9 +107,8 @@ async def get_contact(contact_id: str, actor: Actor = Depends(require("contacts.
         vq = vq.where(Vehicle.id.in_(list(limit)))
     vehicles = [{"id": v.id, "title": vehicle_title(v), "stock_no": v.stock_no, "commercial_state": v.commercial_state,
                  "allocation": v.allocation} for v in (await db.execute(vq)).scalars().all()]
-    tq = select(Task).where(Task.contact_id == c.id)
-    if actor.scope == "assigned" and actor.role != "owner":
-        tq = tq.where(Task.owner_user_id == actor.user_id)
+    # the same task visibility rule as /api/tasks (own / reports / unassigned / client record scope)
+    tq = select(Task).where(Task.contact_id == c.id, *await visibility_clauses(db, actor, "all"))
     tasks = [task_view(t, now=now) for t in (await db.execute(tq.order_by(Task.due_at.asc().nulls_last()))).scalars().all()]
     promises = [{"id": p.id, "text": p.text, "status": p.status, "due_at": p.due_at.isoformat() if p.due_at else None,
                  "made_at": p.made_at.isoformat() if p.made_at else None, "made_by": p.made_by, "vehicle_id": p.vehicle_id,

@@ -13,7 +13,7 @@ the exact content — never an inline send, never a claimed receipt.
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from decimal import Decimal
 
 from pydantic import BaseModel, Field
@@ -120,7 +120,7 @@ def serialize_candidate(c: Candidate) -> dict:
         "id": c.id, "version": c.version, "provider": c.provider, "auction_house": c.auction_house, "lot_no": c.lot_no,
         "identity": f"{c.provider}:{c.auction_house}:{c.lot_no}:{_iso(c.auction_at)}",
         "auction_at": dual_time(c.auction_at, c.auction_at_source), "deadline_at": dual_time(c.deadline_at, c.deadline_source),
-        "deadline_passed": bool(c.deadline_at and ensure_aware(c.deadline_at) < datetime.now().astimezone()),
+        "deadline_passed": bool(c.deadline_at and ensure_aware(c.deadline_at) < datetime.now(timezone.utc)),
         "source_url": c.source_url, "title": c.title, "frame_raw": c.frame_raw, "specs": dict(c.specs or {}),
         "spec_sources": dict((c.extra or {}).get("spec_sources") or {}), "snapshot": dict(c.snapshot or {}),
         "snapshot_version": c.snapshot_version, "snapshot_hash": c.snapshot_hash, "images": list(c.images or []),
@@ -485,7 +485,8 @@ async def set_agreement(ctx: CommandContext, inp: SetAgreementIn) -> dict:
     r.agreement_id = inp.agreement_id or r.agreement_id
     r.agreement_status = inp.status
     if inp.status == "signed":
-        r.agreement_evidence = {"source_ref": inp.source_ref, "signed_at": _iso(inp.signed_at) or ctx.now.isoformat(),
+        # signed_at is the buyer's signing time from the evidence; unknown stays unknown (never "now")
+        r.agreement_evidence = {"source_ref": inp.source_ref, "signed_at": _iso(inp.signed_at), "recorded_at": ctx.now.isoformat(),
                                 "recorded_by": ctx.actor.user_id, "agreement_id": r.agreement_id}
     ctx.touch(r, "import_request")
     ctx.record(f"Agreement {inp.status}: {r.title or r.id[:8]}", entity_kind="import_request", entity_id=r.id, kind="fact",
@@ -515,6 +516,29 @@ async def set_deposit_rule(ctx: CommandContext, inp: SetDepositRuleIn) -> dict:
                       "set_by": ctx.actor.user_id, "set_at": ctx.now.isoformat()}
     if r.deposit_status == "unset":
         r.deposit_status = "pending"
+    elif r.deposit_status in ("confirmed", "partial"):
+        # recorded payment evidence is re-checked against the new rule; it is never re-confirmed by assumption
+        ev = dict(r.deposit_evidence or {})
+        received = parse_amount(ev.get("amount") or "0") if ev.get("currency") == cur else None
+        if received is None:
+            r.deposit_status = "pending"
+            r.deposit_evidence = {**ev, "remaining": None, "note": f"recorded {ev.get('amount')} {ev.get('currency')} needs explicit conversion to {cur}"}
+            ctx.record(f"Deposit rule currency changed to {cur}; recorded {ev.get('currency')} evidence needs explicit conversion",
+                       entity_kind="import_request", entity_id=r.id, kind="payment", state=r.status, visibility="owner", exception=True)
+        elif received < quantize(inp.amount, cur):
+            r.deposit_status = "partial"
+            r.deposit_evidence = {**ev, "remaining": str(quantize(inp.amount, cur) - received), "required": r.deposit_rule["amount"]}
+        else:
+            newly = r.deposit_status != "confirmed"
+            r.deposit_status = "confirmed"
+            r.deposit_evidence = {**ev, "remaining": None, "required": r.deposit_rule["amount"],
+                                  "overpaid": str(received - quantize(inp.amount, cur)) if received > quantize(inp.amount, cur) else None}
+            if newly:
+                r.deposit_confirmed_at = ctx.now
+                r.deposit_evidence["confirmed_at"] = ctx.now.isoformat()
+                ctx.emit("deposit.confirmed", aggregate_type="import_request", aggregate_id=r.id, aggregate_version=r.version,
+                         payload={"import_request_id": r.id, "payment_id": ev.get("payment_id"), "amount": str(received), "currency": cur,
+                                  "opportunity_id": r.opportunity_id, "source_ref": ev.get("source_ref"), "reason": "deposit rule revised"})
     ctx.touch(r, "import_request")
     ctx.record(f"Deposit rule set: {r.deposit_rule['amount']} {cur}", entity_kind="import_request", entity_id=r.id, kind="payment",
                state=r.status, visibility="owner", sources=[inp.source_ref] if inp.source_ref else None)
@@ -539,8 +563,13 @@ class ConfirmDepositIn(BaseModel):
 async def confirm_deposit(ctx: CommandContext, inp: ConfirmDepositIn) -> dict:
     r = await _req(ctx, inp.request_id, inp.expected_version)
     ev = dict(r.deposit_evidence or {})
-    if r.deposit_status == "confirmed" and ev.get("payment_id") == inp.payment_id:
-        return {"request": serialize_request(r), "confirmed": False, "idempotent": True, "gate": gate_decision(r)}
+    payments = list(ev.get("payments") or [])
+    # a payment already recorded against this request is never counted twice (invariant 6)
+    if ev.get("payment_id") == inp.payment_id or any(p.get("payment_id") == inp.payment_id for p in payments):
+        return {"request": serialize_request(r), "confirmed": r.deposit_status == "confirmed", "changed": False, "idempotent": True,
+                "gate": gate_decision(r)}
+    if r.deposit_status == "confirmed":
+        raise Conflict("deposit already confirmed from a different payment", payment_id=ev.get("payment_id"))
     if not r.deposit_rule:
         raise Blocked("deposit rule not configured — the owner must set the required amount and currency before the gate can open",
                       gate=gate_decision(r))
@@ -550,31 +579,38 @@ async def confirm_deposit(ctx: CommandContext, inp: ConfirmDepositIn) -> dict:
         raise Blocked(f"deposit currency {cur} does not match the required {rule_cur}; explicit conversion needed",
                       required=r.deposit_rule, received=str(inp.amount))
     amt = quantize(inp.amount, cur)
-    if amt < rule_amt:
+    if amt <= 0:
+        raise ValidationFailed("deposit amount must be positive")
+    payments.append({"payment_id": inp.payment_id, "amount": str(amt), "currency": cur, "source_ref": inp.source_ref,
+                     "received_at": _iso(inp.confirmed_at), "recorded_at": ctx.now.isoformat(), "recorded_by": ctx.actor.user_id})
+    total = quantize(sum((parse_amount(p["amount"]) for p in payments), Decimal("0")), cur)
+    if total < rule_amt:
+        # partial payment: recorded and visible with the remaining balance (spec §5.2); the gate stays blocked.
+        # This is a persisted fact, so it returns a Blocked decision instead of raising (a raise would roll it back).
+        remaining = rule_amt - total
         r.deposit_status = "partial"
-        r.deposit_evidence = {"payment_id": inp.payment_id, "amount": str(amt), "currency": cur, "source_ref": inp.source_ref,
-                              "received_at": _iso(inp.confirmed_at) or ctx.now.isoformat(), "remaining": str(rule_amt - amt)}
+        r.deposit_evidence = {**ev, "payment_id": inp.payment_id, "amount": str(total), "currency": cur, "source_ref": inp.source_ref,
+                              "payments": payments, "remaining": str(remaining), "required": str(rule_amt)}
         ctx.touch(r, "import_request")
-        ctx.record(f"Partial deposit {amt} {cur} (remaining {rule_amt - amt})", entity_kind="import_request", entity_id=r.id,
-                   kind="payment", state=r.status, sources=[inp.source_ref], exception=True)
-        _emit_request(ctx, r, "deposit_partial", remaining=str(rule_amt - amt))
-        raise Blocked("partial deposit; remaining balance outstanding", remaining=str(rule_amt - amt), currency=cur,
-                      gate=gate_decision(r))
-    if r.deposit_status == "confirmed" and ev.get("payment_id") != inp.payment_id:
-        raise Conflict("deposit already confirmed from a different payment", payment_id=ev.get("payment_id"))
+        ctx.record(f"Partial deposit {amt} {cur} (received {total}, remaining {remaining})", entity_kind="import_request", entity_id=r.id,
+                   kind="payment", state=r.status, sources=[inp.source_ref], exception=True, details={"payment_id": inp.payment_id})
+        _emit_request(ctx, r, "deposit_partial", remaining=str(remaining), payment_id=inp.payment_id)
+        return {"request": serialize_request(r), "confirmed": False, "changed": True, "partial": True, "remaining": str(remaining),
+                "currency": cur, "decision": "Blocked", "reasons": [f"partial deposit; {remaining} {cur} outstanding"],
+                "gate": gate_decision(r)}
     r.deposit_status = "confirmed"
     r.deposit_confirmed_at = ensure_aware(inp.confirmed_at) or ctx.now
-    r.deposit_evidence = {"payment_id": inp.payment_id, "amount": str(amt), "currency": cur, "source_ref": inp.source_ref,
-                          "confirmed_at": r.deposit_confirmed_at.isoformat(), "overpaid": str(amt - rule_amt) if amt > rule_amt else None,
-                          "confirmed_by": ctx.actor.user_id}
+    r.deposit_evidence = {"payment_id": inp.payment_id, "amount": str(total), "currency": cur, "source_ref": inp.source_ref,
+                          "payments": payments, "confirmed_at": r.deposit_confirmed_at.isoformat(),
+                          "overpaid": str(total - rule_amt) if total > rule_amt else None, "confirmed_by": ctx.actor.user_id}
     ctx.touch(r, "import_request")
-    ctx.record(f"Deposit confirmed {amt} {cur}: {r.title or r.id[:8]}", entity_kind="import_request", entity_id=r.id, kind="payment",
-               state=r.status, sources=[inp.source_ref], details={"payment_id": inp.payment_id})
+    ctx.record(f"Deposit confirmed {total} {cur}: {r.title or r.id[:8]}", entity_kind="import_request", entity_id=r.id, kind="payment",
+               state=r.status, sources=[inp.source_ref], details={"payment_id": inp.payment_id, "payments": len(payments)})
     ctx.emit("deposit.confirmed", aggregate_type="import_request", aggregate_id=r.id, aggregate_version=r.version,
-             payload={"import_request_id": r.id, "payment_id": inp.payment_id, "amount": str(amt), "currency": cur,
+             payload={"import_request_id": r.id, "payment_id": inp.payment_id, "amount": str(total), "currency": cur,
                       "opportunity_id": r.opportunity_id, "source_ref": inp.source_ref})
     decision = _advance(ctx, r)
-    return {"request": serialize_request(r), "confirmed": True, "gate": decision}
+    return {"request": serialize_request(r), "confirmed": True, "changed": True, "gate": decision}
 
 
 class PauseIn(BaseModel):
@@ -644,6 +680,9 @@ async def record_purchase(ctx: CommandContext, inp: RecordPurchaseIn) -> dict:
     if r.purchased_vehicle_id:
         if vehicle is not None and vehicle.id == r.purchased_vehicle_id:
             return {"request": serialize_request(r), "vehicle_id": vehicle.id, "recorded": False, "idempotent": True}
+        if vehicle is None and _same_purchase(r, await ctx.db.get(Vehicle, r.purchased_vehicle_id), inp.vehicle or {}, inp.evidence):
+            # a retry of the same purchase (same frame / same evidence) never creates a second vehicle
+            return {"request": serialize_request(r), "vehicle_id": r.purchased_vehicle_id, "recorded": False, "idempotent": True}
         raise Conflict("import request already has a purchased vehicle", purchased_vehicle_id=r.purchased_vehicle_id)
     if vehicle is None:
         vehicle = await _create_vehicle(ctx, inp.vehicle or {}, r, candidate=None, evidence=inp.evidence,
@@ -656,7 +695,7 @@ async def record_purchase(ctx: CommandContext, inp: RecordPurchaseIn) -> dict:
                 "recorded_at": ctx.now.isoformat()}
     r.purchased_vehicle_id = vehicle.id
     r.purchase_evidence = evidence
-    r.purchased_at = ensure_aware(_dt(inp.evidence.get("purchased_at"))) or ctx.now
+    r.purchased_at = ensure_aware(_dt(inp.evidence.get("purchased_at") or inp.evidence.get("at")))  # unknown stays unknown
     if not vehicle.purchase_evidence:
         vehicle.purchase_evidence = {k: v for k, v in evidence.items() if k != "manual"} | {"import_request_id": r.id}
         vehicle.buyer_contact_id = vehicle.buyer_contact_id or r.contact_id
@@ -683,6 +722,18 @@ def _dt(v) -> datetime | None:
         return parse_iso(str(v))
     except ValueError:
         raise ValidationFailed(f"invalid datetime {v!r}")
+
+
+def _same_purchase(r: ImportRequest, purchased: Vehicle | None, fields: dict, evidence: dict) -> bool:
+    """A retried manual purchase names the same vehicle when the frame matches or the evidence reference matches."""
+    if purchased is None:
+        return False
+    from .matching import normalize_frame
+    frame = fields.get("frame_no_raw")
+    if frame and purchased.frame_no_raw and normalize_frame(frame) == (purchased.frame_no_norm or normalize_frame(purchased.frame_no_raw)):
+        return True
+    ref = (evidence or {}).get("source_ref")
+    return bool(ref) and (r.purchase_evidence or {}).get("source_ref") == ref
 
 
 async def _create_vehicle(ctx: CommandContext, fields: dict, r: ImportRequest, *, candidate: Candidate | None, evidence: dict,
@@ -807,7 +858,10 @@ async def candidates_ingest(ctx: CommandContext, inp: IngestIn) -> dict:
         items.extend(fetch.candidates)
     created, updated, unchanged, ids = 0, 0, 0, []
     for raw in items:
-        n = raw if raw.get("provider") and raw.get("auction_at") and "specs" in raw else auction_source.normalize(raw, provider=raw.get("provider") or "manual")
+        if not isinstance(raw, dict):
+            raise ValidationFailed("each candidate must be an object")
+        # always normalize: identity fields are validated and a pre-normalized record round-trips unchanged
+        n = auction_source.normalize(raw, provider=raw.get("provider") or "manual")
         auction_at = _dt(n["auction_at"])
         deadline_at = _dt(n.get("deadline_at"))
         c = (await ctx.db.execute(select(Candidate).where(
@@ -834,6 +888,7 @@ async def candidates_ingest(ctx: CommandContext, inp: IngestIn) -> dict:
             c.last_seen_at = ctx.now
             c.ingest_count = (c.ingest_count or 1) + 1
             if c.snapshot_hash == snap_hash:
+                ctx.touch(c, "candidate")   # seen again: bookkeeping changed, snapshot did not
                 unchanged += 1
                 ids.append(c.id)
                 continue
@@ -1183,13 +1238,8 @@ async def translations_request(ctx: CommandContext, inp: TranslationRequestIn) -
             payload={"translation_id": t.id, "candidate_id": c.id, "route": route, "content": content})
         t.request_channel, t.request_action_id = "teams", act.id
     else:
-        res = await dispatch(ctx.child(), "tasks.create", {
-            "title": f"Send translation request: {c.auction_house} lot {c.lot_no}", "type": "operational", "priority": "high",
-            "instructions": content, "notes": "No Teams send route is configured; send this exact content to the exporter and "
-                                              "attach a note with the confirmation.",
-            "evidence_required": [{"kind": "note", "label": "Confirmation the request was sent", "min": 1}],
-            "source_kind": "sourcing", "source_id": t.id, "dedupe": True}, commit=False)
-        t.request_channel, t.manual_task_id, t.status = "manual", res.data["task"]["id"], "manual_task"
+        task_id = await _translation_manual_task(ctx, t, c, content, reason="No Teams send route is configured.")
+        t.request_channel, t.manual_task_id, t.status = "manual", task_id, "manual_task"
     await _link_matches_to_translation(ctx, c.id, t)
     ctx.record(f"Translation requested ({t.request_channel}): {c.auction_house} lot {c.lot_no}", entity_kind="translation", entity_id=t.id,
                kind="automation" if route else "task", state=t.status)
@@ -1198,12 +1248,37 @@ async def translations_request(ctx: CommandContext, inp: TranslationRequestIn) -
     return {"translation": serialize_translation(t), "created": True, "deduplicated": False}
 
 
+async def _translation_manual_task(ctx: CommandContext, t: Translation, c: Candidate, content: str, *, reason: str) -> str:
+    rev = f" (revision {t.revision_no})" if t.revision_no else ""
+    res = await dispatch(ctx.child(), "tasks.create", {
+        "title": f"Send translation request: {c.auction_house} lot {c.lot_no}{rev}", "type": "operational", "priority": "high",
+        "instructions": content, "notes": f"{reason} Send this exact content to the exporter and attach a note with the confirmation. "
+                                          "Nothing has been sent.",
+        "evidence_required": [{"kind": "note", "label": "Confirmation the request was sent", "min": 1}],
+        "source_kind": "sourcing", "source_id": t.id, "dedupe": True}, commit=False)
+    return res.data["task"]["id"]
+
+
 @approvals_svc.executor("translations.request")
 async def _exec_translation_request(db, act: ExternalAction) -> dict:
-    if TEAMS_SENDER is None:
-        from ..core.errors import Unsupported
-        raise Unsupported("Teams send adapter is not connected; the request was not sent")
-    return await TEAMS_SENDER(act.payload.get("route") or {}, act.payload.get("content") or "", act)
+    """Without a Teams send adapter the exact content becomes a manual sending task on the translation; the receipt
+    says sent=false and never claims delivery. A real adapter returns its own receipt (sent, not completed)."""
+    if TEAMS_SENDER is not None:
+        return await TEAMS_SENDER(act.payload.get("route") or {}, act.payload.get("content") or "", act)
+    from ..domain.actors import SYSTEM_ACTOR
+    p = dict(act.payload or {})
+    t = await db.get(Translation, p.get("translation_id")) if p.get("translation_id") else None
+    if t is None:
+        raise NotFound("translation no longer exists")
+    c = await db.get(Candidate, t.candidate_id)
+    ctx = CommandContext(db=db, actor=SYSTEM_ACTOR, channel="worker", correlation_id=act.correlation_id)
+    task_id = await _translation_manual_task(ctx, t, c, p.get("content") or t.request_content, reason="The Teams send adapter is not connected.")
+    t.request_channel, t.manual_task_id = "manual", task_id
+    if t.status == "requested":
+        t.status = "manual_task"
+    t.bump(None)
+    return {"provider": "teams", "sent": False, "state": "manual_send_required", "task_id": task_id,
+            "note": "Teams send adapter not connected; a manual sending task holds the exact content. This receipt does not claim delivery."}
 
 
 async def _link_matches_to_translation(ctx: CommandContext, candidate_id: str, t: Translation) -> int:
@@ -1544,8 +1619,12 @@ async def bid_gate(ctx: CommandContext, b: Bid) -> list[str]:
     if r is None:
         reasons.append("bid is not linked to an import request")
     else:
+        gate = gate_decision(r)
         if r.status != "active_search":
-            reasons.append(f"import request is {r.status}: " + "; ".join(gate_decision(r)["reasons"] or ["not in Active Search"]))
+            reasons.append(f"import request is {r.status}: " + "; ".join(gate["reasons"] or ["not in Active Search"]))
+        elif gate["decision"] != "Allowed":
+            # evidence behind Active Search changed after entry (deposit rule revised, must-haves removed ...)
+            reasons.append("Active Search evidence no longer holds: " + "; ".join(gate["reasons"]))
         if r.paused:
             reasons.append("import request is paused")
         m = (await ctx.db.execute(select(CandidateMatch).where(CandidateMatch.candidate_id == b.candidate_id,
@@ -1650,6 +1729,10 @@ async def bid_revalidate(ctx: CommandContext, inp: BidSubmitIn, approval) -> lis
          description="Execute an owner-approved bid packet: a Teams intent when the exporter route is configured, otherwise a manual "
                      "placement task with the exact packet. Approved never means submitted; bids.record_submitted records placement.")
 async def bids_submit(ctx: CommandContext, inp: BidSubmitIn) -> dict:
+    if ctx.approval is None or ctx.approval.command_name != "bids.submit":
+        # spec §11.2: a bid is the owner's individual exact approval — a standing permission or wildcard grant never authorizes it
+        raise Denied("a bid executes only under the owner's exact approval of this packet", command="bids.submit",
+                     decision={"outcome": "blocked", "reasons": ["bids are not eligible for standing permissions"]})
     b = await _bid(ctx, inp.bid_id)
     if b.packet_hash != inp.packet_hash:
         raise Blocked("bid packet changed — review again", current_hash=b.packet_hash)
@@ -1658,25 +1741,20 @@ async def bids_submit(ctx: CommandContext, inp: BidSubmitIn) -> dict:
         raise Blocked("bid gates failed at execution time", reasons=reasons)
     c = await _cand(ctx, b.candidate_id)
     b.status = "approved"
-    b.approval_id = ctx.approval.id if ctx.approval else b.approval_id
+    b.approval_id = ctx.approval.id
     route = await teams_route(ctx.db)
     packet_text = _packet_text(b)
     if route:
         act = await approvals_svc.intend_external_action(
             ctx, command_name="bids.submit", provider="teams", entity_kind="bid", entity_id=b.id,
             dedupe_key=f"bid_submit:{b.id}:{b.packet_hash}",
-            payload={"bid_id": b.id, "route": route, "content": packet_text, "packet_hash": b.packet_hash})
+            payload={"bid_id": b.id, "route": route, "content": packet_text, "packet_hash": b.packet_hash,
+                     "title": f"Place approved bid: {c.auction_house} lot {c.lot_no} (max {_dec(b.max_amount)} {b.currency})",
+                     "import_request_id": b.import_request_id, "deadline_at": _iso(b.deadline_at)})
         b.submission_channel, b.submission_action_id = "teams", act.id
     else:
-        res = await dispatch(ctx.child(), "tasks.create", {
-            "title": f"Place approved bid: {c.auction_house} lot {c.lot_no} (max {_dec(b.max_amount)} {b.currency})", "type": "operational",
-            "priority": "urgent", "import_request_id": b.import_request_id, "instructions": packet_text,
-            "due_at": _iso(b.deadline_at), "timezone": TOKYO,
-            "notes": "No exporter send route is configured. Place this exact bid with the exporter and record placement with "
-                     "bids.record_submitted (evidence required).",
-            "evidence_required": [{"kind": "note", "label": "Exporter confirmation of the placed bid", "min": 1}],
-            "source_kind": "sourcing", "source_id": b.id, "dedupe": True}, commit=False)
-        b.submission_channel, b.submission_task_id = "manual_task", res.data["task"]["id"]
+        task_id = await _bid_manual_task(ctx, b, c, packet_text, reason="No exporter send route is configured.")
+        b.submission_channel, b.submission_task_id = "manual_task", task_id
     ctx.touch(b, "bid")
     ctx.record(f"Bid approved ({b.submission_channel}): {c.auction_house} lot {c.lot_no}, max {_dec(b.max_amount)} {b.currency}", entity_kind="bid",
                entity_id=b.id, kind="approval", state="approved", visibility="owner")
@@ -1701,12 +1779,37 @@ def _packet_text(b: Bid) -> str:
     ])
 
 
+async def _bid_manual_task(ctx: CommandContext, b: Bid, c: Candidate, packet_text: str, *, reason: str) -> str:
+    """The exact packet becomes a manual placement task; approved never means placed (bids.record_submitted records it)."""
+    res = await dispatch(ctx.child(), "tasks.create", {
+        "title": f"Place approved bid: {c.auction_house} lot {c.lot_no} (max {_dec(b.max_amount)} {b.currency})", "type": "operational",
+        "priority": "urgent", "import_request_id": b.import_request_id, "instructions": packet_text,
+        "due_at": _iso(b.deadline_at), "timezone": TOKYO,
+        "notes": f"{reason} Place this exact bid with the exporter and record placement with bids.record_submitted (evidence required). "
+                 "Nothing has been sent.",
+        "evidence_required": [{"kind": "note", "label": "Exporter confirmation of the placed bid", "min": 1}],
+        "source_kind": "sourcing", "source_id": b.id, "dedupe": True}, commit=False)
+    return res.data["task"]["id"]
+
+
 @approvals_svc.executor("bids.submit")
 async def _exec_bid_submit(db, act: ExternalAction) -> dict:
-    if TEAMS_SENDER is None:
-        from ..core.errors import Unsupported
-        raise Unsupported("Teams send adapter is not connected; the bid was not sent")
-    return await TEAMS_SENDER(act.payload.get("route") or {}, act.payload.get("content") or "", act)
+    """Without a Teams send adapter the approved packet becomes a manual placement task on the bid; the receipt
+    says sent=false and never claims delivery. A real adapter returns its own receipt."""
+    if TEAMS_SENDER is not None:
+        return await TEAMS_SENDER(act.payload.get("route") or {}, act.payload.get("content") or "", act)
+    from ..domain.actors import SYSTEM_ACTOR
+    p = dict(act.payload or {})
+    b = await db.get(Bid, p.get("bid_id")) if p.get("bid_id") else None
+    if b is None:
+        raise NotFound("bid no longer exists")
+    c = await db.get(Candidate, b.candidate_id)
+    ctx = CommandContext(db=db, actor=SYSTEM_ACTOR, channel="worker", correlation_id=act.correlation_id)
+    task_id = await _bid_manual_task(ctx, b, c, p.get("content") or _packet_text(b), reason="The Teams send adapter is not connected.")
+    b.submission_channel, b.submission_task_id = "manual_task", task_id
+    b.bump(None)
+    return {"provider": "teams", "sent": False, "state": "manual_send_required", "task_id": task_id,
+            "note": "Teams send adapter not connected; a manual placement task holds the exact packet. This receipt does not claim the bid was placed."}
 
 
 class BidSubmittedIn(BaseModel):
@@ -1778,7 +1881,8 @@ async def bids_record_result(ctx: CommandContext, inp: BidResultIn) -> dict:
     r = await _req(ctx, b.import_request_id)
     m = (await ctx.db.execute(select(CandidateMatch).where(CandidateMatch.candidate_id == c.id,
                                                             CandidateMatch.import_request_id == r.id).with_for_update())).scalar_one_or_none()
-    b.status, b.result_at = inp.result, ensure_aware(_dt(inp.evidence.get("at"))) or ctx.now
+    # result_at is when the auction result happened per the evidence; unknown stays unknown (recorded_at is in the evidence)
+    b.status, b.result_at = inp.result, ensure_aware(_dt(inp.evidence.get("at")))
     b.result = {"result": inp.result, "amount": str(inp.evidence["amount"]) if inp.evidence.get("amount") is not None else None,
                 "currency": inp.evidence.get("currency")}
     b.result_evidence = {**inp.evidence, "recorded_by": ctx.actor.user_id, "recorded_at": ctx.now.isoformat()}
@@ -1797,7 +1901,7 @@ async def bids_record_result(ctx: CommandContext, inp: BidResultIn) -> dict:
             raise Conflict("import request already has a different purchased vehicle", purchased_vehicle_id=r.purchased_vehicle_id)
         evidence = {**inp.evidence, "bid_id": b.id, "manual": False, "recorded_by": ctx.actor.user_id, "recorded_at": ctx.now.isoformat()}
         r.purchased_vehicle_id, r.purchase_evidence = vehicle.id, evidence
-        r.purchased_at = ensure_aware(_dt(inp.evidence.get("at"))) or ctx.now
+        r.purchased_at = ensure_aware(_dt(inp.evidence.get("at") or inp.evidence.get("purchased_at")))  # unknown stays unknown
         vehicle.purchase_evidence = {**evidence, "import_request_id": r.id, "candidate_id": c.id}
         ctx.touch(vehicle, "vehicle")
         c.status, c.result = "won", {"result": "won", "bid_id": b.id, "import_request_id": r.id, "at": ctx.now.isoformat()}

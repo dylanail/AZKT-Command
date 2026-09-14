@@ -8,7 +8,7 @@
 """
 from __future__ import annotations
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from sqlalchemy import select, update
 
 from ..core.errors import Blocked, Conflict, NotFound, ValidationFailed
@@ -161,6 +161,21 @@ def _normalize(inp: IdentityIn, ctx: CommandContext, default_source: str) -> dic
             "country": country if kind == "phone" else None}
 
 
+async def _alias_verified(db, contact_id: str, kind: str, norm: str) -> bool:
+    """True when the alias is verified on this contact, or on a contact merged into it."""
+    rows = (await db.execute(select(ContactIdentity.contact_id, ContactIdentity.verified)
+                             .where(ContactIdentity.kind == kind, ContactIdentity.value_norm == norm))).all()
+    for cid, verified in rows:
+        if not verified:
+            continue
+        if cid == contact_id:
+            return True
+        c = await db.get(Contact, cid)
+        if c is not None and c.status == "merged" and c.merged_into_id == contact_id:
+            return True
+    return False
+
+
 async def _live_contacts_for(db, kind: str, norm: str) -> list[Contact]:
     rows = (await db.execute(select(Contact).join(ContactIdentity, ContactIdentity.contact_id == Contact.id)
                              .where(ContactIdentity.kind == kind, ContactIdentity.value_norm == norm))).scalars().unique().all()
@@ -210,17 +225,29 @@ async def contacts_create(ctx: CommandContext, inp: ContactCreateIn) -> dict:
     if not inp.force_new and normalized:
         found: dict[str, Contact] = {}
         hits: list[str] = []
+        verified_hit = False
         for n in normalized:
             for c in await _live_contacts_for(ctx.db, n["kind"], n["value_norm"]):
                 found[c.id] = c
                 hits.append(f"{n['kind']} {n['value_norm']}")
+                if not verified_hit:
+                    verified_hit = await _alias_verified(ctx.db, c.id, n["kind"], n["value_norm"])
         if len(found) == 1:
             c = next(iter(found.values()))
-            return {"contact": serialize_contact(c, await identities_of(ctx.db, c.id)), "created": False,
-                    "matched_by": hits}
+            # A person entering a known alias is an authorized link. Automation (agent/external/system ingestion)
+            # may only reuse a contact through a *verified* alias (spec §3.3): an unverified alias seen once in a
+            # forwarded mail must not silently attach a new sender to an existing person.
+            if verified_hit or ctx.actor.kind == "user":
+                return {"contact": serialize_contact(c, await identities_of(ctx.db, c.id)), "created": False,
+                        "matched_by": hits}
+            raise Blocked("identity matches an existing contact through an unverified alias; confirm the link, "
+                          "verify the alias, or create with force_new",
+                          candidates=[{"contact_id": c.id, "name": c.name, "status": c.status}], matched_by=hits,
+                          match_state="proposed")
         if len(found) > 1:
             raise Blocked("identity already belongs to several contacts; resolve before creating another",
-                          candidates=[{"contact_id": c.id, "name": c.name} for c in found.values()], matched_by=hits)
+                          candidates=[{"contact_id": c.id, "name": c.name} for c in found.values()], matched_by=hits,
+                          match_state="ambiguous")
     c = Contact(name=inp.name.strip(), company=(inp.company or "").strip() or None, roles=roles, source=inp.source,
                 source_ref=inp.source_ref, notes=inp.notes or "", consent=dict(inp.consent or {}), status=inp.status,
                 provisional_reason=inp.provisional_reason if inp.status == "provisional" else None,
@@ -389,6 +416,15 @@ class MergeIn(BaseModel):
     expected_survivor_version: int | None = None
     expected_merged_version: int | None = None
 
+    @model_validator(mode="after")
+    def _distinct(self):
+        # rejected at input so a self-merge never becomes a pending approval (a PydanticCustomError keeps the
+        # validation detail JSON-serializable for the API error envelope)
+        if self.survivor_id == self.merged_id:
+            from pydantic_core import PydanticCustomError
+            raise PydanticCustomError("distinct_contacts", "survivor and merged contact must differ")
+        return self
+
 
 def _merge_summary(p: MergeIn) -> str:
     return f"Merge contact {p.merged_id[:8]} into {p.survivor_id[:8]}"
@@ -445,7 +481,8 @@ async def _do_merge(ctx: CommandContext, inp: MergeIn) -> dict:
         "survivor_before": {"name": s.name, "company": s.company, "roles": list(s.roles or []), "notes": s.notes,
                             "consent": dict(s.consent or {}), "aliases": list(s.aliases or []),
                             "primary_email": s.primary_email, "primary_phone": s.primary_phone,
-                            "extra": dict(s.extra or {}), "version": s.version},
+                            "extra": dict(s.extra or {}), "status": s.status, "verified": bool(s.verified),
+                            "provisional_reason": s.provisional_reason, "version": s.version},
         "relinked": {}, "identities_moved": [], "identities_kept_on_merged": [],
     }
     # relink rows in other tables
@@ -485,6 +522,9 @@ async def _do_merge(ctx: CommandContext, inp: MergeIn) -> dict:
     s.consent = consent
     if not s.company and m.company:
         s.company = m.company
+    if s.status == "provisional" and m.status == "active":
+        # a confirmed person absorbs a provisional card: the survivor is no longer an unconfirmed sender
+        s.status, s.provisional_reason, s.verified = "active", None, bool(s.verified or m.verified)
     s.extra = {**(s.extra or {}), "merged_from": list((s.extra or {}).get("merged_from", [])) + [m.id]}
     await _refresh(ctx, s, s_ids)
     m.status = "merged"
@@ -566,7 +606,10 @@ async def contacts_unmerge(ctx: CommandContext, inp: UnmergeIn) -> dict:
         if k in ms:
             setattr(m, k, ms[k])
     sb = snap.get("survivor_before") or {}
-    for k in ("name", "company", "roles", "notes", "consent", "aliases", "primary_email", "primary_phone", "extra"):
+    for k in ("name", "company", "roles", "notes", "consent", "aliases", "primary_email", "primary_phone", "extra",
+              "status", "verified", "provisional_reason"):
+        if k == "status" and s.status == "archived":
+            continue  # an archive decided after the merge stands; unmerge only undoes the merge
         if k in sb:
             setattr(s, k, sb[k])
     await ctx.db.flush()

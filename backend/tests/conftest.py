@@ -27,7 +27,39 @@ settings.OWNER_REMINDER_EMAIL = "owner@example.com"
 
 from backend.app import db as dbmod  # noqa: E402
 
-dbmod.configure_engine(settings.TEST_DATABASE_URL)
+
+def _per_process_test_url() -> str:
+    """Each pytest process gets its own database (azkt_test_<pid>) so concurrent runs never
+    share a schema. Created here, dropped in _schema teardown. Falls back to TEST_DATABASE_URL
+    when the role cannot create databases."""
+    import asyncio
+    import asyncpg
+    base = settings.TEST_DATABASE_URL
+    name = f"azkt_test_{os.getpid()}"
+    admin = base.replace("postgresql+asyncpg://", "postgresql://")
+    admin_db = admin.rsplit("/", 1)[0] + "/postgres"
+
+    async def _create():
+        conn = await asyncpg.connect(admin_db)
+        try:
+            await conn.execute(f'DROP DATABASE IF EXISTS "{name}"')
+            await conn.execute(f'CREATE DATABASE "{name}"')
+            c2 = await asyncpg.connect(admin.rsplit("/", 1)[0] + f"/{name}")
+            try:
+                await c2.execute("CREATE EXTENSION IF NOT EXISTS pg_trgm")
+            finally:
+                await c2.close()
+        finally:
+            await conn.close()
+    try:
+        asyncio.run(_create())
+        return base.rsplit("/", 1)[0] + f"/{name}"
+    except Exception:  # noqa: BLE001
+        return base
+
+
+TEST_URL = _per_process_test_url()
+dbmod.configure_engine(TEST_URL)
 
 from backend.app.models import Base, User  # noqa: E402
 from backend.app.auth.passkey import SESSION_COOKIE, session_token  # noqa: E402
@@ -44,6 +76,15 @@ async def _schema():
         await conn.run_sync(Base.metadata.drop_all)
         await conn.run_sync(Base.metadata.create_all)
     yield
+    await dbmod.engine.dispose()
+    if TEST_URL != settings.TEST_DATABASE_URL:
+        import asyncpg
+        admin = settings.TEST_DATABASE_URL.replace("postgresql+asyncpg://", "postgresql://")
+        conn = await asyncpg.connect(admin.rsplit("/", 1)[0] + "/postgres")
+        try:
+            await conn.execute(f'DROP DATABASE IF EXISTS "{TEST_URL.rsplit("/", 1)[1]}"')
+        finally:
+            await conn.close()
 
 
 @pytest_asyncio.fixture

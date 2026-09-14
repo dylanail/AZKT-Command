@@ -30,8 +30,13 @@ MONEY_KEYS = ("amount", "price", "cost", "total", "margin", "profit", "landed", 
               "balance", "fee", "fees", "subtotal", "net", "gross", "payout", "deposit_amount", "per_action", "cumulative")
 
 
+NOT_MONEY_SUFFIXES = ("_id", "_ids", "_kind", "_key", "_state", "_status", "_count", "_ref", "_name", "_label")
+
+
 def _money_like(key: str) -> bool:
     k = key.lower()
+    if k.endswith(NOT_MONEY_SUFFIXES):
+        return False  # cost_item_id, payment_state, fee_kind ... are references, not amounts
     return any(k == m or k.endswith("_" + m) or k.startswith(m + "_") or m in k.split("_") for m in MONEY_KEYS)
 
 
@@ -61,13 +66,20 @@ async def _scope_sets(db: AsyncSession, actor: Actor) -> tuple[set[str], set[str
     return {v for _, v in rows if v}, {t for t, _ in rows}
 
 
+def _allowed_visibilities(actor: Actor) -> list[str] | None:
+    """None = the owner (or the AI Manager acting for the owner) sees every row, whatever its visibility
+    label. Everyone else is allow-listed, so a label this module does not know fails closed."""
+    if actor.is_owner:
+        return None
+    vis = ["all"]
+    if can_see_costs(actor):
+        vis.append("finance")
+    return vis
+
+
 def _visibility_ok(actor: Actor, vis: str | None) -> bool:
-    vis = vis or "all"
-    if vis == "owner":
-        return actor.is_owner
-    if vis == "finance":
-        return can_see_costs(actor)
-    return True
+    allowed = _allowed_visibilities(actor)
+    return allowed is None or (vis or "all") in allowed
 
 
 def _record_ok(actor: Actor, scope: tuple[set[str], set[str]] | None, e: ActivityEntry) -> bool:
@@ -148,13 +160,10 @@ async def list_activity(
         stmt = stmt.where(ActivityEntry.correlation_id == correlation_id)
     if q:
         stmt = stmt.where(ActivityEntry.what.ilike(f"%{q.strip()}%"))
-    # visibility is enforced in SQL so hidden rows never leave the database
-    allowed_vis = ["all"]
-    if can_see_costs(actor):
-        allowed_vis.append("finance")
-    if actor.is_owner:
-        allowed_vis.append("owner")
-    stmt = stmt.where(ActivityEntry.visibility.in_(allowed_vis))
+    # visibility is enforced in SQL so hidden rows never leave the database (same rule as the detail endpoint)
+    allowed_vis = _allowed_visibilities(actor)
+    if allowed_vis is not None:
+        stmt = stmt.where(ActivityEntry.visibility.in_(allowed_vis))
     if scope is not None:
         vehicles, tasks = scope
         cond = ActivityEntry.actor["user_id"].as_string() == actor.user_id

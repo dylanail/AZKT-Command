@@ -152,6 +152,14 @@ def _emit(ctx: CommandContext, o: Opportunity, change: str, **extra) -> None:
                       "contact_id": o.contact_id, "vehicle_id": o.vehicle_id, **extra})
 
 
+def _clear_lost(ctx: CommandContext, o: Opportunity) -> None:
+    """Leaving `lost`: the reason moves to extra.lost_history so an active lead never carries a lost reason."""
+    o.extra = {**(o.extra or {}), "lost_history": list((o.extra or {}).get("lost_history", [])) + [
+        {"reason": o.lost_reason, "lost_at": o.lost_at.isoformat() if o.lost_at else None, "reopened_at": ctx.now.isoformat()}]}
+    o.lost_reason, o.lost_at = None, None
+    o.reopened_at = ctx.now
+
+
 def _push_stage(ctx: CommandContext, o: Opportunity, stage: str, note: str | None = None, source: str | None = None) -> None:
     hist = _hist(o)
     hist.append({"from": o.stage, "stage": stage, "at": ctx.now.isoformat(), "by": ctx.actor.user_id,
@@ -232,11 +240,21 @@ async def sales_create_opportunity(ctx: CommandContext, inp: OpportunityCreateIn
     amount, currency = _budget(inp)
 
     if inp.source_ref:
-        existing = (await ctx.db.execute(select(Opportunity).where(Opportunity.source_ref == inp.source_ref))).scalars().first()
+        # The same message replayed returns the same lead. One thread may still open several interests
+        # (spec §5.1): a second vehicle from the same message is a separate opportunity, not a replay.
+        q = select(Opportunity).where(Opportunity.source_ref == inp.source_ref, Opportunity.pipeline == inp.pipeline)
+        if inp.pipeline == "vehicle":
+            q = q.where(Opportunity.vehicle_id == inp.vehicle_id)
+        existing = (await ctx.db.execute(q.order_by(Opportunity.created_at))).scalars().first()
         if existing is not None:
             return {"opportunity": serialize_opportunity(existing), "created": False, "matched_by": "source_ref"}
 
     vehicle = await check_vehicle_for_opportunity(ctx, inp.vehicle_id) if inp.vehicle_id else None
+    if inp.owner_user_id:
+        from ..models import User
+        u = await ctx.db.get(User, inp.owner_user_id)
+        if u is None or u.status != "active":
+            raise ValidationFailed("owner is not an active person")
 
     contact_created = False
     contact_id = inp.contact_id
@@ -378,6 +396,8 @@ async def sales_move_stage(ctx: CommandContext, inp: MoveStageIn) -> dict:
             raise ValidationFailed("a lost reason is required")
         o.lost_reason = inp.reason.strip()
         o.lost_at = ctx.now
+    elif o.stage == "lost":
+        _clear_lost(ctx, o)   # dragging a lost lead back onto the board is a reopen: the lost reason stays in history
     was = o.stage
     _push_stage(ctx, o, inp.stage, note=inp.note or inp.reason)
     ctx.touch(o, "opportunity")
@@ -419,10 +439,7 @@ async def sales_reopen(ctx: CommandContext, inp: ReopenIn) -> dict:
         target = prev[0] if prev and prev[0] in OPEN_STAGES else "new"
     if target not in OPEN_STAGES:
         raise ValidationFailed(f"stage must be one of {OPEN_STAGES}")
-    o.extra = {**(o.extra or {}), "lost_history": list((o.extra or {}).get("lost_history", [])) + [
-        {"reason": o.lost_reason, "lost_at": o.lost_at.isoformat() if o.lost_at else None, "reopened_at": ctx.now.isoformat()}]}
-    o.lost_reason, o.lost_at = None, None
-    o.reopened_at = ctx.now
+    _clear_lost(ctx, o)
     _push_stage(ctx, o, target, note=inp.note or "reopened")
     ctx.touch(o, "opportunity")
     ctx.record(f"Lead reopened → {STAGE_LABELS[target]}", entity_kind="opportunity", entity_id=o.id, kind="task", state=o.stage)
@@ -441,6 +458,11 @@ class LinkVehicleIn(BaseModel):
          description="Link (or unlink) the vehicle a lead is about; sold vehicles cannot be linked.")
 async def sales_link_vehicle(ctx: CommandContext, inp: LinkVehicleIn) -> dict:
     o = await _get(ctx, inp.opportunity_id, inp.expected_version)
+    if o.vehicle_id == inp.vehicle_id:
+        return {"opportunity": serialize_opportunity(o), "linked": False}
+    if o.converted_id:
+        raise Blocked("this lead is converted; its vehicle is fixed by the sale/reservation record",
+                      converted_kind=o.converted_kind, converted_id=o.converted_id)
     if inp.vehicle_id:
         await check_vehicle_for_opportunity(ctx, inp.vehicle_id)
     elif o.pipeline == "vehicle":
@@ -450,7 +472,7 @@ async def sales_link_vehicle(ctx: CommandContext, inp: LinkVehicleIn) -> dict:
     ctx.record("Linked vehicle to lead" if inp.vehicle_id else "Unlinked vehicle from lead", entity_kind="opportunity",
                entity_id=o.id, kind="task", state=o.stage, details={"vehicle_id": inp.vehicle_id})
     _emit(ctx, o, "vehicle_linked")
-    return {"opportunity": serialize_opportunity(o)}
+    return {"opportunity": serialize_opportunity(o), "linked": True}
 
 
 class LinkRequestIn(BaseModel):
@@ -463,6 +485,11 @@ class LinkRequestIn(BaseModel):
          description="Link (or unlink) the pre-deposit ImportRequest projected by this IRQ lead.")
 async def sales_link_request(ctx: CommandContext, inp: LinkRequestIn) -> dict:
     o = await _get(ctx, inp.opportunity_id, inp.expected_version)
+    if o.import_request_id == inp.import_request_id:
+        return {"opportunity": serialize_opportunity(o), "linked": False}
+    if o.converted_kind == "import_request" and o.converted_id and inp.import_request_id != o.converted_id:
+        raise Conflict("this lead already converted into an import request; the link cannot be changed (invariant 6)",
+                       converted_id=o.converted_id, requested_id=inp.import_request_id)
     if inp.import_request_id:
         other = (await ctx.db.execute(select(Opportunity).where(Opportunity.import_request_id == inp.import_request_id,
                                                                 Opportunity.id != o.id))).scalars().first()

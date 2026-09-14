@@ -49,10 +49,19 @@ async def list_invitations(status: str | None = None, actor: Actor = Depends(_ow
     return {"items": [team_svc.serialize_invitation(i) for i in rows], "total": len(rows)}
 
 
+def _no_replay(ctx: CommandContext) -> CommandContext:
+    """Link-issuing commands hand back a one-time bearer token. The command log stores full results for
+    Idempotency-Key replay, which would persist that token and serve it again on retry; so these two
+    commands run without a request_id. Retry safety comes from team.invite's own dedupe (a repeat returns
+    the pending invitation without a token) and from reissue rotating the hash."""
+    ctx.request_id = None
+    return ctx
+
+
 @router.post("/invite")
 async def invite(body: team_svc.TeamInviteIn, actor: Actor = Depends(_owner_guard()),
                  ctx: CommandContext = Depends(command_context)):
-    return (await dispatch(ctx, "team.invite", body)).to_dict()
+    return (await dispatch(_no_replay(ctx), "team.invite", body)).to_dict()
 
 
 class _Reason(BaseModel):
@@ -67,17 +76,28 @@ async def revoke_invitation(invitation_id: str, body: _Reason | None = None, act
     return (await dispatch(ctx, "team.revoke_invitation", {"invitation_id": invitation_id, **body.model_dump()})).to_dict()
 
 
+@router.post("/invitations/{invitation_id}/reissue")
+async def reissue_invitation(invitation_id: str, body: _Reason | None = None, actor: Actor = Depends(_owner_guard()),
+                             ctx: CommandContext = Depends(command_context)):
+    body = body or _Reason()
+    return (await dispatch(_no_replay(ctx), "team.reissue_invitation", {"invitation_id": invitation_id, **body.model_dump()})).to_dict()
+
+
 @router.get("/{user_id}")
 async def get_person(user_id: str, actor: Actor = Depends(current_actor), db: AsyncSession = Depends(get_db)):
+    full = actor.kind == "user" and has_perm(actor, "team")
+    scoped = actor.kind == "user" and has_perm(actor, "tasks.assign")
+    if not (full or scoped):
+        raise HTTPException(403, "not allowed")  # before any lookup: no user-id enumeration via 404 vs 403
     u = await db.get(User, user_id)
     if u is None:
         raise HTTPException(404, "person not found")
-    if actor.kind == "user" and has_perm(actor, "team"):
+    if full:
         return team_svc.serialize_person(u, detail=True)
-    if actor.kind == "user" and has_perm(actor, "tasks.assign") and u.status == "active" and (
-            u.manager_id == actor.user_id or (u.manager_id is None and u.role == "mechanic") or u.id == actor.user_id):
+    if u.status == "active" and (u.manager_id == actor.user_id or (u.manager_id is None and u.role == "mechanic")
+                                 or u.id == actor.user_id):
         return team_svc.serialize_person(u)
-    raise HTTPException(403, "not allowed")
+    raise HTTPException(404, "person not found")  # outside the manager's scope: indistinguishable from absent
 
 
 class _PersonPatch(BaseModel):

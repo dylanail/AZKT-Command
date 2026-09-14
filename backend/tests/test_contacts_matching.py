@@ -59,9 +59,14 @@ def test_email_lowercases_but_keeps_dots_and_plus_aliases():
 
 
 def test_frame_keeps_raw_and_normalizes_search_form():
+    from backend.app.services.vehicles import normalize_frame as vehicles_frame, normalize_stock_no as vehicles_stock
     raw = "da63t-00123456"
-    assert m.normalize_frame(raw) == "DA63T00123456"      # leading zeros kept, punctuation stripped
+    assert m.normalize_frame(raw) == "DA63T00123456" == vehicles_frame(raw)   # leading zeros kept, punctuation stripped
     assert m.normalize_stock_no("stk 0412") == "STK-0412"
+    # matching must produce the same canonical stock reference the vehicles domain stores, or "STK-412"
+    # in a message would never find the vehicle saved as STK-0412
+    for raw_stock in ("STK-412", "stk 412", "STK0412", "stk-0412", "STK-123456"):
+        assert m.normalize_stock_no(raw_stock) == vehicles_stock(raw_stock)
     assert m.normalize_handle("@AZ_Kei") == "az_kei"
 
 
@@ -83,6 +88,9 @@ def test_B05_supplier_email_yields_separate_items_for_three_vehicles_and_two_inv
     spans = [tuple(i["span"]) for i in items]
     assert spans == sorted(spans) and len(set(spans)) == len(spans)   # deterministic, non-overlapping
     assert m.extract_items(text) == items and m.extract_items("") == []
+    # words after "invoice" and dates/times are not references: unknown stays unknown rather than invented
+    noise = m.extract_items("Please send the invoice for the trucks by 2026-09-14 10:30; STK-412 is ready.")
+    assert [i["kind"] for i in noise] == ["stock_no"] and noise[0]["norm"] == "STK-0412"
 
 
 # ── B04: contact and vehicle matching are independent ──────────────────────
@@ -277,6 +285,7 @@ async def test_contacts_api_list_detail_resolve_and_permissions(client, db, owne
     assert r.status_code == 200 and r.json()["status"] == "ok"
     cid = r.json()["data"]["contact"]["id"]
     r = await client.post("/api/contacts", json={"name": f"Api Carrier {tag}", "roles": ["carrier"]})
+    carrier_id = r.json()["data"]["contact"]["id"]
     r = await client.get("/api/contacts", params={"tab": "buyers", "q": tag})
     assert r.status_code == 200 and r.json()["total"] == 1 and r.json()["items"][0]["id"] == cid
     r = await client.get("/api/contacts", params={"tab": "carriers", "q": tag})
@@ -297,8 +306,10 @@ async def test_contacts_api_list_detail_resolve_and_permissions(client, db, owne
     assert r.json()["opportunities"][0]["money_hidden"] is True
     r = await client.get("/api/contacts/resolve", params={"name": f"Api Buyer {tag}"})
     assert r.status_code == 200 and r.json()["state"] == "proposed"
-    r = await client.post(f"/api/contacts/{cid}/merge-propose", json={"merged_id": cid})
+    r = await client.post(f"/api/contacts/{cid}/merge-propose", json={"merged_id": carrier_id})
     assert r.status_code == 200 and r.json()["status"] == "needs_review"
+    r = await client.post(f"/api/contacts/{cid}/merge-propose", json={"merged_id": cid})   # self-merge is invalid input
+    assert r.status_code == 422
     # mechanic: no contacts.read at all; denial carries no detail
     login(client, mechanic)
     r = await client.get("/api/contacts")
@@ -307,3 +318,65 @@ async def test_contacts_api_list_detail_resolve_and_permissions(client, db, owne
     assert r.status_code == 403 and tag not in r.text
     r = await client.get("/api/contacts/resolve", params={"email": f"api.{tag}@x.io"})
     assert r.status_code == 403
+
+
+# ── owner-only merge across actor kinds; unverified aliases never auto-link automation ─────────
+async def test_self_merge_rejected_and_merge_is_owner_only_for_every_actor_kind(db, owner, manager, mechanic):
+    from backend.app.core.errors import ValidationFailed
+    from backend.app.domain.actors import Actor
+    from backend.app.domain.policy import effective_perms
+    from backend.app.domain.commands import CommandContext
+    tag = _u()
+    a = await create_contact(db, owner, name=f"Solo A {tag}")
+    b = await create_contact(db, owner, name=f"Solo B {tag}")
+    for name in ("contacts.merge", "contacts.merge_propose"):
+        with pytest.raises(ValidationFailed):
+            await dispatch(ctx_for(db, owner), name, {"survivor_id": a["id"], "merged_id": a["id"]})
+    assert (await db.execute(select(Approval).where(Approval.command_name == "contacts.merge_propose",
+                                                    Approval.entity_id == a["id"]))).scalars().all() == []
+    payload = {"survivor_id": a["id"], "merged_id": b["id"], "reason": "same"}
+    # the AI Manager acting for the owner may only prepare it for exact approval
+    agent = await dispatch(ctx_for(db, owner, kind="agent"), "contacts.merge", payload)
+    assert agent.status == "needs_review" and agent.approval_id
+    # an external client with the owner's grant and write:contacts scope is still blocked (owner-only action)
+    ext = Actor(kind="external", user_id=owner.id, role="owner", scope="all", perms=effective_perms("owner", {}),
+                client_id=f"client-{tag}", client_scopes=["read:contacts", "write:contacts"])
+    with pytest.raises(Denied):
+        await dispatch(CommandContext(db=db, actor=ext, correlation_id="test", channel="mcp"), "contacts.merge", payload)
+    for person in (manager, mechanic):
+        with pytest.raises(Denied):
+            await dispatch(ctx_for(db, person), "contacts.merge", payload)
+        with pytest.raises(Denied):
+            await dispatch(ctx_for(db, person), "contacts.unmerge", {"merge_id": "none"})
+    for row_id in (a["id"], b["id"]):
+        assert (await db.get(Contact, row_id)).status == "active"   # nothing merged by any of the above
+
+
+async def test_create_with_unverified_alias_blocks_automation_but_people_may_link(db, owner):
+    tag = _u()
+    email = f"seen.once.{tag}@example.com"
+    # an alias observed in an ingested mail is unverified
+    a = await create_contact(db, owner, name=f"Seen Once {tag}", source="inbox",
+                             identities=[{"kind": "email", "value": email, "source": "inbox"}])
+    assert a["identities"][0]["verified"] is False
+    # automation (the Manager ingesting a new sender) may not silently attach the sender to that person
+    with pytest.raises(Blocked) as ei:
+        await dispatch(ctx_for(db, owner, kind="agent"), "contacts.create",
+                       {"name": f"New Sender {tag}", "source": "inbox", "identities": [{"kind": "email", "value": email}]})
+    assert ei.value.detail["match_state"] == "proposed" and ei.value.detail["candidates"][0]["contact_id"] == a["id"]
+    assert (await db.execute(select(Contact).where(Contact.name == f"New Sender {tag}"))).scalars().all() == []
+    # a signed-in person typing the same alias is an authorized link
+    human = await dispatch(ctx_for(db, owner), "contacts.create",
+                           {"name": f"New Sender {tag}", "identities": [{"kind": "email", "value": email}]})
+    assert human.data["created"] is False and human.data["contact"]["id"] == a["id"]
+    # once the owner verifies the alias, automation may reuse the contact through it
+    await dispatch(ctx_for(db, owner), "contacts.add_identity", {"contact_id": a["id"], "kind": "email", "value": email, "verified": True})
+    auto = await dispatch(ctx_for(db, owner, kind="agent"), "contacts.create",
+                          {"name": f"New Sender {tag}", "source": "inbox", "identities": [{"kind": "email", "value": email}]})
+    assert auto.data["created"] is False and auto.data["contact"]["id"] == a["id"]
+    # a provisional survivor absorbing a confirmed person becomes active; unmerge restores it
+    prov = await create_contact(db, owner, name=f"Prov {tag}", status="provisional", provisional_reason="unknown sender")
+    res = await dispatch(ctx_for(db, owner), "contacts.merge", {"survivor_id": prov["id"], "merged_id": a["id"]})
+    assert res.data["survivor"]["status"] == "active" and res.data["survivor"]["provisional_reason"] is None
+    un = await dispatch(ctx_for(db, owner), "contacts.unmerge", {"merge_id": res.data["merge"]["id"]})
+    assert un.data["survivor"]["status"] == "provisional" and un.data["survivor"]["provisional_reason"] == "unknown sender"

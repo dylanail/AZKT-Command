@@ -741,6 +741,16 @@ class PriceIn(BaseModel):
 
 
 # ── fact helpers ─────────────────────────────────────────────────────────────
+MONEY_FACT_KEYS = ("purchase_amount",)
+
+
+def _fact_visibility(key: str, requested: str | None = None) -> str:
+    """Activity visibility for a fact change: purchase money and owner-only facts never reach the general feed."""
+    if key in MONEY_FACT_KEYS:
+        return "finance"
+    return "owner" if requested == "owner" else "all"
+
+
 def _fact_norm(key: str, value: str | None) -> str:
     if value is None:
         return ""
@@ -842,7 +852,8 @@ async def _missing_task(ctx: CommandContext, v: Vehicle) -> dict | None:
                      "for missing identity fields. Never invents a frame number, price or date.")
 async def vehicles_create(ctx: CommandContext, inp: VehicleCreateIn) -> dict:
     if inp.create_key:
-        existing = (await ctx.db.execute(select(Vehicle).where(cast(Vehicle.extra, Text).ilike(f'%"create_key": "{inp.create_key}"%')))).scalars().first()
+        existing = (await ctx.db.execute(select(Vehicle).where(Vehicle.extra["create_key"].as_string() == inp.create_key)
+                                         .order_by(Vehicle.created_at))).scalars().first()
         if existing is not None and (existing.extra or {}).get("create_key") == inp.create_key:
             return {"vehicle": serialize_vehicle(existing), "created": False}
     if inp.logistics_state not in LOGISTICS_STATES:
@@ -882,11 +893,13 @@ async def vehicles_create(ctx: CommandContext, inp: VehicleCreateIn) -> dict:
               "location": inp.location, "frame_no": inp.frame_no_raw, "odometer_km": inp.odometer_km,
               "purchase_amount": money_str(v.purchase_amount), "acquired_at": iso(v.acquired_at)}
     facts = []
+    human_owner = ctx.actor.kind == "user" and ctx.actor.role == "owner"
     for k, val in stated.items():
         if val is None or val == "":
             continue
-        facts.append(_new_fact(ctx, v, k, str(val), status="confirmed" if inp.source_kind == "document" else "reported",
-                               source_kind=inp.source_kind, source_ref=inp.source_ref,
+        # a document-sourced value is confirmed, except critical facts, which only the owner confirms (vehicles.confirm_fact)
+        status = "confirmed" if inp.source_kind == "document" and (k not in CRITICAL_FACT_KEYS or human_owner) else "reported"
+        facts.append(_new_fact(ctx, v, k, str(val), status=status, source_kind=inp.source_kind, source_ref=inp.source_ref,
                                currency=v.purchase_currency if k == "purchase_amount" else None))
     v.missing_identity_fields = missing_identity(v)
     v.intake_status = "incomplete" if v.missing_identity_fields else "complete"
@@ -913,7 +926,8 @@ async def vehicles_update(ctx: CommandContext, inp: VehicleUpdateIn) -> dict:
     v = await get_vehicle(ctx.db, inp.vehicle_id, expected_version=inp.expected_version)
     changes: dict = {}
     facts = []
-    status = "confirmed" if (inp.confirmed and ctx.actor.is_owner) or inp.source_kind == "document" else "reported"
+    human_owner = ctx.actor.kind == "user" and ctx.actor.role == "owner"
+    status = "confirmed" if (inp.confirmed and human_owner) or inp.source_kind == "document" else "reported"
     for key in ("title", "make", "model", "model_year", "color", "grade", "location"):
         val = getattr(inp, key)
         if val is None:
@@ -1097,7 +1111,7 @@ async def vehicles_propose_fact(ctx: CommandContext, inp: FactProposeIn) -> dict
     if cur_value is not None and _fact_norm(key, cur_value) == new_norm:
         if cur is not None and cur.status == "confirmed":
             ctx.record(f"Fact corroborated {key}={inp.value} ({inp.source_kind})", entity_kind="vehicle", entity_id=v.id,
-                       kind="fact", state="corroborated", details={"fact_id": cur.id})
+                       kind="fact", state="corroborated", visibility=_fact_visibility(key, inp.visibility), details={"fact_id": cur.id})
             return {"fact": serialize_fact(cur), "outcome": "corroborated", "conflict": False, "needs_confirmation": False}
         f = _new_fact(ctx, v, key, inp.value, status=inp.status, source_kind=inp.source_kind, source_ref=inp.source_ref,
                       unit=inp.unit, currency=inp.currency, observed_at=aware(inp.observed_at), effective_at=aware(inp.effective_at),
@@ -1129,7 +1143,7 @@ async def vehicles_propose_fact(ctx: CommandContext, inp: FactProposeIn) -> dict
     ctx.touch(v, "vehicle")
     ctx.changed.append({"kind": "vehicle_fact", "id": f.id, "version": f.version})
     ctx.record(f"Fact {outcome}: {key}={inp.value} ({inp.source_kind})", entity_kind="vehicle", entity_id=v.id, kind="fact",
-               state=f.status, exception=(outcome == "conflicted"),
+               state=f.status, exception=(outcome == "conflicted"), visibility=_fact_visibility(key, inp.visibility),
                details={"fact_id": f.id, "key": key, "conflict_with_id": f.conflict_with_id, "source_ref": inp.source_ref})
     ctx.emit("vehicle.changed", aggregate_type="vehicle", aggregate_id=v.id, aggregate_version=v.version,
              payload={"vehicle_id": v.id, "fact": key, "status": f.status, "outcome": outcome})
@@ -1182,7 +1196,8 @@ async def vehicles_confirm_fact(ctx: CommandContext, inp: FactConfirmIn) -> dict
     ctx.touch(v, "vehicle")
     ctx.changed.append({"kind": "vehicle_fact", "id": f.id, "version": f.version})
     ctx.record(f"Fact confirmed: {key}={value}" + (f" — {inp.note}" if inp.note else ""), entity_kind="vehicle", entity_id=v.id,
-               kind="fact", state="confirmed", details={"fact_id": f.id, "key": key, "outdated": [o.id for o in others if o.id != f.id]})
+               kind="fact", state="confirmed", visibility=_fact_visibility(key, f.visibility),
+               details={"fact_id": f.id, "key": key, "outdated": [o.id for o in others if o.id != f.id]})
     ctx.emit("vehicle.changed", aggregate_type="vehicle", aggregate_id=v.id, aggregate_version=v.version,
              payload={"vehicle_id": v.id, "fact": key, "status": "confirmed"})
     if key in ("purchase_amount", "acquired_at"):

@@ -121,7 +121,9 @@ async def visibility_clauses(db: AsyncSession, actor: Actor, view: str) -> list:
             clauses.append(or_(Task.owner_user_id.in_([actor.user_id, *reports]), Task.owner_user_id.is_(None)))
     limit = await visible_vehicle_ids(db, actor)
     if limit is not None and actor.kind == "external":
-        clauses.append(or_(Task.vehicle_id.in_(list(limit)), Task.vehicle_id.is_(None)))
+        # a record-limited client follows its vehicle grant everywhere (invariant 14): tasks with no vehicle
+        # (calls about other customers, owner follow-ups) are outside that grant
+        clauses.append(Task.vehicle_id.in_(list(limit)))
     return clauses
 
 

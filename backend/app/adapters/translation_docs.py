@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 
 from ..core.errors import Unsupported
 
@@ -135,7 +135,7 @@ def check_completeness(text: str, required_sections: list[str] | None = None) ->
             present.append(label)
             sections[label] = "present"
     return {"ok": not missing and not empty, "present": present, "missing": missing, "empty": empty,
-            "sections": sections, "required": required, "checked_at": datetime.now().astimezone().isoformat()}
+            "sections": sections, "required": required, "checked_at": datetime.now(timezone.utc).isoformat()}
 
 
 def identity_matches(text: str, lot_no: str | None, auction_house: str | None = None) -> dict:

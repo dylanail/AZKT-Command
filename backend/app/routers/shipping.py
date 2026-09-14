@@ -21,13 +21,14 @@ from ..models.runtime import Approval, ExternalAction
 from ..models.shipping import QUOTE_STATUSES, SHIPMENT_STATUSES, Shipment, ShipmentLeg, ShipmentMilestone, ShipmentQuote
 from ..models.tasks import Case, Task
 from ..models.vehicles import Vehicle
-from ..services.shipping import effective_milestones, serialize_leg, serialize_milestone, serialize_quote, serialize_shipment
+from ..services.shipping import (DEFAULT_QUOTE_FIELDS, effective_milestones, preview_quote_request, serialize_leg, serialize_milestone,
+                                 serialize_quote, serialize_shipment)
 
 shipments_router = APIRouter(prefix="/api/shipments", tags=["shipments"])
 quotes_router = APIRouter(prefix="/api/shipping/quotes", tags=["shipping-quotes"])
 
 LEG_MONEY = ("amount", "currency")
-QUOTE_MONEY = ("amount", "comparison", "booking", "forward_payload")
+QUOTE_MONEY = ("amount", "comparison", "booking", "forward_payload", "reply_extracted")  # vendor prices are cost detail
 SHIPMENT_COMMANDS = {"update": "shipments.update", "record-milestone": "shipments.record_milestone",
                      "set-storage-deadline": "shipments.set_storage_deadline", "add-leg": "shipments.add_leg"}
 LEG_COMMANDS = {"update": "shipments.update_leg", "remove": "shipments.remove_leg"}
@@ -257,7 +258,11 @@ async def quote_action(quote_id: str, action: str, payload: dict | None = Body(N
     name = QUOTE_COMMANDS.get(action)
     if name is None:
         raise HTTPException(404, f"unknown action {action}; one of {sorted(QUOTE_COMMANDS)}")
-    res = await dispatch(ctx, name, {**(payload or {}), "quote_id": quote_id})
+    body = {**(payload or {}), "quote_id": quote_id}
+    if action == "request" and body.get("data") is None:
+        # bind the exact recorded data that would be shared, so the approval shows and revalidates that content (read only)
+        body["data"] = await preview_quote_request(ctx.db, quote_id, list(body.get("fields") or DEFAULT_QUOTE_FIELDS))
+    res = await dispatch(ctx, name, body)
     return res.to_dict()
 
 

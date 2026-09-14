@@ -16,7 +16,7 @@ from backend.app.models.runtime import Approval, Event
 from backend.app.models.tasks import Task
 from backend.app.models.vehicles import Vehicle, VehicleFact, VehicleMilestone
 from backend.app.services import vehicles as svc
-from backend.tests.conftest import ctx_for, login, make_user, run_worker_once
+from backend.tests.conftest import ctx_for, login, make_user
 from backend.tests.test_assets import drain_outbox, jpeg_bytes, upload_via_commands
 
 

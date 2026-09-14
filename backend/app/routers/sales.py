@@ -24,10 +24,12 @@ from ..services.sales import (ACTIVE_TASK_STATUSES, BOARD_STAGES, STAGE_LABELS, 
 
 router = APIRouter(prefix="/api/sales", tags=["sales"])
 MONEY_KEYS = ("budget_amount", "budget_currency")
+# sales.set_conversion is deliberately NOT an HTTP action: Deposit Paid is evidence-backed (spec §5.2) and only
+# finance's deposit handoff dispatches it. "Record payment" opens reconciliation instead.
 COMMANDS = {
     "update": "sales.update_opportunity", "move-stage": "sales.move_stage", "mark-lost": "sales.mark_lost",
     "reopen": "sales.reopen", "link-vehicle": "sales.link_vehicle", "link-request": "sales.link_request",
-    "link-conversation": "sales.link_conversation", "set-conversion": "sales.set_conversion",
+    "link-conversation": "sales.link_conversation",
 }
 
 
@@ -35,6 +37,9 @@ async def _scope_clause(db: AsyncSession, actor: Actor):
     limit = await visible_vehicle_ids(db, actor)
     if limit is None:
         return None
+    if actor.kind == "external":
+        # a record-limited client follows its vehicle grant only; the owner's own leads are not part of it
+        return Opportunity.vehicle_id.in_(list(limit))
     return or_(Opportunity.vehicle_id.in_(list(limit)), Opportunity.owner_user_id == actor.user_id)
 
 
@@ -221,18 +226,11 @@ async def create_opportunity(payload: dict = Body(...), ctx: CommandContext = De
     return res.to_dict()
 
 
-@router.post("/opportunities/{opportunity_id}/set-conversion")
-async def set_conversion(opportunity_id: str, payload: dict = Body(...), _: Actor = Depends(require("finance.write")),
-                         ctx: CommandContext = Depends(command_context)):
-    res = await dispatch(ctx, "sales.set_conversion", {**payload, "opportunity_id": opportunity_id})
-    return res.to_dict()
-
-
 @router.post("/opportunities/{opportunity_id}/{action}")
 async def opportunity_action(opportunity_id: str, action: str, payload: dict = Body(default={}),
                              ctx: CommandContext = Depends(command_context)):
     name = COMMANDS.get(action)
-    if name is None or action == "set-conversion":
+    if name is None:
         raise HTTPException(404, f"unknown opportunity action {action!r}")
     res = await dispatch(ctx, name, {**(payload or {}), "opportunity_id": opportunity_id})
     return res.to_dict()

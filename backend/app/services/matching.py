@@ -88,12 +88,14 @@ def normalize_frame(raw: str | None) -> str | None:
 
 
 def normalize_stock_no(raw: str | None) -> str | None:
+    """Canonical human stock reference, identical to services.vehicles.normalize_stock_no (STK-0412):
+    a message saying "STK-412" or "stk 0412" must find the vehicle stored as STK-0412."""
     if not raw:
         return None
     v = re.sub(r"[\s_]", "", raw).upper()
-    m = re.fullmatch(r"(STK)-?(\d{2,8})", v)
+    m = re.fullmatch(r"(STK)-?(\d{1,8})", v)
     if m:
-        return f"{m.group(1)}-{m.group(2)}"
+        return f"STK-{int(m.group(2)):04d}"
     return v or None
 
 
@@ -122,16 +124,18 @@ def normalize_name(raw: str | None) -> str:
 
 # ── message-level extraction (B05) ──────────────────────────────────────────
 _EMAIL_RE = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
-_STOCK_RE = re.compile(r"\bSTK[-\s]?\d{3,8}\b", re.IGNORECASE)
+_STOCK_RE = re.compile(r"\bSTK[-\s]?\d{1,8}\b", re.IGNORECASE)
 _FRAME_RE = re.compile(r"\b[A-Z]{1,3}\d{1,3}[A-Z]{0,2}-\d{5,7}\b")
+# the captured reference must contain a digit: "invoice for the trucks" is not invoice number "FOR"
 _INVOICE_RE = re.compile(
-    r"(?i)\b(?:invoice|inv|請求書)\s*(?:no\.?|number|#|№|:)?\s*[:#]?\s*([A-Z0-9][A-Z0-9\-/]{2,})")
+    r"(?i)\b(?:invoice|inv|請求書)\s*(?:no\.?|number|#|№|:)?\s*[:#]?\s*((?=[A-Z0-9\-/]*\d)[A-Z0-9][A-Z0-9\-/]{2,})")
 _INVOICE_BARE_RE = re.compile(r"\bINV-?\d[A-Z0-9\-]*\b")
 _AMOUNT_RE = re.compile(
     r"(?:(?P<cur1>USD|US\$|\$|JPY|¥|￥|EUR|€)\s?(?P<amt1>\d{1,3}(?:,\d{3})+(?:\.\d{1,2})?|\d+(?:\.\d{1,2})?))"
     r"|(?:(?P<amt2>\d{1,3}(?:,\d{3})+(?:\.\d{1,2})?|\d+(?:\.\d{1,2})?)\s?(?P<cur2>USD|JPY|yen|円|dollars|EUR))",
     re.IGNORECASE)
 _PHONE_RE = re.compile(r"(?<![\w-])\+?\(?\d[\d\s().\-]{5,18}\d(?![\w-])")
+_DATE_LIKE_RE = re.compile(r"^(?:\d{4}[-/.]\d{1,2}[-/.]\d{1,2}|\d{1,2}[-/.]\d{1,2}[-/.]\d{2,4})(?!\d)")
 _CURRENCY_ALIASES = {"$": "USD", "us$": "USD", "usd": "USD", "dollars": "USD", "¥": "JPY", "￥": "JPY",
                      "jpy": "JPY", "yen": "JPY", "円": "JPY", "€": "EUR", "eur": "EUR"}
 
@@ -178,10 +182,14 @@ def extract_items(text: str | None) -> list[dict]:
             continue
         add("amount", m.start(), m.end(), m.group(0), {"amount": str(dec), "currency": _CURRENCY_ALIASES.get(cur, cur.upper())})
     for m in _PHONE_RE.finditer(text):
-        digits = re.sub(r"\D", "", m.group(0))
-        if len(digits) < 7 or len(digits) > 15:
+        raw = m.group(0).strip()
+        digits = re.sub(r"\D", "", raw)
+        # a dialable number: international prefix, or at least a full national number (dates/times are not phones)
+        if len(digits) > 15 or (not raw.startswith("+") and len(digits) < 10):
             continue
-        add("phone", m.start(), m.end(), m.group(0).strip(), normalize_phone(m.group(0)))
+        if _DATE_LIKE_RE.match(raw):
+            continue
+        add("phone", m.start(), m.end(), raw, normalize_phone(raw))
     items.sort(key=lambda i: i["span"][0])
     return items
 

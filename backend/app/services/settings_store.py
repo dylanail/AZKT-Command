@@ -302,6 +302,11 @@ async def gate_rule_upsert(ctx: CommandContext, inp: GateRuleUpsertIn) -> dict:
             raise NotFound("gate rule not found")
         if inp.expected_version is not None and r.version != inp.expected_version:
             raise Conflict("gate rule changed", current_version=r.version)
+        other = (await ctx.db.execute(select(ShopGateRule).where(
+            ShopGateRule.to_state == inp.to_state, ShopGateRule.requirement == inp.requirement, ShopGateRule.id != r.id))).scalars().first()
+        if other is not None:
+            # (to_state, requirement) is the rule's identity: editing one rule onto another would leave two rows
+            raise Conflict("a rule for that stage and requirement already exists; edit that rule instead", rule_id=other.id)
     else:
         r = (await ctx.db.execute(select(ShopGateRule).where(
             ShopGateRule.to_state == inp.to_state, ShopGateRule.requirement == inp.requirement).with_for_update())).scalars().first()

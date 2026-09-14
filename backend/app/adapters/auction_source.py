@@ -12,7 +12,7 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 from ..core.config import settings
@@ -109,7 +109,7 @@ class FixtureAuctionSource(AuctionSource):
             if since is not None and parse_iso(n["auction_at"]) < ensure_aware(since):
                 continue
             out.append(n)
-        return FetchResult("ok", out, source=self.name, fetched_at=datetime.now().astimezone().isoformat())
+        return FetchResult("ok", out, source=self.name, fetched_at=datetime.now(timezone.utc).isoformat())
 
 
 class HttpAuctionSource(AuctionSource):

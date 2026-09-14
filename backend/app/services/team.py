@@ -236,7 +236,13 @@ async def team_invite(ctx: CommandContext, inp: TeamInviteIn) -> dict:
         Invitation.dedupe_key == dedupe, Invitation.status == "pending", Invitation.expires_at > ctx.now))).scalars().first()
     if existing is not None:
         return {"invitation": serialize_invitation(existing), "token": None, "accept_path": None, "created": False,
-                "note": "An invitation is already pending for this person; revoke it to issue a new token."}
+                "link_issued": False,
+                "note": "An invitation is already pending for this person; reissue its link or revoke it to start over."}
+    # The raw token is handed to a signed-in owner exactly once and never persisted. When this command runs
+    # under an exact approval (the AI Manager proposed the invitation), the foundation stores the handler
+    # result on the approval row, so no link is issued here: the invitation is created with an unreachable
+    # hash and an owner issues the link directly with team.reissue_invitation.
+    issued = ctx.approval is None and ctx.actor.kind == "user"
     raw = new_token(32)
     inv = Invitation(email=email, phone=phone, display_name=inp.display_name.strip(), role=inp.role, scope=scope,
                      manager_id=inp.manager_id, perms=perms, token_hash=sha256_hex(raw), invited_by=ctx.actor.user_id,
@@ -247,11 +253,14 @@ async def team_invite(ctx: CommandContext, inp: TeamInviteIn) -> dict:
     ctx.changed.append({"kind": "invitation", "id": inv.id, "version": inv.version or 1})
     ctx.record(f"Invited {inv.display_name} as {inv.role} ({scope})", entity_kind="invitation", entity_id=inv.id,
                kind="access", state="pending", visibility="owner",
-               details={"role": inv.role, "scope": scope, "manager_id": inv.manager_id, "overrides": perms})
+               details={"role": inv.role, "scope": scope, "manager_id": inv.manager_id, "overrides": perms, "link_issued": issued})
     ctx.emit("team.invitation_changed", aggregate_type="invitation", aggregate_id=inv.id,
              payload={"invitation_id": inv.id, "status": "pending", "role": inv.role})
-    # The raw token is returned to the caller once and never persisted.
-    return {"invitation": serialize_invitation(inv), "token": raw, "accept_path": f"/invite/{raw}", "created": True}
+    if not issued:
+        del raw  # discarded on purpose: nothing can accept this invitation until an owner issues a link
+        return {"invitation": serialize_invitation(inv), "token": None, "accept_path": None, "created": True, "link_issued": False,
+                "note": "Invitation recorded without a link. A signed-in owner issues the one-time link from Team & access."}
+    return {"invitation": serialize_invitation(inv), "token": raw, "accept_path": f"/invite/{raw}", "created": True, "link_issued": True}
 
 
 class InvitationRef(BaseModel):
@@ -280,6 +289,35 @@ async def team_revoke_invitation(ctx: CommandContext, inp: InvitationRef) -> dic
     ctx.emit("team.invitation_changed", aggregate_type="invitation", aggregate_id=inv.id,
              payload={"invitation_id": inv.id, "status": "revoked"})
     return {"invitation": serialize_invitation(inv)}
+
+
+@command("team.reissue_invitation", input=InvitationRef, perm="team", action_class="owner_only", approval_kind="permission",
+         summary=lambda p: f"Reissue invitation link {p.invitation_id[:8]}",
+         description="Mint a fresh one-time link for a pending invitation; the previous link stops working. "
+                     "The link is handed only to a signed-in owner, never through an agent or an approval result.")
+async def team_reissue_invitation(ctx: CommandContext, inp: InvitationRef) -> dict:
+    if ctx.approval is not None or ctx.actor.kind != "user":
+        # An approval result is persisted; a bearer credential must never be. Agents may propose the
+        # invitation itself (team.invite), but the link is owner-issued work (spec §11.2: broaden access).
+        raise Blocked("invitation links are issued directly by a signed-in owner, not through an agent or approval",
+                      status="link_not_issued")
+    inv = (await ctx.db.execute(select(Invitation).where(Invitation.id == inp.invitation_id).with_for_update())).scalar_one_or_none()
+    if inv is None:
+        raise NotFound("invitation not found")
+    if inp.expected_version is not None and (inv.version or 1) != inp.expected_version:
+        raise Conflict("invitation changed", current_version=inv.version or 1)
+    if inv.status != "pending":
+        raise Blocked(f"invitation is {inv.status}", status=inv.status)
+    if inv.expires_at and inv.expires_at <= ctx.now:
+        raise Blocked("invitation expired; revoke it and invite again", status="expired")
+    raw = new_token(32)
+    inv.token_hash = sha256_hex(raw)  # rotates: any earlier link is dead from this commit on
+    ctx.touch(inv, "invitation")
+    ctx.record(f"Reissued invitation link for {inv.display_name}", entity_kind="invitation", entity_id=inv.id, kind="access",
+               state="pending", visibility="owner", details={"reason": inp.reason})
+    ctx.emit("team.invitation_changed", aggregate_type="invitation", aggregate_id=inv.id, aggregate_version=inv.version,
+             payload={"invitation_id": inv.id, "status": "pending", "link_reissued": True})
+    return {"invitation": serialize_invitation(inv), "token": raw, "accept_path": f"/invite/{raw}", "link_issued": True}
 
 
 # ── people ──────────────────────────────────────────────────────────────────

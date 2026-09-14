@@ -44,8 +44,22 @@ def _row(a: Approval) -> dict:
             "superseded_by_id": a.superseded_by_id, "supersedes_id": a.supersedes_id}
 
 
+SECRET_KEYS = ("token", "accept_path", "token_hash")
+
+
+def _scrub_secrets(obj):
+    """A handler result stored on an approval may carry a one-time credential (e.g. an invitation link).
+    It is never re-served from the read side."""
+    if isinstance(obj, dict):
+        return {k: (None if k in SECRET_KEYS else _scrub_secrets(v)) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_scrub_secrets(x) for x in obj]
+    return obj
+
+
 async def _detail(db: AsyncSession, a: Approval) -> dict:
     d = approvals_svc._brief(a)
+    d["result"] = _scrub_secrets(d.get("result"))
     spec = None
     try:
         spec = spec_for(a.command_name)

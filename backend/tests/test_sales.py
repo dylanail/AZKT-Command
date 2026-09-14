@@ -230,10 +230,70 @@ async def test_sales_api_permissions_and_money(client, db, owner, manager, mecha
     assert r.status_code == 200 and r.json()["items"][0]["budget_amount"] is None and r.json()["items"][0]["money_hidden"]
     r = await client.post(f"/api/sales/opportunities/{oid}/move-stage", json={"stage": "conversation"})
     assert r.status_code == 200 and r.json()["data"]["opportunity"]["stage"] == "conversation"
-    r = await client.post(f"/api/sales/opportunities/{oid}/set-conversion", json={"converted_kind": "sale", "converted_id": f"s-{tag}"})
-    assert r.status_code == 403
+    # Deposit Paid is never a hand action over HTTP (spec §5.2): not for a manager, not even for the owner
+    payload = {"converted_kind": "sale", "converted_id": f"s-{tag}"}
+    assert (await client.post(f"/api/sales/opportunities/{oid}/set-conversion", json=payload)).status_code == 404
+    login(client, owner)
+    assert (await client.post(f"/api/sales/opportunities/{oid}/set-conversion", json=payload)).status_code == 404
+    assert (await client.get(f"/api/sales/opportunities/{oid}")).json()["opportunity"]["converted_id"] is None
     login(client, mechanic)
     assert (await client.get("/api/sales/board")).status_code == 403
     assert (await client.get(f"/api/sales/opportunities/{oid}")).status_code == 403
     r = await client.post(f"/api/sales/opportunities/{oid}/move-stage", json={"stage": "lost", "reason": "x"})
     assert r.status_code == 403
+
+
+# ── one thread, several interests; lost leads leave cleanly; conversion guards; external scope ─────
+async def test_one_thread_links_multiple_interests_and_conversion_fixes_the_links(db, owner):
+    tag = _u()
+    c = await make_contact(db, owner, f"Multi {tag}")
+    v1 = await make_vehicle(db, f"STK-M1{tag[:5]}")
+    v2 = await make_vehicle(db, f"STK-M2{tag[:5]}")
+    ref = f"gmail:{tag}:thread"
+    first = await dispatch(ctx_for(db, owner), "sales.create_opportunity", {"contact_id": c["id"], "pipeline": "vehicle", "vehicle_id": v1.id, "source_ref": ref})
+    second = await dispatch(ctx_for(db, owner), "sales.create_opportunity", {"contact_id": c["id"], "pipeline": "vehicle", "vehicle_id": v2.id, "source_ref": ref})
+    irq = await dispatch(ctx_for(db, owner), "sales.create_opportunity", {"contact_id": c["id"], "pipeline": "irq", "enquiry": "or something similar", "source_ref": ref})
+    assert first.data["created"] and second.data["created"] and irq.data["created"]   # spec §5.1: one thread, several interests
+    replay = await dispatch(ctx_for(db, owner), "sales.create_opportunity", {"contact_id": c["id"], "pipeline": "vehicle", "vehicle_id": v1.id, "source_ref": ref})
+    assert replay.data["created"] is False and replay.data["opportunity"]["id"] == first.data["opportunity"]["id"]
+    assert len((await db.execute(select(Opportunity).where(Opportunity.source_ref == ref))).scalars().all()) == 3
+    with pytest.raises(ValidationFailed):
+        await dispatch(ctx_for(db, owner), "sales.create_opportunity", {"contact_id": c["id"], "pipeline": "irq", "enquiry": "x", "owner_user_id": "nobody"})
+    # dragging a lost lead back onto the board clears the lost state; the reason stays in history
+    o1 = first.data["opportunity"]["id"]
+    await dispatch(ctx_for(db, owner), "sales.mark_lost", {"opportunity_id": o1, "reason": "went quiet"})
+    back = await dispatch(ctx_for(db, owner), "sales.move_stage", {"opportunity_id": o1, "stage": "conversation"})
+    op = back.data["opportunity"]
+    assert op["stage"] == "conversation" and op["lost_reason"] is None and op["lost_at"] is None and op["reopened_at"]
+    assert op["extra"]["lost_history"][0]["reason"] == "went quiet"
+    # once converted, the vehicle / request link is fixed by the conversion record (invariant 6)
+    await dispatch(ctx_for(db, owner), "sales.set_conversion", {"opportunity_id": o1, "converted_kind": "sale", "converted_id": f"sale-{tag}",
+                                                                 "source_ref": f"square:payment:{tag}"})
+    with pytest.raises(Blocked):
+        await dispatch(ctx_for(db, owner), "sales.link_vehicle", {"opportunity_id": o1, "vehicle_id": v2.id})
+    same = await dispatch(ctx_for(db, owner), "sales.link_vehicle", {"opportunity_id": o1, "vehicle_id": v1.id})
+    assert same.data["linked"] is False
+    oi = irq.data["opportunity"]["id"]
+    await dispatch(ctx_for(db, owner), "sales.set_conversion", {"opportunity_id": oi, "converted_kind": "import_request", "converted_id": f"ir-{tag}"})
+    with pytest.raises(Conflict):
+        await dispatch(ctx_for(db, owner), "sales.link_request", {"opportunity_id": oi, "import_request_id": f"ir-other-{tag}"})
+    assert (await dispatch(ctx_for(db, owner), "sales.link_request", {"opportunity_id": oi, "import_request_id": f"ir-{tag}"})).data["linked"] is False
+    assert (await db.get(Vehicle, v1.id)).commercial_state == "not_listed"   # sales never touches the vehicle record
+
+
+async def test_external_client_scope_excludes_leads_outside_its_vehicle_grant(db, owner):
+    from backend.app.domain.actors import Actor
+    from backend.app.domain.policy import effective_perms
+    from backend.app.routers.sales import _scope_clause
+    tag = _u()
+    c = await make_contact(db, owner, f"Scoped {tag}")
+    v_in = await make_vehicle(db, f"STK-E1{tag[:5]}")
+    v_out = await make_vehicle(db, f"STK-E2{tag[:5]}")
+    for payload in ({"pipeline": "vehicle", "vehicle_id": v_in.id}, {"pipeline": "vehicle", "vehicle_id": v_out.id},
+                    {"pipeline": "irq", "enquiry": f"owner's own lead {tag}", "owner_user_id": owner.id}):
+        await dispatch(ctx_for(db, owner), "sales.create_opportunity", {"contact_id": c["id"], **payload})
+    client = Actor(kind="external", user_id=owner.id, role="owner", scope="all", perms=effective_perms("owner", {}),
+                   client_id=f"client-{tag}", client_scopes=["read:sales"], client_record_scope={"vehicle_ids": [v_in.id]})
+    clause = await _scope_clause(db, client)
+    rows = (await db.execute(select(Opportunity).where(Opportunity.contact_id == c["id"], clause))).scalars().all()
+    assert [o.vehicle_id for o in rows] == [v_in.id]   # not the other vehicle, not the owner's IRQ lead
