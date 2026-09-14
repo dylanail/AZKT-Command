@@ -1,5 +1,6 @@
 /* One row of a "Needs your decision" list: title, meta line (kind · consequence · record · deadline ·
    who asked), state when not pending, and a Review button that opens the exact approval. */
+import type { ReactNode } from "react";
 import { entityLabel, humanize, shortId } from "../../lib/links";
 import { Button, HealthLabel, ListRow, Money, When } from "../../ui";
 import { actorName, kindLabel, statusView, type ApprovalRowData } from "./types";
@@ -13,9 +14,9 @@ export interface ApprovalRowProps {
   hideState?: boolean;
 }
 
-function consequenceText(a: ApprovalRowData): React.ReactNode {
+function consequenceText(a: ApprovalRowData): ReactNode {
   const c = a.consequence || {};
-  const bits: React.ReactNode[] = [];
+  const bits: ReactNode[] = [];
   if (c.amount !== undefined && c.amount !== null && c.amount !== "") bits.push(<Money key="amt" amount={c.amount as number | string} currency={typeof c.currency === "string" ? c.currency : "USD"} />);
   else if (typeof c.scope === "string") bits.push(<span key="scope">{humanize(c.scope)}</span>);
   const to = (a.targets || {}).recipients;

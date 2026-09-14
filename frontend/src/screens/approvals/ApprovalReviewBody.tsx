@@ -54,11 +54,11 @@ function factsOf(d: ApprovalDetail): Array<[string, ReactNode]> {
   return out;
 }
 
-const HIDE_IN_PAYLOAD_LIST = new Set(["body", "text", "message", "content", "note", "reply", "subject", "to", "cc", "recipients", "attachments", "attachment"]);
-
+const SHOWN_AS_FACTS = new Set(["subject", "to", "cc", "recipients", "attachments", "attachment"]);
 function PayloadView({ d, bodyField }: { d: ApprovalDetail; bodyField: string | null }) {
   const p = d.payload || {};
-  const rest = Object.fromEntries(Object.entries(p).filter(([k]) => !HIDE_IN_PAYLOAD_LIST.has(k) || (k !== bodyField && !["subject", "to", "cc", "recipients", "attachments", "attachment"].includes(k))));
+  // Everything not already rendered as the message body or in the facts grid.
+  const rest = Object.fromEntries(Object.entries(p).filter(([k]) => k !== bodyField && !SHOWN_AS_FACTS.has(k)));
   return (
     <div className="stack-sm">
       {bodyField ? (
@@ -134,6 +134,7 @@ function StateNotice({ d }: { d: ApprovalDetail }) {
 }
 
 export function ApprovalReviewBody({ s }: { s: ApprovalDetailState }) {
+  const { user } = useAuth();
   const d = s.data;
   if (!d) return null;
   const xa = d.external_action;
@@ -171,7 +172,7 @@ export function ApprovalReviewBody({ s }: { s: ApprovalDetailState }) {
           ["Policy", d.policy_version ? `policy ${d.policy_version}` : <NotRecorded />],
           ["Command", <span className="tnum">{d.command_name}{d.action_class ? ` · ${humanize(d.action_class)}` : ""}</span>],
           ["Run", d.run_id || d.mission_id ? <span className="tnum">{[d.run_id ? `run ${d.run_id}` : null, d.mission_id ? `mission ${d.mission_id}` : null].filter(Boolean).join(" · ")}</span> : <NotRecorded />],
-          ["Authority", d.authorized_by ? `Approved by ${d.authorized_by === d.requested_by?.user_id ? "the requester" : `person ${shortId(d.authorized_by)}`}${d.decided_at ? "" : ""}` : "Owner approval required. No standing permission covers this action."],
+          ["Authority", d.authorized_by ? <span>Decided by {d.authorized_by === user?.id ? "you" : `person ${shortId(d.authorized_by)}`}{d.decided_at ? <> · <When iso={d.decided_at} format="long" /></> : null}</span> : "Owner approval required. No standing permission covers this action."],
           ["External action", xa ? <span className="tnum">{humanize(xa.state)} · {xa.provider || "provider not recorded"}{xa.provider_ref ? ` · ref ${xa.provider_ref}` : ""} · {xa.attempts} {xa.attempts === 1 ? "attempt" : "attempts"}</span> : d.executor ? `Executor: ${d.executor}` : "Internal change — no external side effect"],
           ["Receipt", isEmptyValue(d.receipt) && isEmptyValue(xa?.receipt) ? <NotRecorded text="No receipt yet" /> : <JsonDetail value={isEmptyValue(d.receipt) ? xa?.receipt : d.receipt} />],
           ["Record versions", isEmptyValue(d.record_versions) ? <NotRecorded /> : <JsonDetail value={d.record_versions} />],
