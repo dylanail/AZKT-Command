@@ -22,15 +22,10 @@ from .app.main import _import_commands
 
 log = logging.getLogger("azkt.worker")
 
-# Registered periodic sweeps: name -> (coroutine(session_factory) -> Any, interval seconds)
-SWEEPS: dict[str, tuple] = {}
-
-
-def sweep(name: str, interval_seconds: int):
-    def deco(fn):
-        SWEEPS[name] = (fn, interval_seconds)
-        return fn
-    return deco
+# Periodic sweeps are registered in backend.app.domain.jobs (SWEEPS / @sweep) so services can
+# register them without importing this module.
+SWEEPS = jobs_mod.SWEEPS
+sweep = jobs_mod.sweep
 
 
 async def _heartbeat(session_factory, worker_id: str, detail: dict) -> None:

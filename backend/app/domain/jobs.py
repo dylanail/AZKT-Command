@@ -20,11 +20,22 @@ from ..models.runtime import Job
 log = logging.getLogger("azkt.jobs")
 
 HANDLERS: dict[str, Callable[..., Awaitable]] = {}
+# Periodic sweeps run by backend/worker.py: name -> (async fn(session_factory), interval seconds)
+SWEEPS: dict[str, tuple] = {}
 
 
 def job(kind: str):
     def deco(fn):
         HANDLERS[kind] = fn
+        return fn
+    return deco
+
+
+def sweep(name: str, interval_seconds: int):
+    """Register a periodic worker sweep: `@sweep("reminders.deliver_due", 15)` on
+    `async def fn(session_factory) -> Any`. The worker runs it every interval and in run_once()."""
+    def deco(fn):
+        SWEEPS[name] = (fn, interval_seconds)
         return fn
     return deco
 
