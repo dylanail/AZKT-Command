@@ -27,7 +27,13 @@ def _include_routers(app: FastAPI) -> None:
     for m in sorted(pkgutil.iter_modules(pkg.__path__), key=lambda x: x.name):
         if m.name.startswith("_"):
             continue
-        mod = importlib.import_module(f"{pkg.__name__}.{m.name}")
+        try:
+            mod = importlib.import_module(f"{pkg.__name__}.{m.name}")
+        except Exception as e:  # noqa: BLE001
+            if settings.is_production:
+                raise
+            log.warning("skipping router %s: %s: %s", m.name, type(e).__name__, e)
+            continue
         r = getattr(mod, "router", None)
         if r is not None:
             app.include_router(r)
@@ -41,8 +47,14 @@ def _import_commands() -> None:
         except ModuleNotFoundError:
             continue
         for m in pkgutil.iter_modules(pkg.__path__):
-            if not m.name.startswith("_"):
+            if m.name.startswith("_"):
+                continue
+            try:
                 importlib.import_module(f"{pkg_name}.{m.name}")
+            except Exception as e:  # noqa: BLE001
+                if settings.is_production:
+                    raise
+                log.warning("skipping module %s.%s: %s: %s", pkg_name, m.name, type(e).__name__, e)
 
 
 def create_app() -> FastAPI:
