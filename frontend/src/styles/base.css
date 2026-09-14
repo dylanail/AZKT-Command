@@ -130,3 +130,12 @@ input:focus-visible, textarea:focus-visible, select:focus-visible { outline: 2px
 /* Scrollbars inside panels stay quiet */
 .quiet-scroll { scrollbar-width: none; }
 .quiet-scroll::-webkit-scrollbar { display: none; }
+
+/* Link-styled button for in-page actions that are not navigation */
+.linklike {
+  border: 0; background: transparent; padding: 0;
+  color: var(--act); font-size: inherit; cursor: pointer;
+  white-space: nowrap; flex: none;
+}
+.linklike:hover { text-decoration: underline; }
+.linklike:disabled { color: var(--t4); text-decoration: none; cursor: not-allowed; }

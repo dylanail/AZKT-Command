@@ -278,3 +278,10 @@
 
 /* 200% zoom / narrow safety: nothing may exceed the viewport */
 .shell, .mshell, .main, .mmain { max-width: 100%; }
+
+/* Phone touch targets: 44px for the top-bar controls and list chips */
+@media (max-width: 767px) {
+  .mtop .iconbtn--sm { width: 44px; height: 44px; }
+  button.chip { min-height: 36px; }
+  .tab, .seg__item { min-height: 40px; }
+}

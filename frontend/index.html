@@ -2,13 +2,32 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
-    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
     <meta name="apple-mobile-web-app-title" content="AZKT" />
-    <meta name="theme-color" content="#0b0f14" />
+    <meta name="theme-color" content="#dfe6f3" />
+    <meta name="theme-color" media="(prefers-color-scheme: light)" content="#dfe6f3" />
+    <meta name="theme-color" media="(prefers-color-scheme: dark)" content="#07080d" />
+    <meta name="color-scheme" content="light dark" />
     <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png" />
-    <title>AZKT Command</title>
+    <title>AZKT</title>
+    <script>
+      // Apply the persisted theme before first paint (light default; dark and opaque are explicit toggles).
+      (function () {
+        try {
+          var d = document.documentElement;
+          var t = localStorage.getItem("azkt-theme");
+          d.setAttribute("data-theme", t === "dark" ? "dark" : "light");
+          var g = localStorage.getItem("azkt-glass");
+          if (!g && window.matchMedia && window.matchMedia("(prefers-reduced-transparency: reduce)").matches) g = "off";
+          d.setAttribute("data-glass", g === "off" ? "off" : "on");
+          if (localStorage.getItem("azkt-motion") === "reduced") d.setAttribute("data-motion", "reduced");
+          d.style.colorScheme = t === "dark" ? "dark" : "light";
+        } catch (e) {}
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>
