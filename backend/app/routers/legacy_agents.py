@@ -9,7 +9,7 @@ from ..db import get_db
 from ..models import ChatMessage
 from ..services import agents
 
-router = APIRouter(prefix="/api/agents", tags=["agents"], dependencies=[Depends(current_user)])
+router = APIRouter(prefix="/api/legacy/agents", tags=["agents"], dependencies=[Depends(current_user)])
 
 
 @router.get("")

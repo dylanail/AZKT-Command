@@ -7,7 +7,7 @@ from ..auth.passkey import current_user
 from ..db import get_db
 from ..services import chat_history
 
-router = APIRouter(prefix="/api/chat", tags=["chat"],
+router = APIRouter(prefix="/api/legacy/chat", tags=["chat"],
                    dependencies=[Depends(current_user)])
 
 

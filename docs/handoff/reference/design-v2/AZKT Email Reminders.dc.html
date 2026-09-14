@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<meta name="design_doc_mode" content="canvas">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+body{margin:0;background:#e9ecf2;color:#121212;font-family:"Instrument Sans","Noto Sans JP",system-ui,sans-serif;font-size:15px;line-height:1.5;-webkit-font-smoothing:antialiased}
+a{color:#121212;text-decoration:underline}a:hover{color:#6e6e73}
+*{box-sizing:border-box}
+</style>
+</helmet>
+<div style="min-height:100vh;padding:40px 24px 80px;display:flex;flex-direction:column;gap:36px;align-items:center">
+  <div style="width:100%;max-width:1380px;display:flex;flex-direction:column;gap:6px">
+    <div style="font-size:12px;color:#6e6e73;letter-spacing:.08em;text-transform:uppercase;font-weight:600">AZKT · Email reminders</div>
+    <h1 style="font-size:24px;font-weight:700;margin:0;letter-spacing:-.02em">Reminder emails to yourself</h1>
+    <div style="color:#6e6e73;font-size:14px;max-width:720px">One template, four moments. Plain white on grey, charcoal ink, one amber rule as the brand mark. Every email states what, who, when, the reminder offset, and one button back into AZKT. Nothing else.</div>
+  </div>
+
+  <div style="width:100%;max-width:1380px;display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:28px;align-items:start">
+
+    <!-- 1 · Task reminder -->
+    <div style="display:flex;flex-direction:column;gap:10px">
+      <div style="font-size:13px;color:#6e6e73;display:flex;justify-content:space-between"><span style="font-weight:600;color:#121212">1 · Task reminder</span><span>at the chosen offset</span></div>
+      <div style="background:#fff;border:1px solid #d8dbe2;border-radius:12px;overflow:hidden">
+        <div style="padding:14px 22px;border-bottom:1px solid #eceef2;font-size:13px;color:#6e6e73;display:grid;grid-template-columns:52px minmax(0,1fr);gap:4px 10px"><span>From</span><span style="color:#121212">AZKT &lt;reminders@azkt.app&gt;</span><span>To</span><span style="color:#121212">Dylan Reyes</span><span>Subject</span><span style="color:#121212;font-weight:600">Call Tomás Aldana in 15 min · 14:00 AZ</span></div>
+        <div style="padding:26px 22px 8px;display:flex;flex-direction:column;gap:18px">
+          <div style="display:flex;align-items:center;justify-content:space-between"><img src="./gen/azkt-logo.png" alt="Arizona Kei Trucks" style="width:112px;height:auto;display:block"><span style="font-size:12px;color:#6e6e73;letter-spacing:.06em;text-transform:uppercase">Reminder</span></div>
+          <div style="height:2px;background:#E6B35C;width:36px"></div>
+          <div style="display:flex;flex-direction:column;gap:6px"><div style="font-size:22px;font-weight:700;letter-spacing:-.02em;line-height:1.25">Call Tomás Aldana</div><div style="font-size:15px;color:#3a3a3c">Today, Sep 14 · <b style="font-weight:600;color:#121212">14:00 AZ</b> · in 15 minutes</div></div>
+          <div style="display:grid;grid-template-columns:92px minmax(0,1fr);gap:8px 14px;font-size:14px;border-top:1px solid #eceef2;border-bottom:1px solid #eceef2;padding:14px 0"><span style="color:#6e6e73">Pipeline</span><span>IRQ · Awaiting Deposit</span><span style="color:#6e6e73">Looking for</span><span>1999 Subaru Sambar Dias · 4WD, supercharger · avoid rust</span><span style="color:#6e6e73">Budget</span><span style="font-variant-numeric:tabular-nums">up to 9,500 USD landed</span><span style="color:#6e6e73">Contact</span><span style="font-variant-numeric:tabular-nums">+1 (520) 555-3391</span><span style="color:#6e6e73">Your note</span><span>Bid ceiling before auction closes</span></div>
+          <a href="#" style="display:inline-block;align-self:flex-start;background:#121212;color:#fff;text-decoration:none;font-weight:600;font-size:14px;padding:12px 20px;border-radius:10px">Open lead in AZKT</a>
+          <div style="font-size:13px;color:#6e6e73;display:flex;gap:14px;flex-wrap:wrap"><a href="#" style="color:#6e6e73">Mark done</a><a href="#" style="color:#6e6e73">Snooze 1 hour</a><a href="#" style="color:#6e6e73">Reschedule</a></div>
+        </div>
+        <div style="padding:18px 22px 22px;font-size:12px;color:#8e8e93;line-height:1.6">You set this reminder for 15 minutes before. Change reminder timing in Sales › Tasks.<br>Arizona Kei Trucks · Phoenix, AZ · <a href="#" style="color:#8e8e93">Reminder settings</a></div>
+      </div>
+    </div>
+
+    <!-- 2 · Overdue -->
+    <div style="display:flex;flex-direction:column;gap:10px">
+      <div style="font-size:13px;color:#6e6e73;display:flex;justify-content:space-between"><span style="font-weight:600;color:#121212">2 · Overdue task</span><span>1 hour after the time passes</span></div>
+      <div style="background:#fff;border:1px solid #d8dbe2;border-radius:12px;overflow:hidden">
+        <div style="padding:14px 22px;border-bottom:1px solid #eceef2;font-size:13px;color:#6e6e73;display:grid;grid-template-columns:52px minmax(0,1fr);gap:4px 10px"><span>From</span><span style="color:#121212">AZKT &lt;reminders@azkt.app&gt;</span><span>To</span><span style="color:#121212">Dylan Reyes</span><span>Subject</span><span style="color:#121212;font-weight:600">Overdue: call Jordan Mills · was due yesterday 13:30</span></div>
+        <div style="padding:26px 22px 8px;display:flex;flex-direction:column;gap:18px">
+          <div style="display:flex;align-items:center;justify-content:space-between"><img src="./gen/azkt-logo.png" alt="Arizona Kei Trucks" style="width:112px;height:auto;display:block"><span style="font-size:12px;color:#B3261E;letter-spacing:.06em;text-transform:uppercase;font-weight:600">Overdue</span></div>
+          <div style="height:2px;background:#E6B35C;width:36px"></div>
+          <div style="display:flex;flex-direction:column;gap:6px"><div style="font-size:22px;font-weight:700;letter-spacing:-.02em;line-height:1.25">Call Jordan Mills</div><div style="font-size:15px;color:#3a3a3c">Was due <b style="font-weight:600;color:#B3261E">yesterday, Sep 13 · 13:30 AZ</b> · 20 hours ago</div></div>
+          <div style="display:grid;grid-template-columns:92px minmax(0,1fr);gap:8px 14px;font-size:14px;border-top:1px solid #eceef2;border-bottom:1px solid #eceef2;padding:14px 0"><span style="color:#6e6e73">Pipeline</span><span>Vehicle Sales · Awaiting Deposit</span><span style="color:#6e6e73">Vehicle</span><span>1999 Subaru Sambar · STK-0405</span><span style="color:#6e6e73">Contact</span><span style="font-variant-numeric:tabular-nums">+1 (480) 555-7720</span><span style="color:#6e6e73">Your note</span><span>Confirm deposit link received</span><span style="color:#6e6e73">Lead age</span><span>4 days · wants it before Oct 1</span></div>
+          <a href="#" style="display:inline-block;align-self:flex-start;background:#121212;color:#fff;text-decoration:none;font-weight:600;font-size:14px;padding:12px 20px;border-radius:10px">Open lead in AZKT</a>
+          <div style="font-size:13px;color:#6e6e73;display:flex;gap:14px;flex-wrap:wrap"><a href="#" style="color:#6e6e73">Mark done</a><a href="#" style="color:#6e6e73">Reschedule to today 16:00</a><a href="#" style="color:#6e6e73">Cancel task</a></div>
+        </div>
+        <div style="padding:18px 22px 22px;font-size:12px;color:#8e8e93;line-height:1.6">You'll get one overdue email per task, then it stays in your Tasks list.<br>Arizona Kei Trucks · Phoenix, AZ · <a href="#" style="color:#8e8e93">Reminder settings</a></div>
+      </div>
+    </div>
+
+    <!-- 3 · Morning digest -->
+    <div style="display:flex;flex-direction:column;gap:10px">
+      <div style="font-size:13px;color:#6e6e73;display:flex;justify-content:space-between"><span style="font-weight:600;color:#121212">3 · Morning digest</span><span>07:00 AZ daily, only if there's something</span></div>
+      <div style="background:#fff;border:1px solid #d8dbe2;border-radius:12px;overflow:hidden">
+        <div style="padding:14px 22px;border-bottom:1px solid #eceef2;font-size:13px;color:#6e6e73;display:grid;grid-template-columns:52px minmax(0,1fr);gap:4px 10px"><span>From</span><span style="color:#121212">AZKT &lt;reminders@azkt.app&gt;</span><span>To</span><span style="color:#121212">Dylan Reyes</span><span>Subject</span><span style="color:#121212;font-weight:600">Today: 3 tasks, 1 overdue, 1 approval waiting</span></div>
+        <div style="padding:26px 22px 8px;display:flex;flex-direction:column;gap:18px">
+          <div style="display:flex;align-items:center;justify-content:space-between"><img src="./gen/azkt-logo.png" alt="Arizona Kei Trucks" style="width:112px;height:auto;display:block"><span style="font-size:12px;color:#6e6e73;letter-spacing:.06em;text-transform:uppercase">Sunday, Sep 14</span></div>
+          <div style="height:2px;background:#E6B35C;width:36px"></div>
+          <div style="font-size:22px;font-weight:700;letter-spacing:-.02em;line-height:1.25">Good morning. Three things today, one already late.</div>
+          <div style="display:flex;flex-direction:column;border-top:1px solid #eceef2">
+            <div style="display:grid;grid-template-columns:76px minmax(0,1fr);gap:2px 14px;padding:12px 0;border-bottom:1px solid #eceef2;font-size:14px"><span style="color:#B3261E;font-weight:600;font-variant-numeric:tabular-nums">Overdue</span><span><b style="font-weight:600">Call Jordan Mills</b> · Sambar STK-0405 · was Sat 13:30</span></div>
+            <div style="display:grid;grid-template-columns:76px minmax(0,1fr);gap:2px 14px;padding:12px 0;border-bottom:1px solid #eceef2;font-size:14px"><span style="font-weight:600;font-variant-numeric:tabular-nums">09:40</span><span><b style="font-weight:600">Follow-up Renee Castillo</b> · Carry STK-0412 · send compressor photo</span></div>
+            <div style="display:grid;grid-template-columns:76px minmax(0,1fr);gap:2px 14px;padding:12px 0;border-bottom:1px solid #eceef2;font-size:14px"><span style="font-weight:600;font-variant-numeric:tabular-nums">14:00</span><span><b style="font-weight:600">Call Tomás Aldana</b> · IRQ · bid ceiling before auction</span></div>
+            <div style="display:grid;grid-template-columns:76px minmax(0,1fr);gap:2px 14px;padding:12px 0;border-bottom:1px solid #eceef2;font-size:14px"><span style="color:#6e6e73;font-variant-numeric:tabular-nums">Approval</span><span><b style="font-weight:600">Shipping quote to Aisha Okafor</b> · expires 07:40 tomorrow</span></div>
+          </div>
+          <div style="font-size:14px;color:#3a3a3c">Tomorrow: video call with Dana Kim, 11:00 AZ.</div>
+          <a href="#" style="display:inline-block;align-self:flex-start;background:#121212;color:#fff;text-decoration:none;font-weight:600;font-size:14px;padding:12px 20px;border-radius:10px">Open Tasks</a>
+        </div>
+        <div style="padding:18px 22px 22px;font-size:12px;color:#8e8e93;line-height:1.6">Sent only on days with an open task, overdue item or waiting approval.<br>Arizona Kei Trucks · Phoenix, AZ · <a href="#" style="color:#8e8e93">Change digest time</a> · <a href="#" style="color:#8e8e93">Turn off</a></div>
+      </div>
+    </div>
+
+    <!-- 4 · Deposit paid -->
+    <div style="display:flex;flex-direction:column;gap:10px">
+      <div style="font-size:13px;color:#6e6e73;display:flex;justify-content:space-between"><span style="font-weight:600;color:#121212">4 · Deposit paid</span><span>hand-off confirmation</span></div>
+      <div style="background:#fff;border:1px solid #d8dbe2;border-radius:12px;overflow:hidden">
+        <div style="padding:14px 22px;border-bottom:1px solid #eceef2;font-size:13px;color:#6e6e73;display:grid;grid-template-columns:52px minmax(0,1fr);gap:4px 10px"><span>From</span><span style="color:#121212">AZKT &lt;reminders@azkt.app&gt;</span><span>To</span><span style="color:#121212">Dylan Reyes</span><span>Subject</span><span style="color:#121212;font-weight:600">Deposit paid · Jordan Mills · 1999 Subaru Sambar</span></div>
+        <div style="padding:26px 22px 8px;display:flex;flex-direction:column;gap:18px">
+          <div style="display:flex;align-items:center;justify-content:space-between"><img src="./gen/azkt-logo.png" alt="Arizona Kei Trucks" style="width:112px;height:auto;display:block"><span style="font-size:12px;color:#1E7F4F;letter-spacing:.06em;text-transform:uppercase;font-weight:600">Deposit paid</span></div>
+          <div style="height:2px;background:#E6B35C;width:36px"></div>
+          <div style="display:flex;flex-direction:column;gap:6px"><div style="font-size:22px;font-weight:700;letter-spacing:-.02em;line-height:1.25">Jordan Mills paid the deposit</div><div style="font-size:15px;color:#3a3a3c">Today, Sep 14 · <b style="font-weight:600;color:#121212">10:12 AZ</b> · moved out of Sales into the vehicle's Sale tab</div></div>
+          <div style="display:grid;grid-template-columns:92px minmax(0,1fr);gap:8px 14px;font-size:14px;border-top:1px solid #eceef2;border-bottom:1px solid #eceef2;padding:14px 0"><span style="color:#6e6e73">Vehicle</span><span>1999 Subaru Sambar · STK-0405</span><span style="color:#6e6e73">Deposit</span><span style="font-variant-numeric:tabular-nums">1,000 USD · Stripe receipt ST-88213</span><span style="color:#6e6e73">Next</span><span>Reservation agreement · pickup date · aftercare</span><span style="color:#6e6e73">Open tasks</span><span>1 cancelled automatically (call · confirm deposit link)</span></div>
+          <a href="#" style="display:inline-block;align-self:flex-start;background:#121212;color:#fff;text-decoration:none;font-weight:600;font-size:14px;padding:12px 20px;border-radius:10px">Open Sale tab</a>
+        </div>
+        <div style="padding:18px 22px 22px;font-size:12px;color:#8e8e93;line-height:1.6">Money detail is only sent to the owner's address.<br>Arizona Kei Trucks · Phoenix, AZ · <a href="#" style="color:#8e8e93">Reminder settings</a></div>
+      </div>
+    </div>
+
+  </div>
+
+  <div style="width:100%;max-width:1380px;display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:20px;font-size:13px;color:#3a3a3c;border-top:1px solid #d8dbe2;padding-top:20px">
+    <div><div style="font-weight:600;color:#121212;margin-bottom:4px">Subject line rule</div>Action + person + time. Never "Reminder:". The inbox preview alone should tell you what to do.</div>
+    <div><div style="font-weight:600;color:#121212;margin-bottom:4px">Timing</div>Task reminder at your chosen offset. One overdue email 1 hour after the time. Digest 07:00 AZ only when non-empty. Deposit paid instantly.</div>
+    <div><div style="font-weight:600;color:#121212;margin-bottom:4px">Visual</div>Logo in #121212, one 36px amber rule, charcoal button. No images of vehicles, no colour except the status word (red overdue, green paid).</div>
+    <div><div style="font-weight:600;color:#121212;margin-bottom:4px">Links</div>Every button deep-links to the exact lead, task list or Sale tab. Text links handle done / snooze / reschedule without opening the app.</div>
+  </div>
+</div>
+</x-dc>
+</body>
+</html>

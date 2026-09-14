@@ -1,0 +1,4 @@
+-r requirements.txt
+pytest-asyncio==1.4.0
+pytest==9.1.1
+soft-webauthn==0.1.4

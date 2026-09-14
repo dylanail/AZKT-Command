@@ -23,7 +23,7 @@ from ..core.config import CONFIG_DIR, settings
 from ..db import get_db
 from ..services import notion_sync
 
-router = APIRouter(prefix="/api/notion", tags=["notion"],
+router = APIRouter(prefix="/api/legacy/notion", tags=["notion"],
                    dependencies=[Depends(current_user)])
 
 _SCHEMA = CONFIG_DIR / "notion_schema.json"
