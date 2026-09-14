@@ -37,3 +37,11 @@ class Opportunity(Base, BusinessRow):
     conversation_ids: Mapped[list] = mapped_column(JSON, default=list)
     stage_history: Mapped[list] = mapped_column(JSON, default=list)
     extra: Mapped[dict] = mapped_column(JSON, default=dict)
+    # added by the sales domain (add-only): ingestion dedupe, stage timing, conversion provenance
+    source_ref: Mapped[str | None] = mapped_column(String, nullable=True, index=True)  # message/provider ref that created it
+    enquiry_key: Mapped[str | None] = mapped_column(String, nullable=True, index=True)  # normalized enquiry for dedupe
+    stage_changed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    converted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    conversion_source_ref: Mapped[str | None] = mapped_column(String, nullable=True)  # payment/event id that converted it
+    reopened_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

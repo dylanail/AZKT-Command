@@ -31,6 +31,21 @@ class User(Base):
     last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     disabled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # ── access administration (spec §3.1 Person / §11.1) ─────────────────
+    version: Mapped[int] = mapped_column(Integer, default=1)  # optimistic concurrency for team commands
+    grants: Mapped[list] = mapped_column(JSON, default=list)  # [{perm, granted, by, at, note}] explicit grant history
+    access_changed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    access_changed_by: Mapped[str | None] = mapped_column(String, nullable=True)
+    disabled_by: Mapped[str | None] = mapped_column(String, nullable=True)
+    disabled_reason: Mapped[str | None] = mapped_column(String, nullable=True)
+    invited_by: Mapped[str | None] = mapped_column(String, nullable=True)
+    invitation_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    updated_by: Mapped[str | None] = mapped_column(String, nullable=True)
+
+    def bump(self, actor_id: str | None = None) -> None:
+        """Same contract as BusinessRow.bump so CommandContext.touch() works on people."""
+        self.version = (self.version or 1) + 1
+        self.updated_by = actor_id
 
 
 class Credential(Base):
@@ -66,3 +81,11 @@ class Invitation(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     note: Mapped[str] = mapped_column(Text, default="")
     is_active_flag: Mapped[bool] = mapped_column(Boolean, default=True)
+    revoked_by: Mapped[str | None] = mapped_column(String, nullable=True)
+    dedupe_key: Mapped[str | None] = mapped_column(String, nullable=True, index=True)  # retry-safe invites
+    version: Mapped[int] = mapped_column(Integer, default=1)
+    updated_by: Mapped[str | None] = mapped_column(String, nullable=True)
+
+    def bump(self, actor_id: str | None = None) -> None:
+        self.version = (self.version or 1) + 1
+        self.updated_by = actor_id

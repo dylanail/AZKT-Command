@@ -25,6 +25,12 @@ class Contact(Base, BusinessRow):
     search_text: Mapped[str] = mapped_column(Text, default="")
     extra: Mapped[dict] = mapped_column(JSON, default=dict)
     legacy_customer_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    # added by the contacts domain (add-only): aliases kept after merges, provenance, lifecycle stamps
+    aliases: Mapped[list] = mapped_column(JSON, default=list)  # [{name, company, from_contact_id}]
+    source_ref: Mapped[str | None] = mapped_column(String, nullable=True, index=True)  # ingestion dedupe key
+    provisional_reason: Mapped[str | None] = mapped_column(String, nullable=True)
+    archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    merged_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class ContactIdentity(Base, BusinessRow):
@@ -39,6 +45,9 @@ class ContactIdentity(Base, BusinessRow):
     is_primary: Mapped[bool] = mapped_column(Boolean, default=False)
     source: Mapped[str] = mapped_column(String, default="manual")
     label: Mapped[str] = mapped_column(String, default="")
+    country: Mapped[str | None] = mapped_column(String, nullable=True)  # phones: ISO country used for E.164
+    verified_by: Mapped[str | None] = mapped_column(String, nullable=True)
+    verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class ContactMerge(Base, BusinessRow):
@@ -49,3 +58,6 @@ class ContactMerge(Base, BusinessRow):
     snapshot: Mapped[dict] = mapped_column(JSON, default=dict)  # merged contact + relinked ids
     reason: Mapped[str] = mapped_column(Text, default="")
     reverted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    reverted_by: Mapped[str | None] = mapped_column(String, nullable=True)
+    approval_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    merged_by: Mapped[str | None] = mapped_column(String, nullable=True)

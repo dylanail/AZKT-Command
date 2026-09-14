@@ -1,0 +1,132 @@
+/* Base: reset, typography, focus, motion, zoom safety. Tokens live in tokens.css. */
+
+*, *::before, *::after { box-sizing: border-box; }
+
+html {
+  /* clip (not hidden) so the viewport stays the scroll container and sticky keeps working */
+  overflow-x: clip;
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  min-height: 100dvh;
+  background: var(--canvas);
+  color: var(--text);
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display", "Helvetica Neue", system-ui, sans-serif;
+  font-size: 15px;
+  line-height: 1.45;
+  letter-spacing: -.005em;
+  -webkit-font-smoothing: antialiased;
+  overflow-x: clip;
+}
+/* The wall is painted on a fixed layer so it never scrolls or tiles (iOS ignores background-attachment). */
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  background: var(--wall);
+  z-index: -1;
+  pointer-events: none;
+}
+@media (max-width: 767px) {
+  body { font-size: 16px; }
+}
+
+#root { min-height: 100vh; min-height: 100dvh; display: flex; flex-direction: column; }
+
+h1, h2, h3, h4, p { margin: 0; }
+h1 { font-size: 26px; font-weight: 700; letter-spacing: -.02em; line-height: 1.3; }
+h2 { font-size: 15px; font-weight: 600; }
+h3 { font-size: 14px; font-weight: 600; }
+@media (max-width: 767px) { h1 { font-size: 24px; } }
+
+a {
+  color: var(--act);
+  text-decoration: none;
+  white-space: nowrap;
+  flex: none;
+  cursor: pointer;
+}
+a:hover { text-decoration: underline; }
+a.wrap { white-space: normal; flex: initial; }
+
+button {
+  font-family: inherit;
+  font-size: inherit;
+  cursor: pointer;
+  white-space: nowrap;
+  flex: none;
+  color: inherit;
+  margin: 0;
+}
+button:disabled, button[aria-disabled="true"] { cursor: not-allowed; }
+
+input, textarea, select { font: inherit; color: inherit; margin: 0; }
+img, svg, video { max-width: 100%; display: block; }
+img { height: auto; }
+
+/* Focus: every control gets a visible ring, only for keyboard/focus-visible. */
+:focus { outline: none; }
+:focus-visible { outline: 2px solid var(--act); outline-offset: 2px; border-radius: 6px; }
+button:focus-visible, a:focus-visible, [tabindex]:focus-visible { outline: 2px solid var(--act); outline-offset: 2px; }
+input:focus-visible, textarea:focus-visible, select:focus-visible { outline: 2px solid var(--act); outline-offset: 1px; }
+
+/* Numbers that must line up: money, dates, ids */
+.tnum, time, [data-tnum] { font-variant-numeric: tabular-nums; }
+
+/* Utility text tones */
+.t2 { color: var(--t2); }
+.t3 { color: var(--t3); }
+.t4 { color: var(--t4); }
+.fs12 { font-size: 12px; }
+.fs13 { font-size: 13px; }
+.fs14 { font-size: 14px; }
+.nowrap { white-space: nowrap; flex: none; }
+.truncate { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.eyebrow { font-size: 12px; color: var(--t3); letter-spacing: .04em; text-transform: uppercase; }
+
+.sr-only {
+  position: absolute !important; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0;
+}
+
+/* Layout helpers */
+.stack { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+.stack-sm { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.stack-lg { display: flex; flex-direction: column; gap: 24px; min-width: 0; }
+.row { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.row-wrap { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; min-width: 0; }
+.between { display: flex; justify-content: space-between; align-items: center; gap: 12px; min-width: 0; }
+.grow { flex: 1 1 auto; min-width: 0; }
+.page { display: flex; flex-direction: column; gap: 24px; max-width: 960px; min-width: 0; width: 100%; }
+.page-wide { max-width: 1200px; }
+.page-narrow { max-width: 640px; }
+
+/* Motion */
+@keyframes azktToast { from { transform: translateY(12px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
+@keyframes azktFade { from { opacity: 0; } to { opacity: 1; } }
+@keyframes azktBlink { to { opacity: 0; } }
+@keyframes azktPulse { 0% { transform: scale(.6); opacity: .6; } 100% { transform: scale(1.8); opacity: 0; } }
+@keyframes azktShimmer { from { background-position: 200% 0; } to { background-position: -200% 0; } }
+@keyframes azktSheet { from { transform: translateY(24px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: .01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: .01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+[data-motion="reduced"] *, [data-motion="reduced"] *::before, [data-motion="reduced"] *::after {
+  animation-duration: .01ms !important;
+  animation-iteration-count: 1 !important;
+  transition-duration: .01ms !important;
+}
+
+/* Scrollbars inside panels stay quiet */
+.quiet-scroll { scrollbar-width: none; }
+.quiet-scroll::-webkit-scrollbar { display: none; }
