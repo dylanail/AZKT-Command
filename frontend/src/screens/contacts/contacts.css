@@ -1,0 +1,30 @@
+/* Contacts list · contact detail. Values mirror the Liquid Glass II prototype. */
+
+.ct-toolbar { display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap; align-items: center; min-width: 0; }
+.ct-search { max-width: 360px; width: 100%; }
+.ct-roles { display: flex; gap: 6px; flex-wrap: nowrap; overflow: hidden; min-width: 0; }
+.ct-row__right { display: flex; align-items: center; gap: 8px; flex: none; }
+@media (max-width: 767px) { .ct-row__right .chip:nth-child(n+3) { display: none; } }
+
+.cd-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 16px; align-items: start; min-width: 0; }
+.cd-section { display: flex; flex-direction: column; gap: 8px; padding: 14px 16px; min-width: 0; }
+.cd-section__title { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; font-size: 12px; text-transform: uppercase; letter-spacing: .04em; color: var(--t3); }
+.cd-section__title .count { text-transform: none; letter-spacing: 0; color: var(--t4); }
+.cd-item { display: flex; justify-content: space-between; gap: 12px; align-items: center; padding: 8px 0; border-bottom: 1px solid var(--line2); font-size: 14px; min-width: 0; }
+.cd-item:last-child { border-bottom: 0; }
+.cd-item__main { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.cd-item__main a { white-space: normal; flex: initial; }
+.cd-item__meta { font-size: 12px; color: var(--t3); font-variant-numeric: tabular-nums; }
+.cd-item__right { display: flex; gap: 6px; align-items: center; flex: none; }
+.cd-ident-form { display: grid; grid-template-columns: 130px minmax(0, 1fr) minmax(0, 120px) auto; gap: 8px; align-items: end; }
+@media (max-width: 640px) { .cd-ident-form { grid-template-columns: 1fr 1fr; } .cd-ident-form > :nth-child(2) { grid-column: span 2; } }
+.cd-roles { display: flex; gap: 6px; flex-wrap: wrap; }
+.cd-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+
+.ct-picker { display: flex; flex-direction: column; gap: 6px; max-height: 260px; overflow: auto; }
+.ct-picker__row {
+  display: flex; justify-content: space-between; gap: 8px; align-items: center; padding: 8px 12px; min-height: 44px;
+  border-radius: 12px; border: 1px solid var(--line2); background: transparent; text-align: left; width: 100%; white-space: normal; color: inherit;
+}
+.ct-picker__row[aria-checked="true"] { border-color: var(--text); background: var(--soft); }
+.ct-picker__row:hover { background: var(--row-hover); }
