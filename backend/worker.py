@@ -33,6 +33,22 @@ def sweep(name: str, interval_seconds: int):
     return deco
 
 
+async def _heartbeat(session_factory, worker_id: str, detail: dict) -> None:
+    from sqlalchemy import select
+    from .app.models.legacy import SyncState
+    try:
+        async with session_factory() as db:
+            row = (await db.execute(select(SyncState).where(SyncState.key == "worker_heartbeat"))).scalar_one_or_none()
+            if row is None:
+                row = SyncState(key="worker_heartbeat", value={})
+                db.add(row)
+            row.value = {"worker_id": worker_id, **detail}
+            row.updated_at = datetime.now(timezone.utc)
+            await db.commit()
+    except Exception:  # noqa: BLE001
+        log.exception("heartbeat failed")
+
+
 async def run_once(session_factory=None) -> dict:
     """One full pass: recover leases, run due jobs, run every sweep, dispatch outbox."""
     sf = session_factory or SessionLocal
@@ -49,6 +65,7 @@ async def run_once(session_factory=None) -> dict:
             out["sweeps"][name] = f"error: {e}"
     out["jobs"] = await jobs_mod.run_due(sf, worker_id)
     out["events"] = await events_mod.dispatch_pending(sf)
+    await _heartbeat(sf, worker_id, {"jobs": out["jobs"], "events": out["events"], "once": True})
     return out
 
 
@@ -75,6 +92,7 @@ async def loop() -> None:
                         log.exception("sweep %s failed", name)
             n = await jobs_mod.run_due(SessionLocal, worker_id)
             m = await events_mod.dispatch_pending(SessionLocal)
+            await _heartbeat(SessionLocal, worker_id, {"jobs": n, "events": m})
             if n == 0 and m == 0:
                 with contextlib.suppress(asyncio.TimeoutError):
                     await asyncio.wait_for(stop.wait(), timeout=settings.WORKER_POLL_SECONDS)
