@@ -526,6 +526,58 @@ async def shop_resolve_issue(ctx: CommandContext, inp: IssueRefIn) -> dict:
     return {"issue": serialize_issue(i), "changed": True}
 
 
+class IssueUpdateIn(BaseModel):
+    issue_id: str
+    vehicle_id: str
+    title: str | None = None
+    detail: str | None = None
+    severity: str | None = None
+    status: str | None = None  # open|in_progress|rejected (resolve/defer have their own commands)
+    reason: str | None = None
+    disclosure_required: bool | None = None
+    expected_version: int | None = None
+
+
+@command("shop.update_issue", input=IssueUpdateIn, perm="tasks.write", action_class="internal",
+         records=lambda p: [("vehicle", p.vehicle_id)],
+         description="Edit a recon issue's text/severity, reopen it or reject a mistaken finding (history kept; evidence retained).")
+async def shop_update_issue(ctx: CommandContext, inp: IssueUpdateIn) -> dict:
+    i = await _issue(ctx, inp.issue_id, inp.vehicle_id, inp.expected_version)
+    change: dict = {}
+    if inp.title is not None and inp.title.strip() and inp.title.strip() != i.title:
+        change["title"] = {"from": i.title, "to": inp.title.strip()}
+        i.title = inp.title.strip()
+        i.dedupe_key = issue_dedupe_key(i.vehicle_id, i.title)
+    if inp.detail is not None and inp.detail != i.detail:
+        change["detail"] = {"from": i.detail, "to": inp.detail}
+        i.detail = inp.detail
+    if inp.severity is not None and inp.severity != i.severity:
+        change["severity"] = {"from": i.severity, "to": inp.severity}
+        i.severity = inp.severity
+    if inp.disclosure_required is not None and inp.disclosure_required != i.disclosure_required:
+        change["disclosure_required"] = {"from": i.disclosure_required, "to": inp.disclosure_required}
+        i.disclosure_required = inp.disclosure_required
+    if inp.status is not None and inp.status != i.status:
+        if inp.status not in ("open", "in_progress", "rejected"):
+            raise ValidationFailed("status must be open|in_progress|rejected (use resolve_issue / defer_issue otherwise)")
+        if inp.status == "rejected" and not (inp.reason or "").strip():
+            raise ValidationFailed("rejecting a finding needs a reason")
+        change["status"] = {"from": i.status, "to": inp.status}
+        i.status = inp.status
+        if inp.status == "rejected":
+            i.resolution_note = inp.reason
+            i.resolved_at = ctx.now
+            i.resolved_by = ctx.actor.user_id
+    if not change:
+        return {"issue": serialize_issue(i), "changed": {}}
+    ctx.touch(i, "recon_issue")
+    ctx.record(f"Issue updated: {i.title}" + (f" — {inp.reason}" if inp.reason else ""), entity_kind="vehicle", entity_id=i.vehicle_id,
+               kind="task", state=i.status, details={"issue_id": i.id, "change": change, "reason": inp.reason})
+    v = await get_vehicle(ctx.db, i.vehicle_id, lock=False)
+    await recompute(ctx.db, v, ctx.now)
+    return {"issue": serialize_issue(i), "changed": change}
+
+
 @command("shop.defer_issue", input=IssueDeferIn, perm="tasks.write", action_class="internal",
          records=lambda p: [("vehicle", p.vehicle_id)],
          description="Explicitly defer a recon issue with a reason (its open task is cancelled; disclosure may be required).")

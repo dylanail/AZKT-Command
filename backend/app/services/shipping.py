@@ -27,7 +27,7 @@ from ..core.time import PHOENIX, TOKYO, ensure_aware, fmt_local
 from ..domain import jobs
 from ..domain.commands import REGISTRY, CommandContext, command, dispatch
 from ..models.contacts import Contact
-from ..models.runtime import ExternalAction
+from ..models.runtime import ExternalAction, Permission
 from ..models.shipping import (LEG_KINDS, LEG_STATUSES, MILESTONE_KINDS, MILESTONE_SOURCE_KINDS, MILESTONE_STATUSES,
                                SHIPMENT_STATUSES, Shipment, ShipmentLeg, ShipmentMilestone, ShipmentQuote)
 from ..models.tasks import Case
@@ -46,6 +46,11 @@ VENDOR_EMAIL_SENDER = None   # adapter hook: async fn(payload: dict, action) -> 
 
 def _iso(dt: datetime | None) -> str | None:
     return ensure_aware(dt).isoformat() if dt else None
+
+
+def _dec(d: Decimal | None) -> str | None:
+    """Plain decimal text (never exponent notation from the driver)."""
+    return None if d is None else format(d, "f")
 
 
 def _dual(dt: datetime | None) -> dict:
@@ -92,7 +97,7 @@ def serialize_leg(l: ShipmentLeg) -> dict:
         "carrier_contact_id": l.carrier_contact_id, "carrier_name": l.carrier_name, "driver_contact": l.driver_contact,
         "booking_ref": l.booking_ref, "booked_at": _iso(l.booked_at), "appointment": _dual(l.appointment_at),
         "pickup_at": _iso(l.pickup_at), "delivered_at": _iso(l.delivered_at),
-        "amount": str(l.amount) if l.amount is not None else None, "currency": l.currency, "quote_id": l.quote_id,
+        "amount": _dec(l.amount), "currency": l.currency, "quote_id": l.quote_id,
         "approval_id": l.approval_id, "evidence": list(l.evidence or []), "conditions": l.conditions,
         "route_from": l.route_from, "route_to": l.route_to, "notes": l.notes, "cancelled_at": _iso(l.cancelled_at),
         "extra": dict(l.extra or {}), "created_at": _iso(l.created_at),
@@ -120,7 +125,7 @@ def serialize_quote(q: ShipmentQuote, action: ExternalAction | None = None) -> d
         "request_approval_id": q.request_approval_id, "request_action_id": q.request_action_id,
         "request_action_state": action.state if action else None, "request_receipt": dict(action.receipt or {}) if action else {},
         "requested_at": _iso(q.requested_at), "received_at": _iso(q.received_at), "reply_message_id": q.reply_message_id,
-        "amount": str(q.amount) if q.amount is not None else None, "currency": q.currency, "binding": q.binding, "scope": q.scope,
+        "amount": _dec(q.amount), "currency": q.currency, "binding": q.binding, "scope": q.scope,
         "inclusions": list(q.inclusions or []), "exclusions": list(q.exclusions or []), "timing": q.timing,
         "expires_at": _iso(q.expires_at), "reply_extracted": dict(q.reply_extracted or {}), "clarification_task_id": q.clarification_task_id,
         "comparison": dict(q.comparison or {}), "forward_approval_id": q.forward_approval_id, "forward_action_id": q.forward_action_id,
@@ -697,21 +702,41 @@ def _quote_consequence(p: QuoteRequestIn) -> dict:
             "targets": {"recipients": list(p.recipients), "channel": p.channel}}
 
 
+async def standing_field_scope_violation(db, inp: QuoteRequestIn) -> list[str]:
+    """Fields outside every active standing permission that covers these recipients. A permission with an empty
+    `fields` list is unbounded; a bounded one limits the data that may leave the business (spec §11.2 vendor quote row)."""
+    import fnmatch
+    rows = (await db.execute(select(Permission).where(Permission.status == "active"))).scalars().all()
+    wanted = [r.lower() for r in inp.recipients]
+    covering = [p for p in rows if fnmatch.fnmatchcase("quotes.request", p.action_pattern)
+                and (not p.recipients or all(r in [x.lower() for x in p.recipients] for r in wanted))]
+    if not covering or any(not p.fields for p in covering):
+        return []
+    allowed = set().union(*[set(p.fields) for p in covering])
+    return [f for f in inp.fields if f not in allowed]
+
+
 async def quote_request_revalidate(ctx: CommandContext, inp: QuoteRequestIn, approval) -> list[str]:
     q = (await ctx.db.execute(select(ShipmentQuote).where(ShipmentQuote.id == inp.quote_id))).scalar_one_or_none()
     if q is None:
         return ["quote no longer exists"]
     reasons = []
-    if q.status not in ("draft", "needs_information", "pending_approval", "requested"):
+    if q.status not in ("draft", "needs_information", "pending_approval", "requested", "clarifying"):
         reasons.append(f"quote is {q.status}")
-    payload = shared_payload(q, inp.fields)
-    bound = (approval.payload or {}).get("fields") or []
-    if sorted(bound) != sorted(inp.fields):
+    bound = approval.payload or {}
+    if sorted(bound.get("fields") or []) != sorted(inp.fields):
         reasons.append("fields to share changed — review again")
-    if stable_hash(payload) != stable_hash(shared_payload(q, bound)):
-        reasons.append("recorded facts changed since approval — review again")
-    if q.recipients and sorted(r.lower() for r in q.recipients) != sorted(r.lower() for r in inp.recipients):
-        reasons.append("recipients differ from the approved request scope")
+    if sorted(r.lower() for r in (bound.get("recipients") or [])) != sorted(r.lower() for r in inp.recipients):
+        reasons.append("recipients changed — review again")
+    payload = shared_payload(q, inp.fields)
+    missing = [f for f in inp.fields if f not in payload]
+    if missing:
+        reasons.append("data to share is no longer recorded: " + ", ".join(missing))
+    facts_hash = stable_hash({"payload": payload, "recipients": sorted(r.lower() for r in inp.recipients), "channel": inp.channel,
+                              "message": inp.message or ""})
+    bound_hash = (q.extra or {}).get("approval_scope_hashes", {}).get(approval.id)
+    if bound_hash and bound_hash != facts_hash:
+        reasons.append("recorded facts changed since this scope was reviewed — review again")
     return reasons
 
 
@@ -731,12 +756,21 @@ async def quotes_request(ctx: CommandContext, inp: QuoteRequestIn) -> dict:
     if missing:
         raise Blocked("cannot share data that is not recorded; collect it first (no invented values)", missing=missing,
                       needs_information=list(q.needs_information or []))
+    if ctx.approval is None and ctx.actor.kind != "system":
+        outside = await standing_field_scope_violation(ctx.db, inp)
+        if outside:
+            raise Blocked("data to share is outside the standing permission's field scope; request exact approval for it",
+                          fields_outside_scope=outside, decision="Needs review")
     if q.recipients and sorted(r.lower() for r in q.recipients) != sorted(r.lower() for r in inp.recipients):
         # scope change on an already requested quote: the earlier approval does not cover the new recipient set
         q.extra = {**(q.extra or {}), "scope_change": {"previous_recipients": list(q.recipients), "requested": list(inp.recipients),
                                                       "at": ctx.now.isoformat()}}
     payload_hash = stable_hash({"payload": payload, "recipients": sorted(r.lower() for r in inp.recipients), "channel": inp.channel,
                                 "message": inp.message or ""})
+    if q.request_payload_hash == payload_hash and q.status == "requested" and q.request_action_id:
+        prior = await ctx.db.get(ExternalAction, q.request_action_id)
+        return {"quote": serialize_quote(q, prior), "external_action_id": q.request_action_id, "shared": payload, "sent": False,
+                "idempotent": True}
     act = await approvals_svc.intend_external_action(
         ctx, command_name="quotes.request", provider="email", entity_kind="shipment_quote", entity_id=q.id,
         dedupe_key=f"quote_request:{q.id}:{payload_hash}",
@@ -760,13 +794,42 @@ async def quotes_request(ctx: CommandContext, inp: QuoteRequestIn) -> dict:
     return {"quote": serialize_quote(q, act), "external_action_id": act.id, "shared": payload, "sent": False}
 
 
+async def _manual_send_task(db, act: ExternalAction, *, title: str, recipients: list[str], content: str) -> dict:
+    """No email adapter: the exact content becomes a manual sending task (deduped per action). The receipt records
+    that nothing was sent; it never claims delivery."""
+    from ..domain.actors import SYSTEM_ACTOR
+    payload = dict(act.payload or {})
+    q = await db.get(ShipmentQuote, payload.get("quote_id")) if payload.get("quote_id") else None
+    ctx = CommandContext(db=db, actor=SYSTEM_ACTOR, channel="worker", correlation_id=act.correlation_id)
+    res = await dispatch(ctx, "tasks.create", {
+        "title": title, "type": "operational", "priority": "high", "vehicle_id": q.vehicle_id if q else None,
+        "shipment_id": q.shipment_id if q else None, "instructions": content,
+        "notes": "No email adapter is connected. Send this exact content to " + ", ".join(recipients) +
+                 " and attach the confirmation; the system has not sent anything.",
+        "evidence_required": [{"kind": "note", "label": "Confirmation the message was sent", "min": 1}],
+        "source_kind": "shipping", "source_id": act.id, "dedupe": True}, commit=False)
+    return {"provider": "email", "sent": False, "state": "manual_send_required", "recipients": recipients,
+            "task_id": res.data["task"]["id"], "note": "No email adapter is connected; a manual sending task holds the exact content. "
+                                                       "This receipt does not claim delivery."}
+
+
+def _quote_request_text(payload: dict) -> str:
+    data = payload.get("data") or {}
+    lines = [f"{payload.get('binding', 'nonbinding').title()} shipping quote request" + (f" — {payload['vendor_name']}" if payload.get("vendor_name") else "")]
+    for k, v in data.items():
+        lines.append(f"{k}: {v}")
+    if payload.get("message"):
+        lines += ["", payload["message"]]
+    return "\n".join(lines)
+
+
 @approvals_svc.executor("quotes.request")
 async def _exec_quote_request(db, act: ExternalAction) -> dict:
-    """Stub executor: without a vendor email adapter the intent is recorded, never claimed sent."""
+    """Stub executor: without a vendor email adapter the intent becomes a manual sending task, never claimed sent."""
     if VENDOR_EMAIL_SENDER is None:
-        return {"provider": "email", "sent": False, "state": "manual_send_required", "recipients": act.payload.get("recipients"),
-                "note": "No vendor email adapter is connected; the request content is recorded and must be sent manually. "
-                        "This receipt does not claim delivery."}
+        p = dict(act.payload or {})
+        return await _manual_send_task(db, act, title=f"Send shipping quote request to {', '.join(p.get('recipients') or [])}",
+                                       recipients=list(p.get("recipients") or []), content=_quote_request_text(p))
     return await VENDOR_EMAIL_SENDER(dict(act.payload or {}), act)
 
 
@@ -857,8 +920,8 @@ async def quotes_record_reply(ctx: CommandContext, inp: QuoteReplyIn) -> dict:
         await dispatch(ctx.child(), "cases.update", {"case_id": q.case_id, "status": "open", "waiting_on": None,
                                                     "next_action": "Compare and prepare the customer-forward message for review",
                                                     "next_check_at": ctx.now + timedelta(days=1),
-                                                    "summary": f"Vendor replied: {q.amount} {q.currency}" if q.amount is not None else "Vendor replied without a price"}, commit=False)
-    ctx.record(f"Vendor quote received: {q.amount} {q.currency}" if q.amount is not None else "Vendor replied (no price stated)",
+                                                    "summary": f"Vendor replied: {_dec(q.amount)} {q.currency}" if q.amount is not None else "Vendor replied without a price"}, commit=False)
+    ctx.record(f"Vendor quote received: {_dec(q.amount)} {q.currency}" if q.amount is not None else "Vendor replied (no price stated)",
                entity_kind="shipment_quote", entity_id=q.id, kind="message", state="received", sources=[inp.message_id], visibility="owner")
     ctx.emit("quote.changed", aggregate_type="shipment_quote", aggregate_id=q.id, aggregate_version=q.version,
              payload={"quote_id": q.id, "change": "received"})
@@ -900,7 +963,7 @@ async def quotes_compare(ctx: CommandContext, inp: QuoteRefIn) -> dict:
     comps, rejected = [], []
     for o in others:
         ok, why = comparable(q, o)
-        row = {"quote_id": o.id, "vendor_name": o.vendor_name, "amount": str(o.amount), "currency": o.currency,
+        row = {"quote_id": o.id, "vendor_name": o.vendor_name, "amount": _dec(o.amount), "currency": o.currency,
                "received_at": _iso(o.received_at), "status": o.status, "service": o.service, "operability": o.operability}
         (comps if ok else rejected).append(row if ok else {**row, "excluded_because": why})
     amounts = [parse_amount(c["amount"]) for c in comps]
@@ -914,9 +977,9 @@ async def quotes_compare(ctx: CommandContext, inp: QuoteRefIn) -> dict:
     if unknown_attrs:
         labels.append("this quote has unknown attributes: " + ", ".join(unknown_attrs))
     result = {
-        "quote_amount": str(q.amount), "currency": q.currency, "comparables": comps, "excluded": rejected,
+        "quote_amount": _dec(q.amount), "currency": q.currency, "comparables": comps, "excluded": rejected,
         "comparable_count": len(comps), "evidence": "weak" if weak else "adequate", "weakness": labels,
-        "range": ({"min": str(min(amounts)), "max": str(max(amounts))} if amounts else None),
+        "range": ({"min": _dec(min(amounts)), "max": _dec(max(amounts))} if amounts else None),
         "position": (None if not amounts else ("above" if q.amount > max(amounts) else ("below" if q.amount < min(amounts) else "within"))),
         "recommendation": ("Request a second quote before forwarding" if len(comps) < 2 else "Comparable evidence available; review the range"),
         "threshold": None, "compared_at": ctx.now.isoformat(),
@@ -967,7 +1030,7 @@ async def quotes_forward(ctx: CommandContext, inp: QuoteForwardIn) -> dict:
         raise Blocked(f"quote is {q.status}; only a received quote can be forwarded", status=q.status)
     if q.amount is None:
         raise Blocked("quote has no recorded price to forward")
-    payload = {"quote_id": q.id, "to": list(inp.to), "body": inp.body, "amount": str(q.amount), "currency": q.currency,
+    payload = {"quote_id": q.id, "to": list(inp.to), "body": inp.body, "amount": _dec(q.amount), "currency": q.currency,
                "comparison": q.comparison if inp.include_comparison else None}
     act = await approvals_svc.intend_external_action(
         ctx, command_name="quotes.forward_to_customer", provider="email", entity_kind="shipment_quote", entity_id=q.id,
@@ -990,8 +1053,9 @@ async def quotes_forward(ctx: CommandContext, inp: QuoteForwardIn) -> dict:
 @approvals_svc.executor("quotes.forward_to_customer")
 async def _exec_quote_forward(db, act: ExternalAction) -> dict:
     if VENDOR_EMAIL_SENDER is None:
-        return {"provider": "email", "sent": False, "state": "manual_send_required", "recipients": act.payload.get("to"),
-                "note": "No customer email adapter is connected; the forward text is recorded and must be sent manually."}
+        p = dict(act.payload or {})
+        return await _manual_send_task(db, act, title=f"Send quote to customer {', '.join(p.get('to') or [])}",
+                                       recipients=list(p.get("to") or []), content=str(p.get("body") or ""))
     return await VENDOR_EMAIL_SENDER(dict(act.payload or {}), act)
 
 
@@ -1020,7 +1084,7 @@ async def _booking_mismatch(q: ShipmentQuote, inp: QuoteBookIn) -> list[str]:
     if q.status == "received" and not inp.customer_acceptance_ref:
         reasons.append("quote was not forwarded/approved by the customer (no acceptance evidence)")
     if q.amount is None or quantize(inp.amount, inp.currency.upper()) != q.amount or inp.currency.upper() != q.currency:
-        reasons.append(f"amount {inp.amount} {inp.currency} does not match the quoted {q.amount} {q.currency}")
+        reasons.append(f"amount {inp.amount} {inp.currency} does not match the quoted {_dec(q.amount)} {q.currency}")
     if q.vehicle_id and inp.vehicle_id != q.vehicle_id:
         reasons.append("vehicle does not match the quoted vehicle")
     if q.route_key and route_key(inp.route_from, inp.route_to) != q.route_key:
@@ -1060,7 +1124,7 @@ async def quotes_book(ctx: CommandContext, inp: QuoteBookIn) -> dict:
     cur = inp.currency.upper()
     amount = quantize(inp.amount, cur)
     booking = {"carrier_name": inp.carrier_name, "carrier_contact_id": inp.carrier_contact_id, "route_from": inp.route_from,
-               "route_to": inp.route_to, "vehicle_id": inp.vehicle_id, "amount": str(amount), "currency": cur, "conditions": inp.conditions,
+               "route_to": inp.route_to, "vehicle_id": inp.vehicle_id, "amount": _dec(amount), "currency": cur, "conditions": inp.conditions,
                "customer_acceptance_ref": inp.customer_acceptance_ref, "approved_at": ctx.now.isoformat(),
                "approval_id": ctx.approval.id if ctx.approval else None}
     act = await approvals_svc.intend_external_action(
@@ -1104,8 +1168,13 @@ async def quotes_book(ctx: CommandContext, inp: QuoteBookIn) -> dict:
 @approvals_svc.executor("quotes.book")
 async def _exec_quote_book(db, act: ExternalAction) -> dict:
     if VENDOR_EMAIL_SENDER is None:
-        return {"provider": "email", "sent": False, "state": "manual_send_required", "carrier": (act.payload.get("booking") or {}).get("carrier_name"),
-                "note": "No carrier email adapter is connected; the booking request is recorded and must be sent manually."}
+        p = dict(act.payload or {})
+        b = p.get("booking") or {}
+        content = "\n".join([f"Booking request — {b.get('carrier_name')}", f"Route: {b.get('route_from')} → {b.get('route_to')}",
+                             f"Vehicle: {b.get('vehicle_id')}", f"Amount: {b.get('amount')} {b.get('currency')}",
+                             f"Conditions: {b.get('conditions')}"])
+        return await _manual_send_task(db, act, title=f"Send booking request to {b.get('carrier_name') or 'carrier'}",
+                                       recipients=[x for x in [b.get("carrier_name")] if x], content=content)
     return await VENDOR_EMAIL_SENDER(dict(act.payload or {}), act)
 
 

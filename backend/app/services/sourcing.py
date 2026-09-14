@@ -59,10 +59,15 @@ def _iso(dt: datetime | None) -> str | None:
     return ensure_aware(dt).isoformat() if dt else None
 
 
+def _dec(d: Decimal | None) -> str | None:
+    """Plain decimal text (never exponent notation from the driver)."""
+    return None if d is None else format(d, "f")
+
+
 def _money(amount: Decimal | None, currency: str | None) -> dict | None:
     if amount is None:
         return None
-    return {"amount": str(amount), "currency": currency}
+    return {"amount": _dec(amount), "currency": currency}
 
 
 # ── serializers ──────────────────────────────────────────────────────────────
@@ -97,7 +102,7 @@ def serialize_request(r: ImportRequest) -> dict:
         "status": r.status, "lifecycle": list(IR_LIFECYCLE), "paused": bool(r.paused), "paused_reason": r.paused_reason,
         "paused_at": _iso(r.paused_at), "requirements": list(r.requirements or []), "requirement_tiers": reqs.tiers(r.requirements or []),
         "requirements_version": r.requirements_version, "requirements_history": list(r.requirements_history or []),
-        "budget_amount": str(r.budget_amount) if r.budget_amount is not None else None, "budget_currency": r.budget_currency,
+        "budget_amount": _dec(r.budget_amount), "budget_currency": r.budget_currency,
         "agreement_id": r.agreement_id, "agreement_status": r.agreement_status, "agreement_evidence": dict(r.agreement_evidence or {}),
         "deposit_rule": dict(r.deposit_rule or {}), "deposit_status": r.deposit_status, "deposit_evidence": dict(r.deposit_evidence or {}),
         "deposit_confirmed_at": _iso(r.deposit_confirmed_at), "deposit_invoice_id": r.deposit_invoice_id,
@@ -161,7 +166,7 @@ def serialize_translation(t: Translation, action: ExternalAction | None = None) 
 def serialize_bid(b: Bid) -> dict:
     return {
         "id": b.id, "version": b.version, "candidate_id": b.candidate_id, "import_request_id": b.import_request_id,
-        "max_amount": str(b.max_amount) if b.max_amount is not None else None, "currency": b.currency, "fee_basis": b.fee_basis,
+        "max_amount": _dec(b.max_amount), "currency": b.currency, "fee_basis": b.fee_basis,
         "fx_estimate": dict(b.fx_estimate or {}), "deadline_at": dual_time(b.deadline_at, (b.packet or {}).get("deadline", {}).get("source")),
         "auction_house": b.auction_house, "lot_no": b.lot_no, "auction_at": dual_time(b.auction_at),
         "packet": dict(b.packet or {}), "packet_hash": b.packet_hash, "approval_id": b.approval_id, "status": b.status,
@@ -641,10 +646,8 @@ async def record_purchase(ctx: CommandContext, inp: RecordPurchaseIn) -> dict:
             return {"request": serialize_request(r), "vehicle_id": vehicle.id, "recorded": False, "idempotent": True}
         raise Conflict("import request already has a purchased vehicle", purchased_vehicle_id=r.purchased_vehicle_id)
     if vehicle is None:
-        vehicle = _new_vehicle(ctx, inp.vehicle or {}, r, candidate=None, evidence=inp.evidence)
-        ctx.db.add(vehicle)
-        await ctx.db.flush()
-        ctx.changed.append({"kind": "vehicle", "id": vehicle.id, "version": vehicle.version})
+        vehicle = await _create_vehicle(ctx, inp.vehicle or {}, r, candidate=None, evidence=inp.evidence,
+                                        create_key=f"import_request_purchase:{r.id}")
     other = (await ctx.db.execute(select(ImportRequest).where(ImportRequest.purchased_vehicle_id == vehicle.id,
                                                               ImportRequest.id != r.id))).scalar_one_or_none()
     if other is not None:
@@ -680,6 +683,38 @@ def _dt(v) -> datetime | None:
         return parse_iso(str(v))
     except ValueError:
         raise ValidationFailed(f"invalid datetime {v!r}")
+
+
+async def _create_vehicle(ctx: CommandContext, fields: dict, r: ImportRequest, *, candidate: Candidate | None, evidence: dict,
+                          create_key: str) -> Vehicle:
+    """Create the purchased vehicle through the vehicles domain (`vehicles.create`, retry-safe via create_key) when that
+    command is registered; otherwise fall back to a direct row with the same facts. Buyer link, reservation and the
+    purchase evidence are sourcing-owned facts set here in the same transaction."""
+    try:
+        from . import vehicles as _vehicles  # noqa: F401 - lazy: registers vehicles.create when the module exists
+    except Exception:  # noqa: BLE001
+        pass
+    draft = _new_vehicle(ctx, fields, r, candidate=candidate, evidence=evidence)
+    if "vehicles.create" in REGISTRY:
+        res = await dispatch(ctx.child(), "vehicles.create", {
+            "title": draft.title, "make": draft.make, "model": draft.model, "model_year": draft.model_year, "color": draft.color,
+            "frame_no_raw": draft.frame_no_raw, "logistics_state": "purchased", "allocation": "reserved",
+            "purchase_amount": str(draft.purchase_amount) if draft.purchase_amount is not None else None,
+            "purchase_currency": draft.purchase_currency, "acquired_at": _iso(draft.acquired_at),
+            "source_kind": evidence.get("source_kind") or "document", "source_ref": evidence.get("source_ref"),
+            "origin_candidate_id": candidate.id if candidate else None, "create_key": create_key,
+            "extra": {"import_request_id": r.id, "auction_url": candidate.source_url if candidate else None}}, commit=False)
+        vehicle = await ctx.db.get(Vehicle, res.data["vehicle"]["id"])
+        vehicle.buyer_contact_id = vehicle.buyer_contact_id or r.contact_id
+        vehicle.commercial_state = "reserved" if vehicle.commercial_state == "not_listed" else vehicle.commercial_state
+        vehicle.situation = vehicle.situation or "Purchased for import request"
+        if candidate is not None and not vehicle.auction_url:
+            vehicle.auction_url = candidate.source_url
+        return vehicle
+    ctx.db.add(draft)
+    await ctx.db.flush()
+    ctx.changed.append({"kind": "vehicle", "id": draft.id, "version": draft.version})
+    return draft
 
 
 def _new_vehicle(ctx: CommandContext, fields: dict, r: ImportRequest, *, candidate: Candidate | None, evidence: dict) -> Vehicle:
@@ -1634,7 +1669,7 @@ async def bids_submit(ctx: CommandContext, inp: BidSubmitIn) -> dict:
         b.submission_channel, b.submission_action_id = "teams", act.id
     else:
         res = await dispatch(ctx.child(), "tasks.create", {
-            "title": f"Place approved bid: {c.auction_house} lot {c.lot_no} (max {b.max_amount} {b.currency})", "type": "operational",
+            "title": f"Place approved bid: {c.auction_house} lot {c.lot_no} (max {_dec(b.max_amount)} {b.currency})", "type": "operational",
             "priority": "urgent", "import_request_id": b.import_request_id, "instructions": packet_text,
             "due_at": _iso(b.deadline_at), "timezone": TOKYO,
             "notes": "No exporter send route is configured. Place this exact bid with the exporter and record placement with "
@@ -1643,7 +1678,7 @@ async def bids_submit(ctx: CommandContext, inp: BidSubmitIn) -> dict:
             "source_kind": "sourcing", "source_id": b.id, "dedupe": True}, commit=False)
         b.submission_channel, b.submission_task_id = "manual_task", res.data["task"]["id"]
     ctx.touch(b, "bid")
-    ctx.record(f"Bid approved ({b.submission_channel}): {c.auction_house} lot {c.lot_no}, max {b.max_amount} {b.currency}", entity_kind="bid",
+    ctx.record(f"Bid approved ({b.submission_channel}): {c.auction_house} lot {c.lot_no}, max {_dec(b.max_amount)} {b.currency}", entity_kind="bid",
                entity_id=b.id, kind="approval", state="approved", visibility="owner")
     ctx.emit("bid.changed", aggregate_type="bid", aggregate_id=b.id, aggregate_version=b.version,
              payload={"bid_id": b.id, "change": "approved", "channel": b.submission_channel, "candidate_id": c.id})
@@ -1751,11 +1786,11 @@ async def bids_record_result(ctx: CommandContext, inp: BidResultIn) -> dict:
     vehicle_id = None
     if inp.result == "won":
         vehicle = await ctx.db.get(Vehicle, c.vehicle_id) if c.vehicle_id else None
+        if vehicle is None and r.purchased_vehicle_id:
+            raise Conflict("import request already has a different purchased vehicle", purchased_vehicle_id=r.purchased_vehicle_id)
         if vehicle is None:
-            vehicle = _new_vehicle(ctx, inp.vehicle or {}, r, candidate=c, evidence=inp.evidence)
-            ctx.db.add(vehicle)
-            await ctx.db.flush()
-            ctx.changed.append({"kind": "vehicle", "id": vehicle.id, "version": vehicle.version})
+            vehicle = await _create_vehicle(ctx, inp.vehicle or {}, r, candidate=c, evidence=inp.evidence,
+                                            create_key=f"bid_won:{b.id}")
             c.vehicle_id = vehicle.id
         vehicle_id = vehicle.id
         if r.purchased_vehicle_id and r.purchased_vehicle_id != vehicle.id:

@@ -145,6 +145,12 @@ def iso(dt: datetime | None) -> str | None:
     return ensure_aware(dt).isoformat() if dt else None
 
 
+def loaded(row, name: str):
+    """Read a column without triggering a lazy load (server-side `updated_at` is expired after an UPDATE flush;
+    an implicit load inside the async session would fail). Unloaded -> None; recompute() refreshes it."""
+    return row.__dict__.get(name)
+
+
 def money_str(d: Decimal | None) -> str | None:
     return None if d is None else str(d)
 
@@ -322,6 +328,8 @@ async def recompute(db: AsyncSession, v: Vehicle, now: datetime | None = None) -
     v.next_action_due_at = ensure_aware(nxt_task.due_at) if nxt_task and nxt_task.due_at else None
     v.situation = situation_of(v)
     v.exception_summary = reasons[0] if health in ("blocked", "risk") else None
+    await db.flush()
+    await db.refresh(v, attribute_names=["updated_at"])
     return {"health": health, "health_reason": v.health_reason, "next_action": v.next_action,
             "next_action_owner_id": v.next_action_owner_id, "next_action_due_at": iso(v.next_action_due_at),
             "situation": v.situation, "exception": v.exception_summary}
@@ -419,7 +427,7 @@ def serialize_vehicle(v: Vehicle) -> dict:
         "hero_asset_id": v.hero_asset_id, "photo": "No photo yet" if not v.hero_asset_id else None,
         "photo_requirements": list(v.photo_requirements or []), "disclosures": list(v.disclosures or []),
         "state_history": list(v.state_history or []), "archived_at": iso(v.archived_at), "notes": v.notes,
-        "view": view_of(v), "created_at": iso(v.created_at), "updated_at": iso(v.updated_at),
+        "view": view_of(v), "created_at": iso(loaded(v, "created_at")), "updated_at": iso(loaded(v, "updated_at")),
         "extra": dict(v.extra or {}),
     }
 
@@ -437,7 +445,7 @@ def serialize_list_item(v: Vehicle) -> dict:
         "next_action_due_at": iso(v.next_action_due_at), "exception": v.exception_summary, "health": v.health,
         "health_reason": v.health_reason, "intake_status": v.intake_status,
         "missing_identity_fields": list(v.missing_identity_fields or []), "location": v.location,
-        "view": view_of(v), "archived_at": iso(v.archived_at), "updated_at": iso(v.updated_at),
+        "view": view_of(v), "archived_at": iso(v.archived_at), "updated_at": iso(loaded(v, "updated_at")),
     }
 
 
@@ -1096,6 +1104,7 @@ async def vehicles_propose_fact(ctx: CommandContext, inp: FactProposeIn) -> dict
                       confidence_method=inp.confidence_method, visibility=inp.visibility, supersedes=cur)
         if cur is not None:
             cur.is_current = False
+            cur.status = "outdated" if cur.status != "conflicted" else cur.status
         outcome = "restated"
     elif cur_value is not None:
         f = _new_fact(ctx, v, key, inp.value, status="conflicted", source_kind=inp.source_kind, source_ref=inp.source_ref,

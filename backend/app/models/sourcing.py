@@ -17,6 +17,7 @@ CANDIDATE_MATCH_STATES = ("discovered", "evaluated", "translation_requested", "t
 class ImportRequest(Base, BusinessRow):
     """Import request lifecycle (spec §8.1). The Sales IRQ card is a projection of this."""
     __tablename__ = "import_requests"
+    __mapper_args__ = {"eager_defaults": True}  # fetch server-generated updated_at via RETURNING (async-safe)
     contact_id: Mapped[str] = mapped_column(ForeignKey("contacts.id"), index=True)
     opportunity_id: Mapped[str | None] = mapped_column(String, nullable=True, unique=True)
     title: Mapped[str] = mapped_column(String, default="")
@@ -56,6 +57,7 @@ class ImportRequest(Base, BusinessRow):
 class Candidate(Base, BusinessRow):
     """An auction candidate; identity is provider+lot+auction date (spec §8.2)."""
     __tablename__ = "candidates"
+    __mapper_args__ = {"eager_defaults": True}  # fetch server-generated updated_at via RETURNING (async-safe)
     __table_args__ = (UniqueConstraint("provider", "auction_house", "lot_no", "auction_at", name="uq_candidate_identity"),)
     provider: Mapped[str] = mapped_column(String, default="manual")
     auction_house: Mapped[str | None] = mapped_column(String, nullable=True)
@@ -84,6 +86,7 @@ class Candidate(Base, BusinessRow):
 
 class CandidateMatch(Base, BusinessRow):
     __tablename__ = "candidate_matches"
+    __mapper_args__ = {"eager_defaults": True}  # fetch server-generated updated_at via RETURNING (async-safe)
     __table_args__ = (UniqueConstraint("candidate_id", "import_request_id", name="uq_candidate_request"),)
     candidate_id: Mapped[str] = mapped_column(ForeignKey("candidates.id"), index=True)
     import_request_id: Mapped[str] = mapped_column(ForeignKey("import_requests.id"), index=True)
@@ -109,6 +112,7 @@ class CandidateMatch(Base, BusinessRow):
 
 class Translation(Base, BusinessRow):
     __tablename__ = "translations"
+    __mapper_args__ = {"eager_defaults": True}  # fetch server-generated updated_at via RETURNING (async-safe)
     candidate_id: Mapped[str] = mapped_column(ForeignKey("candidates.id"), index=True)
     status: Mapped[str] = mapped_column(String, default="draft", index=True)  # draft|pending_approval|requested|detected|incomplete|complete|revised|invalidated
     request_channel: Mapped[str | None] = mapped_column(String, nullable=True)  # teams|manual
@@ -136,6 +140,7 @@ class Translation(Base, BusinessRow):
 
 class Bid(Base, BusinessRow):
     __tablename__ = "bids"
+    __mapper_args__ = {"eager_defaults": True}  # fetch server-generated updated_at via RETURNING (async-safe)
     candidate_id: Mapped[str] = mapped_column(ForeignKey("candidates.id"), index=True)
     import_request_id: Mapped[str | None] = mapped_column(ForeignKey("import_requests.id"), nullable=True, index=True)
     max_amount: Mapped[Decimal] = mapped_column(Numeric(18, 0))

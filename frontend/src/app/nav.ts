@@ -68,7 +68,8 @@ export function routeAllowed(role: Role | string | undefined, pathname: string):
     return /^\/(tasks|vehicles|more)(\/|$)/.test(pathname) || pathname === "/";
   }
   if (role === "owner") return true;
-  // manager and other office roles: everything except owner-only settings sections.
-  if (/^\/settings\/(recovery|usage)(\/|$)/.test(pathname)) return false;
+  // manager and other office roles: everything except owner-only settings sections
+  // (Recovery stays open: it holds everyone's passkeys and sign-out; the health block inside is owner-only).
+  if (/^\/settings\/usage(\/|$)/.test(pathname)) return false;
   return true;
 }

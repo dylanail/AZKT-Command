@@ -39,13 +39,32 @@ const GROUPS: { tier: NotifTier; label: string; color: string }[] = [
   { tier: "later", label: "Later", color: "var(--t3)" },
 ];
 
+/* Badge fallback while /api/notifications is not served: GET /api/approvals/summary (owner only; 403/404 tolerated)
+   turns pending approvals into one "today" item that opens the approvals queue. */
+interface ApprovalSummary { pending?: number; unknown?: number; failed?: number }
+async function approvalFallback(): Promise<NotificationItem[]> {
+  const s = await api.get<ApprovalSummary | null>("/api/approvals/summary", { tolerate: [403, 404, 501] });
+  if (!s) return [];
+  const out: NotificationItem[] = [];
+  const pending = s.pending || 0;
+  const bad = (s.unknown || 0) + (s.failed || 0);
+  if (pending) out.push({ id: "approvals-pending", title: `${pending} ${pending === 1 ? "approval needs" : "approvals need"} your decision`, body: "Exact payloads waiting for you.", tier: "today", href: "/approvals", kind: "approval" });
+  if (bad) out.push({ id: "approvals-attention", title: `${bad} ${bad === 1 ? "action" : "actions"} failed or unknown`, body: "Provider results that need a look.", tier: "high", href: "/approvals?view=attention", kind: "approval" });
+  return out;
+}
+
 export function useNotifications(pollMs = 60000) {
   const [items, setItems] = useState<NotificationItem[]>([]);
   const [available, setAvailable] = useState(true);
   const load = useCallback(async () => {
     try {
       const r = await api.get<unknown>("/api/notifications?state=unread", { tolerate: [404, 501] });
-      if (r === null) { setAvailable(false); setItems([]); return; }
+      if (r === null) {
+        const fb = await approvalFallback().catch(() => [] as NotificationItem[]);
+        setAvailable(fb.length > 0);
+        setItems(fb);
+        return;
+      }
       setAvailable(true);
       setItems(normalise(r));
     } catch {

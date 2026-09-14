@@ -72,15 +72,25 @@ class GoogleDocsTranslationDocs(TranslationDocs):
                                                 "detail": "Google Docs revision polling is wired in stage 2"})
 
 
+_ALL_ALIASES = {a for aliases in SECTION_ALIASES.values() for a in aliases}
+
+
 def _heading_lines(text: str) -> list[tuple[int, str]]:
+    """Heading = a markdown heading (`# Grade`), a bracketed label (`[Grade]` / `【評価点】`), a bare label ending
+    with a colon (`Grade:`), or a line that is exactly a known section label. Ordinary sentences are body text."""
     out = []
     for i, line in enumerate((text or "").splitlines()):
         s = line.strip()
         if not s:
             continue
-        m = re.match(r"^(?:#+\s*|\[|【)?\s*([^\]】:：#]{2,60})\s*(?:\]|】)?\s*[:：]?\s*$", s)
+        m = (re.match(r"^#+\s*(.+?)\s*[:：]?\s*$", s)
+             or re.match(r"^(?:\[|【)\s*(.+?)\s*(?:\]|】)\s*[:：]?\s*$", s)
+             or re.match(r"^([^:：]{2,60})\s*[:：]\s*$", s))
         if m:
             out.append((i, m.group(1).strip().lower()))
+            continue
+        if s.lower() in _ALL_ALIASES:
+            out.append((i, s.lower()))
     return out
 
 

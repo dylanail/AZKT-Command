@@ -21,6 +21,7 @@ QUOTE_STATUSES = ("draft", "needs_information", "pending_approval", "requested",
 class Shipment(Base, BusinessRow):
     """Container/vessel-level shipment; vehicles are members (spec §8.3)."""
     __tablename__ = "shipments"
+    __mapper_args__ = {"eager_defaults": True}  # fetch server-generated updated_at via RETURNING (async-safe)
     ref: Mapped[str | None] = mapped_column(String, nullable=True, unique=True)  # SHP-0028
     status: Mapped[str] = mapped_column(String, default="planned", index=True)  # planned|in_transit|at_port|released|domestic|received|complete|exception
     vehicle_ids: Mapped[list] = mapped_column(JSON, default=list)
@@ -46,6 +47,7 @@ class Shipment(Base, BusinessRow):
 
 class ShipmentLeg(Base, BusinessRow):
     __tablename__ = "shipment_legs"
+    __mapper_args__ = {"eager_defaults": True}  # fetch server-generated updated_at via RETURNING (async-safe)
     shipment_id: Mapped[str] = mapped_column(ForeignKey("shipments.id"), index=True)
     kind: Mapped[str] = mapped_column(String)  # export|ocean|port|domestic
     status: Mapped[str] = mapped_column(String, default="planned")  # planned|quoted|booked|in_progress|complete|cancelled
@@ -74,6 +76,7 @@ class ShipmentLeg(Base, BusinessRow):
 
 class ShipmentMilestone(Base, BusinessRow):
     __tablename__ = "shipment_milestones"
+    __mapper_args__ = {"eager_defaults": True}  # fetch server-generated updated_at via RETURNING (async-safe)
     shipment_id: Mapped[str] = mapped_column(ForeignKey("shipments.id"), index=True)
     vehicle_id: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
     kind: Mapped[str] = mapped_column(String)  # vessel_departed|vessel_arrival|discharge|release|carrier_booked|pickup|received
@@ -95,6 +98,7 @@ class ShipmentMilestone(Base, BusinessRow):
 class ShipmentQuote(Base, BusinessRow):
     """A vendor quote; distinct from forwarding and booking decisions (spec §8.3)."""
     __tablename__ = "shipment_quotes"
+    __mapper_args__ = {"eager_defaults": True}  # fetch server-generated updated_at via RETURNING (async-safe)
     shipment_id: Mapped[str | None] = mapped_column(ForeignKey("shipments.id"), nullable=True, index=True)
     vehicle_id: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
     case_id: Mapped[str | None] = mapped_column(String, nullable=True)

@@ -2,7 +2,7 @@
 import { Suspense, lazy, type ReactNode } from "react";
 import { Navigate, Route, Routes, useLocation } from "react-router-dom";
 import { useAuth } from "../lib/auth";
-import { isEmployeeRole } from "../lib/perms";
+import { can, isEmployeeRole } from "../lib/perms";
 import { PageLoading } from "../ui";
 import Shell from "./Shell";
 import { routeAllowed } from "./nav";
@@ -24,6 +24,7 @@ const Finance = lazy(() => import("../screens/finance/Finance"));
 const Settings = lazy(() => import("../screens/settings/Settings"));
 const Team = lazy(() => import("../screens/settings/Team"));
 const ApprovalReview = lazy(() => import("../screens/approvals/ApprovalReview"));
+const ApprovalsList = lazy(() => import("../screens/approvals/ApprovalsList"));
 const Login = lazy(() => import("../screens/auth/Login"));
 const Invite = lazy(() => import("../screens/auth/Invite"));
 const Denied = lazy(() => import("../screens/auth/Denied"));
@@ -53,6 +54,13 @@ function Guard({ children }: { children: ReactNode }) {
   const { user } = useAuth();
   const loc = useLocation();
   if (!routeAllowed(user?.role, loc.pathname)) return <Suspense fallback={<PageLoading />}><Denied /></Suspense>;
+  return <>{children}</>;
+}
+
+/** Permission gate for a single route element (e.g. the approvals queue needs `approve`). */
+function PermGuard({ perm, children }: { perm: string; children: ReactNode }) {
+  const { user } = useAuth();
+  if (!can(user, perm)) return <Suspense fallback={<PageLoading />}><Denied /></Suspense>;
   return <>{children}</>;
 }
 
@@ -99,6 +107,7 @@ export default function AppRoutes() {
           <Route path="/settings" element={<Guard><Suspense fallback={<PageLoading title="Settings" />}><Settings /></Suspense></Guard>} />
           <Route path="/settings/team" element={<Guard><Suspense fallback={<PageLoading title="Team" />}><Team /></Suspense></Guard>} />
           <Route path="/settings/:section" element={<Guard><Suspense fallback={<PageLoading title="Settings" />}><Settings /></Suspense></Guard>} />
+          <Route path="/approvals" element={<Guard><PermGuard perm="approve"><Suspense fallback={<PageLoading title="Approvals" />}><ApprovalsList /></Suspense></PermGuard></Guard>} />
           <Route path="/approvals/:id" element={<Guard><Suspense fallback={<PageLoading />}><ApprovalReview /></Suspense></Guard>} />
           <Route path="/shipments/:id" element={<Guard><Suspense fallback={<PageLoading />}><ShipmentDetail /></Suspense></Guard>} />
           <Route path="/listings/:id" element={<Guard><Suspense fallback={<PageLoading />}><ListingEditor /></Suspense></Guard>} />

@@ -11,6 +11,7 @@ import { api } from "../lib/api";
 import { navFor, type NavItem } from "./nav";
 import { InspectorPanel, useInspector } from "./Inspector";
 import { NotificationBell } from "./Notifications";
+import { ApprovalReviewHost } from "../screens/approvals/useApprovalReview";
 import { Button, Dialog, IconButton, Input, Menu, NavPathIcon, SearchIcon, SegmentedControl, StatusDot, ThemeIcon, ChevronDown, When } from "../ui";
 
 /* ---------- sync status (GET /api/health, tolerated 404) ---------- */
@@ -227,6 +228,7 @@ export default function Shell() {
         <main className="mmain" id="main"><Outlet /></main>
         <MobileNav items={nav.mobile} />
         <SearchDialog open={searchOpen} onClose={() => setSearchOpen(false)} employee={employee} />
+        <ApprovalReviewHost />
       </div>
     );
   }
@@ -238,6 +240,7 @@ export default function Shell() {
       <main className="main" id="main"><Outlet /></main>
       {inspectorOpen ? <InspectorPanel /> : null}
       <SearchDialog open={searchOpen} onClose={() => setSearchOpen(false)} employee={employee} />
+      <ApprovalReviewHost />
     </div>
   );
 }
