@@ -46,9 +46,10 @@ def png_bytes(seed: int = 1) -> bytes:
     return buf.getvalue()
 
 
-def wav_bytes(seconds: float = 0.05) -> bytes:
+def wav_bytes(seconds: float = 0.05, seed: int = 0) -> bytes:
+    """Minimal PCM WAV; `seed` varies the samples so two tests never dedupe to the same asset."""
     n = int(8000 * seconds)
-    data = b"\x00\x00" * n
+    data = struct.pack("<h", seed % 32000) * n
     hdr = b"RIFF" + struct.pack("<I", 36 + len(data)) + b"WAVE" + b"fmt " + struct.pack("<IHHIIHH", 16, 1, 1, 8000, 16000, 2, 16)
     return hdr + b"data" + struct.pack("<I", len(data)) + data
 

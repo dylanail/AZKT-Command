@@ -358,7 +358,7 @@ async def test_H13_scoped_report_writes_unscoped_asks_for_the_vehicle(db, owner)
 async def test_voice_note_without_transcript_never_blocks_photos(db, owner):
     v = await _vehicle(db, owner)
     photo = await upload_via_commands(db, owner, jpeg_bytes(601), "p.jpg")
-    audio = await upload_via_commands(db, owner, wav_bytes(), "note.wav", "audio/wav")
+    audio = await upload_via_commands(db, owner, wav_bytes(seed=uuid.uuid4().int % 30000 + 1), "note.wav", "audio/wav")
     it = (await dispatch(ctx_for(db, owner), "intake.start", {"target_mode": "existing", "vehicle_id": v["id"]})).data["intake"]
     await dispatch(ctx_for(db, owner), "intake.add_assets", {"intake_id": it["id"], "asset_ids": [photo]})
     tr = (await dispatch(ctx_for(db, owner), "intake.add_transcript", {"intake_id": it["id"], "audio_asset_id": audio})).data
