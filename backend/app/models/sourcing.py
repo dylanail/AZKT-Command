@@ -38,6 +38,19 @@ class ImportRequest(Base, BusinessRow):
     notes: Mapped[str] = mapped_column(Text, default="")
     next_check_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     legacy_irq_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    # added by the sourcing domain (add-only): idempotent creation, gate evidence, lifecycle stamps
+    source_ref: Mapped[str | None] = mapped_column(String, nullable=True, unique=True)  # creation dedupe key
+    agreement_evidence: Mapped[dict] = mapped_column(JSON, default=dict)  # {source_ref, signed_at, by}
+    deposit_evidence: Mapped[dict] = mapped_column(JSON, default=dict)  # {payment_id, amount, currency, source_ref, confirmed_at}
+    deposit_confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    purchase_evidence: Mapped[dict] = mapped_column(JSON, default=dict)  # {source_ref, amount, currency, purchased_at, bid_id|None}
+    purchased_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    close_reason: Mapped[str | None] = mapped_column(String, nullable=True)
+    paused_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    lifecycle_history: Mapped[list] = mapped_column(JSON, default=list)  # [{from, to, at, by, reason}]
+    extra: Mapped[dict] = mapped_column(JSON, default=dict)
 
 
 class Candidate(Base, BusinessRow):
@@ -59,6 +72,14 @@ class Candidate(Base, BusinessRow):
     discovered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     vehicle_id: Mapped[str | None] = mapped_column(String, nullable=True, unique=True)  # one purchased vehicle per win
     result: Mapped[dict] = mapped_column(JSON, default=dict)
+    # added by the sourcing domain (add-only): snapshot lineage, sourced deadline, dual-time audit
+    deadline_source: Mapped[str | None] = mapped_column(String, nullable=True)  # where the deadline came from
+    auction_at_source: Mapped[str | None] = mapped_column(String, nullable=True)
+    snapshot_hash: Mapped[str | None] = mapped_column(String, nullable=True)
+    snapshot_version: Mapped[int] = mapped_column(Integer, default=1)
+    last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    ingest_count: Mapped[int] = mapped_column(Integer, default=1)
+    extra: Mapped[dict] = mapped_column(JSON, default=dict)
 
 
 class CandidateMatch(Base, BusinessRow):
@@ -77,6 +98,13 @@ class CandidateMatch(Base, BusinessRow):
     buyer_draft_id: Mapped[str | None] = mapped_column(String, nullable=True)
     buyer_message_sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     translation_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    # added by the sourcing domain (add-only): evaluation lineage, inline buyer draft (until the inbox domain exists)
+    evaluated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    translation_revision_no: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    stale: Mapped[bool] = mapped_column(Boolean, default=False)  # requirements/translation changed since evaluation
+    stale_reason: Mapped[str | None] = mapped_column(String, nullable=True)
+    bid_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    extra: Mapped[dict] = mapped_column(JSON, default=dict)  # {buyer_draft: {...}, preference_score, history: [...]}
 
 
 class Translation(Base, BusinessRow):
@@ -96,6 +124,14 @@ class Translation(Base, BusinessRow):
     findings: Mapped[dict] = mapped_column(JSON, default=dict)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # added by the sourcing domain (add-only): exact request content, retained revisions, identity check
+    request_content: Mapped[str] = mapped_column(Text, default="")  # exact text sent / to be sent manually
+    required_sections: Mapped[list] = mapped_column(JSON, default=list)
+    approval_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    identity_check: Mapped[dict] = mapped_column(JSON, default=dict)  # {ok, expected_lot, found}
+    doc_modified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    revision_history: Mapped[list] = mapped_column(JSON, default=list)  # retained prior revisions (excerpts, findings, completeness)
+    extra: Mapped[dict] = mapped_column(JSON, default=dict)
 
 
 class Bid(Base, BusinessRow):
@@ -115,3 +151,15 @@ class Bid(Base, BusinessRow):
     result: Mapped[dict] = mapped_column(JSON, default=dict)
     result_evidence: Mapped[dict] = mapped_column(JSON, default=dict)
     invalidated_reason: Mapped[str | None] = mapped_column(String, nullable=True)
+    # added by the sourcing domain (add-only): bound auction identity + submission evidence
+    auction_house: Mapped[str | None] = mapped_column(String, nullable=True)
+    lot_no: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
+    auction_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    translation_revision_no: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    requirements_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    submission_channel: Mapped[str | None] = mapped_column(String, nullable=True)  # teams|manual_task
+    submission_task_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    submission_action_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    submission_evidence: Mapped[dict] = mapped_column(JSON, default=dict)
+    result_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    extra: Mapped[dict] = mapped_column(JSON, default=dict)

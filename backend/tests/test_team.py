@@ -12,7 +12,7 @@ from backend.app.auth.passkey import SESSION_COOKIE, session_token
 from backend.app.core.errors import Denied, ValidationFailed
 from backend.app.domain.commands import REGISTRY, command, dispatch
 from backend.app.domain.policy import effective_perms
-from backend.app.models.auth import Invitation, User
+from backend.app.models.auth import Invitation
 from backend.app.models.runtime import ActivityEntry, Approval, Event, ExternalAction, Permission
 from backend.app.services import approvals as approvals_svc
 from backend.tests.conftest import actor_of, ctx_for, login, make_user, run_worker_once
@@ -40,11 +40,10 @@ if "teamtest.request_part" not in REGISTRY:
         return {"provider_ref": "vendor-msg-1", "sent": True}
 
 
-async def _fresh(db, handle: str, role: str, **kw) -> User:
-    u = (await db.execute(select(User).where(User.handle == handle))).scalar_one_or_none()
-    if u is None:
-        u = await make_user(db, handle, role, **kw)
-    return u
+def _use_cookie(client, token: str) -> None:
+    """Present exactly one session cookie (a stale one kept from before an access change)."""
+    client.cookies.clear()
+    client.cookies.set(SESSION_COOKIE, token, domain="testserver")
 
 
 # ── A01 ──────────────────────────────────────────────────────────────────────
@@ -82,7 +81,7 @@ async def test_A01_mechanic_self_promotion_denied_by_command_and_http(db, client
 async def test_A01_invitations_are_scoped_and_manager_sees_scoped_people(db, client, owner, mechanic):
     # owner invites a manager (scope all) and a mechanic reporting to them (scope assigned)
     r1 = await dispatch(ctx_for(db, owner), "team.invite", {"display_name": "Nadia", "email": "Nadia@Example.com", "role": "manager"})
-    assert r1.status_code if hasattr(r1, "status_code") else r1.status == "ok"
+    assert r1.status == "ok"
     inv_m = r1.data
     assert inv_m["created"] and inv_m["token"] and inv_m["accept_path"] == f"/invite/{inv_m['token']}"
     assert inv_m["invitation"]["scope"] == "all" and inv_m["invitation"]["email"] == "nadia@example.com"
@@ -153,7 +152,7 @@ async def test_A03_grant_and_revoke_costs_read_ends_old_sessions(db, client, own
     person = r.json()["data"]["person"]
     assert person["perms"]["costs.read"] is True and person["grants"][-1]["by"] == owner.id and person["grants"][-1]["perm"] == "costs.read"
     # the old session cookie is dead (session_version bumped): cached access is cleared
-    client.cookies.set(SESSION_COOKIE, old_cookie, domain="testserver")
+    _use_cookie(client, old_cookie)
     assert (await client.get("/api/me")).status_code == 401
     await db.refresh(mgr)
     assert mgr.session_version == 2
@@ -170,7 +169,7 @@ async def test_A03_grant_and_revoke_costs_read_ends_old_sessions(db, client, own
     second_cookie = session_token(mgr)
     r = await client.post(f"/api/team/{mgr.id}/revoke-grant", json={"perm": "costs.read"})
     assert r.status_code == 200 and r.json()["data"]["person"]["perms"]["costs.read"] is False
-    client.cookies.set(SESSION_COOKIE, second_cookie, domain="testserver")
+    _use_cookie(client, second_cookie)
     assert (await client.get("/api/me")).status_code == 401
     await db.refresh(mgr)
     assert mgr.session_version == 3 and mgr.perms.get("costs.read") is False

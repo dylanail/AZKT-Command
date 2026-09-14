@@ -90,6 +90,12 @@ class Vehicle(Base, BusinessRow):
     archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     is_demo: Mapped[bool] = mapped_column(Boolean, default=False)
     notes: Mapped[str] = mapped_column(Text, default="")
+    # added by the vehicles domain (add-only): critical-fact columns, gate facts, state history
+    title_status: Mapped[str | None] = mapped_column(String, nullable=True)  # critical fact (owner-confirmed)
+    inspected_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    disclosures: Mapped[list] = mapped_column(JSON, default=list)  # [{text, by, at}] for the disclosures_written gate
+    state_history: Mapped[list] = mapped_column(JSON, default=list)  # [{dimension, from, to, reason, at, by, backward}]
+    stock_seq: Mapped[int | None] = mapped_column(Integer, nullable=True)  # numeric part of an allocated STK-####
 
 
 class VehicleFact(Base, BusinessRow):
@@ -148,6 +154,12 @@ class ReconIssue(Base, BusinessRow):
     dedupe_key: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
     disclosure_required: Mapped[bool] = mapped_column(Boolean, default=False)
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # added by the vehicles domain (add-only): status also allows `deferred` (explicitly deferred work)
+    resolved_by: Mapped[str | None] = mapped_column(String, nullable=True)
+    resolution_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    deferred_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    deferred_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    deferred_by: Mapped[str | None] = mapped_column(String, nullable=True)
 
 
 class WorkOrder(Base, BusinessRow):
@@ -182,6 +194,14 @@ class Part(Base, BusinessRow):
     cost_item_id: Mapped[str | None] = mapped_column(String, nullable=True)
     approval_id: Mapped[str | None] = mapped_column(String, nullable=True)
     evidence: Mapped[list] = mapped_column(JSON, default=list)
+    # added by the vehicles domain (add-only): payment state is separate from physical state (spec §8.4, G10)
+    payment_state: Mapped[str] = mapped_column(String, default="unpaid")  # unpaid|paid|refunded|unknown
+    paid_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    payment_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    cancel_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    external_action_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    notes: Mapped[str] = mapped_column(Text, default="")
+    history: Mapped[list] = mapped_column(JSON, default=list)  # [{from, to, at, by, note}]
 
 
 class ShopGateRule(Base, BusinessRow):

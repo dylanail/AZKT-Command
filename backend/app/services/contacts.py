@@ -8,8 +8,6 @@
 """
 from __future__ import annotations
 
-from datetime import datetime
-
 from pydantic import BaseModel, Field
 from sqlalchemy import select, update
 
@@ -110,6 +108,14 @@ async def _refresh(ctx: CommandContext, c: Contact, identities: list[ContactIden
     if not c.primary_phone:
         c.primary_phone = next((i.value_norm for i in ids if i.kind == "phone"), None)
     return ids
+
+
+async def _reload(ctx: CommandContext, *rows) -> None:
+    """Flush pending changes and reload server-generated columns (updated_at is expired after an UPDATE flush;
+    reading it lazily would attempt sync IO under asyncio)."""
+    await ctx.db.flush()
+    for r in rows:
+        await ctx.db.refresh(r)
 
 
 def _emit_contact(ctx: CommandContext, c: Contact, change: str, **extra) -> None:
@@ -281,6 +287,7 @@ async def contacts_update(ctx: CommandContext, inp: ContactUpdateIn) -> dict:
         c.legacy_customer_id = inp.legacy_customer_id
     ids = await _refresh(ctx, c)
     ctx.touch(c, "contact")
+    await _reload(ctx, c)
     ctx.record(f"Updated contact: {c.name}", entity_kind="contact", entity_id=c.id, kind="task", state=c.status)
     _emit_contact(ctx, c, "updated")
     return {"contact": serialize_contact(c, ids)}
@@ -367,6 +374,7 @@ async def contacts_remove_identity(ctx: CommandContext, inp: IdentityRemoveIn) -
         c.primary_phone = next((x.value_norm for x in ids if x.kind == "phone"), None)
     c.search_text = build_search_text(c, ids)
     ctx.touch(c, "contact")
+    await _reload(ctx, c)
     ctx.record(f"Removed {removed['kind']} from {c.name}: {removed['value']}", entity_kind="contact", entity_id=c.id,
                kind="task", state=c.status)
     _emit_contact(ctx, c, "identity_removed", identity_id=removed["id"])
@@ -490,6 +498,7 @@ async def _do_merge(ctx: CommandContext, inp: MergeIn) -> dict:
     await ctx.db.flush()
     ctx.touch(s, "contact")
     ctx.touch(m, "contact")
+    await _reload(ctx, s, m)
     ctx.record(f"Merged contact {m.name} into {s.name}", entity_kind="contact", entity_id=s.id, kind="task",
                state="merged", details={"merge_id": rec.id, "merged_id": m.id, "relinked": {k: len(v) for k, v in snapshot["relinked"].items()},
                                         "reason": inp.reason})
@@ -569,6 +578,7 @@ async def contacts_unmerge(ctx: CommandContext, inp: UnmergeIn) -> dict:
     ctx.touch(s, "contact")
     ctx.touch(m, "contact")
     ctx.touch(rec, "contact_merge")
+    await _reload(ctx, s, m, rec)
     ctx.record(f"Unmerged contact {m.name} from {s.name}", entity_kind="contact", entity_id=m.id, kind="task",
                state=m.status, details={"merge_id": rec.id, "reason": inp.reason}, exception=True)
     _emit_contact(ctx, s, "unmerged", merge_id=rec.id, restored_id=m.id)
@@ -600,6 +610,7 @@ async def contacts_archive(ctx: CommandContext, inp: ContactRefIn) -> dict:
     from .approvals import invalidate_for_entity
     n = await invalidate_for_entity(ctx, "contact", c.id, f"contact archived: {inp.reason or 'no reason given'}")
     ctx.touch(c, "contact")
+    await _reload(ctx, c)
     ctx.record(f"Archived contact: {c.name}", entity_kind="contact", entity_id=c.id, kind="task", state="archived",
                details={"reason": inp.reason, "invalidated_approvals": n})
     _emit_contact(ctx, c, "archived")

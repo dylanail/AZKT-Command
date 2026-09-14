@@ -34,6 +34,12 @@ class VehicleIntake(Base, BusinessRow):
     telegram_media_group_id: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
     applied_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     device_draft: Mapped[dict] = mapped_column(JSON, default=dict)  # saved-on-device bookkeeping echoed back
+    # added by the intake domain (add-only)
+    choice: Mapped[dict] = mapped_column(JSON, default=dict)  # needs_choice context: candidates with identifying fields
+    corrections: Mapped[list] = mapped_column(JSON, default=list)  # [{at, by, kind, target_id, change}]
+    applied: Mapped[dict] = mapped_column(JSON, default=dict)  # ids written by the last apply (for undo)
+    undone_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    failed_uploads: Mapped[list] = mapped_column(JSON, default=list)  # [{upload_id, name, error}]
 
 
 class IntakeObservation(Base, BusinessRow):
@@ -54,3 +60,8 @@ class IntakeObservation(Base, BusinessRow):
     dedupe_key: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
     removed: Mapped[bool] = mapped_column(Boolean, default=False)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # added by the intake domain (add-only)
+    meta: Mapped[dict] = mapped_column(JSON, default=dict)  # {assignee, priority, is_issue, image_index, related, panel}
+    history: Mapped[list] = mapped_column(JSON, default=list)  # [{at, by, text_before, change}]
+    applied_command: Mapped[str | None] = mapped_column(String, nullable=True)
+    applied_version: Mapped[int | None] = mapped_column(Integer, nullable=True)

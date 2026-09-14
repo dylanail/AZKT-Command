@@ -52,6 +52,11 @@ class AssetLink(Base, BusinessRow):
     position: Mapped[int] = mapped_column(Integer, default=0)
     confirmed_by: Mapped[str | None] = mapped_column(String, nullable=True)
     match_evidence: Mapped[dict] = mapped_column(JSON, default=dict)
+    # added by the assets domain (add-only): links are retired, never deleted (evidence is kept)
+    removed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    removed_by: Mapped[str | None] = mapped_column(String, nullable=True)
+    remove_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    linked_by: Mapped[str | None] = mapped_column(String, nullable=True)
 
 
 class UploadSession(Base, BusinessRow):
@@ -69,3 +74,10 @@ class UploadSession(Base, BusinessRow):
     received_bytes: Mapped[int] = mapped_column(BigInteger, default=0)
     asset_id: Mapped[str | None] = mapped_column(String, nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # added by the assets domain (add-only)
+    original_name: Mapped[str | None] = mapped_column(String, nullable=True)
+    detected_content_type: Mapped[str | None] = mapped_column(String, nullable=True)
+    sha256: Mapped[str | None] = mapped_column(String, nullable=True)
+    finalized_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    deduplicated: Mapped[bool] = mapped_column(Boolean, default=False)
+    allowed_types: Mapped[list] = mapped_column(JSON, default=list)

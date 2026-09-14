@@ -15,6 +15,7 @@ STAGES = ("new", "conversation", "awaiting_deposit", "deposit_paid", "lost")
 class Opportunity(Base, BusinessRow):
     """A sales opportunity in the IRQ or Vehicle Sales pipeline (spec §5.1)."""
     __tablename__ = "opportunities"
+    __mapper_args__ = {"eager_defaults": True}  # fetch server-generated updated_at via RETURNING (async-safe)
     contact_id: Mapped[str] = mapped_column(ForeignKey("contacts.id"), index=True)
     pipeline: Mapped[str] = mapped_column(String, index=True)  # irq|vehicle
     stage: Mapped[str] = mapped_column(String, default="new", index=True)

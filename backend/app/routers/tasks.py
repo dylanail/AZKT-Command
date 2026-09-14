@@ -10,9 +10,9 @@ from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..auth.deps import command_context, current_actor, require
+from ..auth.deps import command_context, require
 from ..core.errors import NotFound, ValidationFailed
-from ..core.time import PHOENIX, TOKYO, ensure_aware, fmt_local, parse_iso, to_zone
+from ..core.time import PHOENIX, TOKYO, ensure_aware, fmt_local, to_zone
 from ..db import get_db
 from ..domain.access import visible_vehicle_ids
 from ..domain.actors import Actor
@@ -267,6 +267,7 @@ async def _result_with_view(ctx: CommandContext, res, jp: bool = False) -> dict:
     if isinstance(data, dict) and isinstance(data.get("task"), dict):
         t = await ctx.db.get(Task, data["task"]["id"])
         if t is not None:
+            await ctx.db.refresh(t)   # updated_at is server-generated; reload after the commit
             data["task"] = task_view(t, jp=jp)
     return d
 

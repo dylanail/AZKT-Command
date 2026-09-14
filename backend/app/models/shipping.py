@@ -3,10 +3,19 @@ from __future__ import annotations
 from datetime import datetime
 from decimal import Decimal
 
-from sqlalchemy import DateTime, ForeignKey, JSON, Numeric, String, Text
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, JSON, Numeric, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from ..db import Base, BusinessRow
+
+SHIPMENT_STATUSES = ("planned", "in_transit", "at_port", "released", "domestic", "received", "complete", "exception")
+LEG_KINDS = ("export", "ocean", "port", "domestic")
+LEG_STATUSES = ("planned", "quoted", "booked", "in_progress", "complete", "cancelled")
+MILESTONE_KINDS = ("vessel_departed", "vessel_arrival", "discharge", "release", "carrier_booked", "pickup", "received")
+MILESTONE_STATUSES = ("planned", "estimated", "completed")
+MILESTONE_SOURCE_KINDS = ("manual", "document", "message", "carrier", "port", "provider", "exporter", "customs")
+QUOTE_STATUSES = ("draft", "needs_information", "pending_approval", "requested", "received", "clarifying",
+                  "forwarded", "booked", "declined", "expired")
 
 
 class Shipment(Base, BusinessRow):
@@ -28,6 +37,11 @@ class Shipment(Base, BusinessRow):
     case_id: Mapped[str | None] = mapped_column(String, nullable=True)
     notes: Mapped[str] = mapped_column(Text, default="")
     extra: Mapped[dict] = mapped_column(JSON, default=dict)
+    # added by the shipping domain (add-only): idempotent creation, sourced deadline detail
+    dedupe_key: Mapped[str | None] = mapped_column(String, nullable=True, unique=True)
+    storage_deadline_source_ref: Mapped[str | None] = mapped_column(String, nullable=True)
+    storage_deadline_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    exception_summary: Mapped[str | None] = mapped_column(String, nullable=True)
 
 
 class ShipmentLeg(Base, BusinessRow):
@@ -49,6 +63,13 @@ class ShipmentLeg(Base, BusinessRow):
     approval_id: Mapped[str | None] = mapped_column(String, nullable=True)
     evidence: Mapped[list] = mapped_column(JSON, default=list)
     conditions: Mapped[str] = mapped_column(Text, default="")
+    # added by the shipping domain (add-only)
+    carrier_name: Mapped[str | None] = mapped_column(String, nullable=True)
+    route_from: Mapped[str | None] = mapped_column(String, nullable=True)
+    route_to: Mapped[str | None] = mapped_column(String, nullable=True)
+    notes: Mapped[str] = mapped_column(Text, default="")
+    cancelled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    extra: Mapped[dict] = mapped_column(JSON, default=dict)
 
 
 class ShipmentMilestone(Base, BusinessRow):
@@ -61,6 +82,14 @@ class ShipmentMilestone(Base, BusinessRow):
     source_kind: Mapped[str] = mapped_column(String, default="manual")
     source_ref: Mapped[str | None] = mapped_column(String, nullable=True)
     note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # added by the shipping domain (add-only): container-wide vs per-vehicle exception, supersession history
+    applies_to: Mapped[str] = mapped_column(String, default="container")  # container|vehicle
+    exception: Mapped[bool] = mapped_column(Boolean, default=False)  # a per-vehicle deviation from the container notice
+    supersedes_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    is_current: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    actor_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    recorded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    extra: Mapped[dict] = mapped_column(JSON, default=dict)
 
 
 class ShipmentQuote(Base, BusinessRow):
@@ -91,3 +120,28 @@ class ShipmentQuote(Base, BusinessRow):
     forward_approval_id: Mapped[str | None] = mapped_column(String, nullable=True)
     booking_approval_id: Mapped[str | None] = mapped_column(String, nullable=True)
     next_check_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # added by the shipping domain (add-only): the adaptive quote case (spec §8.3 Montway journey)
+    dedupe_key: Mapped[str | None] = mapped_column(String, nullable=True, unique=True)
+    leg_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    buyer_contact_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    route_key: Mapped[str | None] = mapped_column(String, nullable=True, index=True)  # normalized from|to for comparisons
+    service: Mapped[str | None] = mapped_column(String, nullable=True)  # open|enclosed|unknown
+    operability: Mapped[str | None] = mapped_column(String, nullable=True)  # running|inoperable|unknown
+    dimensions: Mapped[dict] = mapped_column(JSON, default=dict)  # {length_mm, width_mm, height_mm, weight_kg} recorded only
+    size_class: Mapped[str | None] = mapped_column(String, nullable=True)  # kei_truck|kei_van|other|unknown
+    timing_window: Mapped[dict] = mapped_column(JSON, default=dict)  # {earliest, latest, source}
+    needs_information: Mapped[list] = mapped_column(JSON, default=list)  # [{field, reason}] never invented
+    recipients: Mapped[list] = mapped_column(JSON, default=list)  # recipients bound to the approved request scope
+    channel: Mapped[str | None] = mapped_column(String, nullable=True)  # email|web_form|manual
+    request_payload_hash: Mapped[str | None] = mapped_column(String, nullable=True)
+    request_approval_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    reply_extracted: Mapped[dict] = mapped_column(JSON, default=dict)
+    clarification_task_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    forward_action_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    forwarded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    forward_payload: Mapped[dict] = mapped_column(JSON, default=dict)
+    booking_action_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    booked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    booking: Mapped[dict] = mapped_column(JSON, default=dict)  # exact carrier/route/vehicle/amount/conditions approved
+    check_count: Mapped[int] = mapped_column(Integer, default=0)
+    extra: Mapped[dict] = mapped_column(JSON, default=dict)

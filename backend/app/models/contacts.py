@@ -11,6 +11,7 @@ from ..db import Base, BusinessRow
 class Contact(Base, BusinessRow):
     """A person or company. One contact can hold many roles and opportunities (spec §3.1)."""
     __tablename__ = "contacts"
+    __mapper_args__ = {"eager_defaults": True}  # fetch server-generated updated_at via RETURNING (async-safe)
     name: Mapped[str] = mapped_column(String, default="", index=True)
     company: Mapped[str | None] = mapped_column(String, nullable=True)
     roles: Mapped[list] = mapped_column(JSON, default=list)  # buyer|vendor|exporter|importer|carrier|dispatcher|port|other
@@ -36,6 +37,7 @@ class Contact(Base, BusinessRow):
 class ContactIdentity(Base, BusinessRow):
     """An email/phone/handle alias. Raw value preserved; normalized form for matching (spec §3.3)."""
     __tablename__ = "contact_identities"
+    __mapper_args__ = {"eager_defaults": True}  # fetch server-generated updated_at via RETURNING (async-safe)
     __table_args__ = (UniqueConstraint("kind", "value_norm", "contact_id", name="uq_identity_per_contact"),)
     contact_id: Mapped[str] = mapped_column(ForeignKey("contacts.id"), index=True)
     kind: Mapped[str] = mapped_column(String)  # email|phone|telegram|instagram|other
@@ -53,6 +55,7 @@ class ContactIdentity(Base, BusinessRow):
 class ContactMerge(Base, BusinessRow):
     """Audited, undoable merge history (spec §3.3)."""
     __tablename__ = "contact_merges"
+    __mapper_args__ = {"eager_defaults": True}  # fetch server-generated updated_at via RETURNING (async-safe)
     survivor_id: Mapped[str] = mapped_column(ForeignKey("contacts.id"), index=True)
     merged_id: Mapped[str] = mapped_column(ForeignKey("contacts.id"), index=True)
     snapshot: Mapped[dict] = mapped_column(JSON, default=dict)  # merged contact + relinked ids
