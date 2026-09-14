@@ -78,7 +78,7 @@ async def make_user(db, handle: str, role: str = "owner", *, scope: str | None =
 
 
 def login(client, user: User) -> None:
-    client.cookies.set(SESSION_COOKIE, session_token(user), domain="testserver")
+    client.cookies.set(SESSION_COOKIE, session_token(user))
 
 
 def actor_of(user: User, kind: str = "user") -> Actor:
