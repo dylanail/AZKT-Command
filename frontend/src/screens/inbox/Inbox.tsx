@@ -198,8 +198,8 @@ export default function Inbox() {
     <GlassPanel padded><Loading label="Loading thread" rows={5} /></GlassPanel>
   ) : detailDenied ? (
     <GlassPanel clip>
-      <EmptyState title="This thread isn't available to you"
-        body="It may belong to the personal mailbox, or to a vehicle outside your access. Nothing is hidden by accident — ask the owner if you need it."
+      <EmptyState title="This thread isn't available"
+        body="It may have been removed, or it belongs to the personal mailbox or a vehicle outside your access. Ask the owner if you need it."
         action={<Button variant="soft" onClick={backToList}>Back to the list</Button>} />
     </GlassPanel>
   ) : detail.error ? (

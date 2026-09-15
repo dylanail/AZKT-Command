@@ -151,11 +151,11 @@ export default function ThreadList({
             {accounts.map((a) => <option key={a.value} value={a.value}>{a.label}</option>)}
           </Select>
         ) : null}
-        <label className="ib-search">
+        <div className="ib-search">
           <SearchIcon />
           <Input aria-label="Search threads by subject or mailbox" value={query} placeholder="Search subject"
             onChange={(e) => onQuery(e.target.value)} />
-        </label>
+        </div>
       </div>
       {personalHint ? <p className="fs12 t4" style={{ margin: 0 }}>Personal mail is only ever shown to the owner.</p> : null}
 

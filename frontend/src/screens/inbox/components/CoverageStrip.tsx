@@ -124,14 +124,18 @@ export default function CoverageStrip({
   const gapCount = connected.reduce((n, a) => n + (a.gaps?.length || 0), 0);
   const stale = data.stale || [];
   const catching = connected.filter((a) => a.catch_up?.pending);
-  const tone = gapCount || stale.length ? "risk" : "ok";
+  // all_clear_possible is the server's own judgement: never claim "up to date" over its head.
+  const allClear = data.all_clear_possible && !gapCount && !stale.length && !catching.length;
+  const tone = allClear ? "ok" : "risk";
   const summary = gapCount
     ? `${gapCount === 1 ? "1 stretch of mail is" : `${gapCount} stretches of mail are`} not synced yet — this list is incomplete.`
     : stale.length
       ? `${stale.join(" · ")} ${stale.length === 1 ? "is" : "are"} behind, so newer mail may not be here yet.`
       : catching.length
         ? "Catching up on mail now — this list is still filling in."
-        : "Mail is up to date for every connected mailbox.";
+        : allClear
+          ? "Mail is up to date for every connected mailbox."
+          : "AZKT can't confirm every message has been synced, so treat this list as incomplete.";
 
   return (
     <GlassPanel padded className="ib-cov" aria-label="Mailbox coverage">
