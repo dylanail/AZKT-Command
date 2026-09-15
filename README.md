@@ -8,7 +8,7 @@ Dylan directs from the app, Telegram or an authorized external agent. Built from
 - Architecture and conventions: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
 - Operations runbook (run, deploy, migrate, back up, restore, connection setup): [`docs/RUNBOOK.md`](docs/RUNBOOK.md)
 - Railway topology: [`deploy/railway/README.md`](deploy/railway/README.md)
-- Acceptance results and route map: [`docs/RESULTS.md`](docs/RESULTS.md)
+- Acceptance results: [`docs/RESULTS.md`](docs/RESULTS.md) · Route map (prototype screens → routes): [`docs/ROUTE_MAP.md`](docs/ROUTE_MAP.md)
 
 ## Stack
 
