@@ -63,6 +63,7 @@ def serialize_profile(p: SiteProfile) -> dict:
             "listing_gates": dict(p.listing_gates or {}), "drift": dict(p.drift or {}),
             "writes_paused": bool(p.writes_paused), "pause_reason": p.pause_reason,
             "preview": dict(p.preview or {}), "connection_id": p.connection_id,
+            "sku_strategy": p.sku_strategy or wp_adapter.DEFAULT_SKU_STRATEGY, "sku_prefix": p.sku_prefix,
             "validated_at": iso(p.validated_at), "activated_at": iso(p.activated_at), "activated_by": p.activated_by,
             "discovered_at": iso(p.discovered_at), "drift_detected_at": iso(p.drift_detected_at),
             "created_at": iso(p.created_at)}
@@ -115,8 +116,11 @@ class DiscoverIn(BaseModel):
     note: str | None = None
 
 
-def _ownership(discovered: dict) -> dict:
+def _ownership(discovered: dict, *, sku_strategy: str = wp_adapter.DEFAULT_SKU_STRATEGY) -> dict:
     owned = {f: "azkt" for f in wp_adapter.AZKT_FIELDS}
+    if sku_strategy == "preserve":
+        # AZKT never writes the site's SKU column, so an editor changing it is not drift
+        owned["sku"] = "editor"
     for slug in (discovered.get("post_types") or {}):
         owned.setdefault(f"post_type:{slug}", "site")
     owned["categories"] = "site"
@@ -140,9 +144,9 @@ async def site_discover(ctx: CommandContext, inp: DiscoverIn) -> dict:
     prior = await latest_profile(ctx.db)
     content_type = discovered.get("content_type") or "product"
     base_url = inp.base_url or (discovered.get("site") or {}).get("url") or getattr(ad, "base_url", "")
-    validation = {"required_fields": ["headline", "body"], "sku_convention": None}
-    if content_type == "product":
-        validation["sku_convention"] = "stock_no"
+    sku_strategy = (prior.sku_strategy if prior and prior.sku_strategy else wp_adapter.DEFAULT_SKU_STRATEGY)
+    sku_prefix = prior.sku_prefix if prior else None
+    validation = {"required_fields": ["headline", "body"], "sku_convention": sku_strategy}
     wp_conn = await conn_svc.get(ctx.db, "wordpress")
     staging = (inp.staging_url or (prior.staging_url if prior else None)
                or ((wp_conn.config or {}).get("staging_url") if wp_conn is not None else None))
@@ -151,7 +155,8 @@ async def site_discover(ctx: CommandContext, inp: DiscoverIn) -> dict:
                     base_url=base_url, staging_url=staging,
                     profile_version=(prior.profile_version + 1) if prior else 1, content_type=content_type,
                     discovered=discovered, field_map=wp_adapter.field_map_for({"content_type": content_type}),
-                    field_ownership=_ownership(discovered),
+                    field_ownership=_ownership(discovered, sku_strategy=sku_strategy),
+                    sku_strategy=sku_strategy, sku_prefix=sku_prefix,
                     # the site's own minimum (WooCommerce requires none); the *listing* photo checklist
                     # lives in the class gates, where a missing shot blocks publication.
                     media_rules={"min": 0, "formats": ["image/jpeg", "image/png", "image/webp"],
@@ -433,6 +438,38 @@ async def site_set_listing_gates(ctx: CommandContext, inp: GatesIn) -> dict:
     ctx.record(f"Listing gates configured on profile v{p.profile_version}", entity_kind="site_profile",
                entity_id=p.id, kind="connection", state=p.status, visibility="owner",
                details={"classes": sorted((inp.listing_gates or {}).keys())})
+    return {"profile": serialize_profile(p)}
+
+
+class SkuIn(BaseModel):
+    profile_id: str
+    sku_strategy: str
+    sku_prefix: str | None = None
+
+
+@command("site.set_sku_strategy", input=SkuIn, perm="settings", action_class="owner_only",
+         approval_kind="site_profile",
+         summary=lambda p: f"Set the website SKU strategy to {p.sku_strategy}",
+         description="Choose how the site's SKU column is treated. `preserve` (default) never writes it — the "
+                     "installed catalogue numbers products its own way and AZKT identifies its listings by the "
+                     "azkt_vehicle_id meta. `stock_no` writes the AZKT stock number, `prefix` writes a prefixed "
+                     "stock number. Changing this also moves who owns the field for drift purposes.")
+async def site_set_sku_strategy(ctx: CommandContext, inp: SkuIn) -> dict:
+    p = await ctx.db.get(SiteProfile, inp.profile_id)
+    if p is None:
+        raise NotFound("site profile not found")
+    if inp.sku_strategy not in wp_adapter.SKU_STRATEGIES:
+        raise ValidationFailed(f"sku_strategy must be one of {wp_adapter.SKU_STRATEGIES}")
+    if inp.sku_strategy == "prefix" and not (inp.sku_prefix or "").strip():
+        raise ValidationFailed("the prefix strategy needs a sku_prefix")
+    p.sku_strategy = inp.sku_strategy
+    p.sku_prefix = (inp.sku_prefix or "").strip() or None
+    p.field_ownership = _ownership(dict(p.discovered or {}), sku_strategy=p.sku_strategy)
+    p.validation = {**dict(p.validation or {}), "sku_convention": p.sku_strategy}
+    ctx.touch(p, "site_profile")
+    ctx.record(f"Website SKU strategy set to {p.sku_strategy}", entity_kind="site_profile", entity_id=p.id,
+               kind="connection", state=p.status, visibility="owner",
+               details={"sku_strategy": p.sku_strategy, "sku_prefix": p.sku_prefix})
     return {"profile": serialize_profile(p)}
 
 

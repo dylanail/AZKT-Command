@@ -68,6 +68,14 @@ async def publish(package_id: str, payload: dict = Body(default={}),
     return res.to_dict()
 
 
+@router.post("/api/listings/vehicles/{vehicle_id}/link")
+async def link_existing(vehicle_id: str, payload: dict = Body(default={}),
+                        ctx: CommandContext = Depends(command_context)) -> dict:
+    """Bind this vehicle to a listing that already exists on the site (or unlink with no external_id)."""
+    res = await dispatch(ctx, "listings.link_existing", {**(payload or {}), "vehicle_id": vehicle_id})
+    return res.to_dict()
+
+
 @router.post("/api/listings/publish-availability")
 async def publish_availability(payload: dict = Body(...), ctx: CommandContext = Depends(command_context)) -> dict:
     """Update the desired availability (and enqueue the channel updates under the applicable permission)."""
@@ -93,7 +101,8 @@ async def get_profile(db: AsyncSession = Depends(get_db), actor: Actor = Depends
 async def profile_action(action: str, payload: dict = Body(default={}),
                          ctx: CommandContext = Depends(command_context)) -> dict:
     commands = {"discover": "site.discover", "validate": "site.validate", "activate": "site.activate",
-                "resume": "site.resume_writes", "gates": "site.set_listing_gates"}
+                "resume": "site.resume_writes", "gates": "site.set_listing_gates",
+                "sku": "site.set_sku_strategy"}
     name = commands.get(action)
     if name is None:
         raise HTTPException(404, f"unknown site profile action {action}")
