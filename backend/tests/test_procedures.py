@@ -173,6 +173,18 @@ async def test_procedures_api(client, db, owner, manager):
     login(client, manager)
     r = await client.get(f"/api/procedures/{pid}")
     assert r.status_code == 200 and r.json()["id"] == pid
+    # a reader without knowledge.write sees the steps but not the raw teach/email source it was built from
+    body = r.json()
+    assert body["versions"][0]["spec"]["source"]["excerpt_hidden"] is True and body["versions"][0]["spec"]["source"]["text_excerpt"] is None
+    assert "Never promise a delivery date" not in str(body["versions"][0]["spec"]["source"])
+    assert body["versions"][0]["spec"]["hard_constraints"]
+    r = await client.get(f"/api/procedures/{pid}/versions/{vid}")
+    assert r.status_code == 200 and r.json()["spec"]["source"]["text_excerpt"] is None
+    assert all((it.get("current_version") or {}).get("spec", {}).get("source", {}).get("text_excerpt") is None
+               for it in (await client.get("/api/procedures")).json()["items"])
+    login(client, owner)
+    assert (await client.get(f"/api/procedures/{pid}")).json()["versions"][0]["spec"]["source"]["text_excerpt"]
+    login(client, manager)
     r = await client.post(f"/api/procedures/{pid}/versions/{vid}/promote", json={})
     assert r.status_code == 403
     r = await client.post(f"/api/procedures/{pid}/versions/{vid}/rollback", json={})

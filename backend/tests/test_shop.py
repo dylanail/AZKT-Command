@@ -268,3 +268,28 @@ async def test_issue_defer_and_update_history(db, owner):
     assert ok.data["decision"] == "Allowed" and ok.data["vehicle"]["recon_state"] == "finalization"
     wo = await dispatch(ctx_for(db, owner), "shop.create_work_order", {"vehicle_id": v["id"], "title": "Paint touch-up", "recon_issue_id": issue.id})
     assert wo.data["work_order"]["ref"].startswith("WO-")
+
+
+# ── invariant 10: factual gates cannot be turned green by hand ──────────────
+async def test_readiness_and_inspection_dates_cannot_bypass_the_gates(db, owner, manager):
+    v = await _vehicle(db, owner)
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+    for kind in ("inspected", "recon_started", "ready"):
+        for user in (owner, manager):
+            with pytest.raises(Blocked):
+                await dispatch(ctx_for(db, user), "vehicles.record_milestone", {"vehicle_id": v["id"], "kind": kind,
+                                                                               "status": "completed", "at": now, "source_kind": "manual"})
+    row = await db.get(Vehicle, v["id"])
+    await db.refresh(row)
+    assert row.inspected_at is None and row.ready_at is None and row.recon_state == "needs_inspection"
+    # a forecast is still honest and allowed
+    plan = await dispatch(ctx_for(db, owner), "vehicles.record_milestone", {"vehicle_id": v["id"], "kind": "ready", "status": "planned",
+                                                                           "at": now, "source_kind": "manual", "note": "target"})
+    assert plan.data["milestone"]["status"] == "planned" and plan.data["vehicle"]["dates"]["ready_at"] is None
+    # the gate still blocks; only the shop commands write the completed recon milestones
+    blocked = await dispatch(ctx_for(db, owner), "shop.move_stage", {"vehicle_id": v["id"], "to_state": "in_recon"})
+    assert blocked.data["decision"] == "Blocked" and blocked.data["gates"][0]["requirement"] == "inspection_logged"
+    await dispatch(ctx_for(db, owner), "shop.log_inspection", {"vehicle_id": v["id"], "findings": []})
+    ok = await dispatch(ctx_for(db, owner), "shop.move_stage", {"vehicle_id": v["id"], "to_state": "in_recon"})
+    assert ok.data["decision"] == "Allowed" and ok.data["milestone"]["kind"] == "recon_started" and ok.data["milestone"]["source_kind"] == "shop"

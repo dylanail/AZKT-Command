@@ -4,9 +4,9 @@
    Classification, private and pre-arrival are labelled, never implied by colour alone. */
 import { useRef, useState, type ChangeEvent } from "react";
 import { Badge, Button, Chip, Menu, Notice, useToast } from "../../../ui";
-import { describeError } from "../../../lib/api";
+import { api, command, describeError } from "../../../lib/api";
 import { CLASSIFICATION_LABELS, slotLabel, thumbUrl, type AssetBrief } from "../types";
-import { UploadsUnavailable, humanSize, linkAsset, uploadOne } from "../../uploads-shim";
+import { UploadsUnavailable, humanSize, linkAsset, uploadOne } from "../uploads";
 
 export interface PhotoSlotsProps {
   vehicleId: string;
@@ -104,7 +104,6 @@ export function PhotoSlots({ vehicleId, photos, requiredSlots, missingSlots, her
     try {
       const body: Record<string, unknown> = { entity_kind: "vehicle", entity_id: vehicleId, role: asset.link?.role || "photo", reason: "removed from the vehicle" };
       if (asset.link?.id) body.link_id = asset.link.id;
-      const { api } = await import("../../../lib/api");
       await api.post(`/api/assets/${encodeURIComponent(asset.id)}/unlink`, body);
       toast({ message: "Photo removed from this vehicle. The file itself is kept.", tone: "ok" });
       setSelected(null);
@@ -119,7 +118,6 @@ export function PhotoSlots({ vehicleId, photos, requiredSlots, missingSlots, her
   const makeHero = async (asset: AssetBrief) => {
     setBusy(asset.id);
     try {
-      const { command } = await import("../../../lib/api");
       const r = await command(`/api/vehicles/${encodeURIComponent(vehicleId)}/update`, { hero_asset_id: asset.id, source_kind: "manual" });
       if (r.status === "ok") { toast({ message: "Main photo set", tone: "ok" }); onChanged(); }
       else toast({ message: r.decision.reasons.join(" · ") || "Not changed.", tone: "risk" });

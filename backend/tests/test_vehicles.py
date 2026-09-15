@@ -6,6 +6,7 @@ from __future__ import annotations
 import re
 import uuid
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 
 import pytest
 from sqlalchemy import select
@@ -321,9 +322,11 @@ async def test_money_hidden_in_every_command_envelope(client, db, owner, manager
     await client.post(f"/api/vehicle-intakes/{it['id']}/notes", json={"text": "needs tires"})
     ap = (await client.post(f"/api/vehicle-intakes/{it['id']}/apply", json={})).json()["data"]
     assert ap["vehicle"]["purchase_amount"] is None and ap["vehicle"]["money_hidden"] is True
-    # the vehicles router keeps hiding money on fact commands too
+    # money facts are refused outright without costs.read (the outcome would leak the hidden amount)
     r = await client.post(f"/api/vehicles/{v['id']}/propose_fact", json={"key": "purchase_amount", "value": "9999", "source_kind": "message"})
-    assert r.json()["data"]["vehicle"]["purchase_amount"] is None and r.json()["data"]["fact"].get("money_hidden") is True
+    assert r.status_code == 403
+    r = await client.post(f"/api/vehicles/{v['id']}/propose_fact", json={"key": "odometer_km", "value": "70000", "source_kind": "message"})
+    assert r.json()["data"]["vehicle"]["purchase_amount"] is None and r.json()["data"]["vehicle"]["money_hidden"] is True
     # the mechanic (assigned) gets the same treatment through the shop API
     login(client, mechanic)
     r = await client.post(f"/api/shop/vehicles/{v['id']}/inspections", json={"findings": []})
@@ -370,3 +373,25 @@ async def test_owner_only_commands_denied_for_manager_mechanic_agent_and_externa
     assert (await db.get(__import__("backend.app.models.vehicles", fromlist=["Part"]).Part, part["id"])).state == "installed"
     ok = await dispatch(ctx_for(db, owner), "shop.verify_part", {"part_id": part["id"], "vehicle_id": v["id"]})
     assert ok.data["part"]["state"] == "verified" and ok.data["part"]["verified_by"] == owner.id
+
+
+async def test_purchase_money_cannot_be_written_or_probed_without_costs_read(db, owner, manager):
+    v = (await _create(db, owner, make="Mitsubishi", model="Minicab", purchase_amount="3300.00", purchase_currency="USD",
+                       create_missing_task=False))["vehicle"]
+    # a manager has vehicles.write but no costs.read: they cannot write purchase money ...
+    with pytest.raises(Denied):
+        await _create(db, manager, make="Mitsubishi", model="Minicab", purchase_amount="1.00")
+    # ... and cannot use the proposal outcome (recorded / restated / conflicted) as an oracle for the hidden amount
+    with pytest.raises(Denied):
+        await dispatch(ctx_for(db, manager), "vehicles.propose_fact", {"vehicle_id": v["id"], "key": "purchase_amount",
+                                                                      "value": "3300.00", "source_kind": "message"})
+    with pytest.raises(Denied):
+        await dispatch(ctx_for(db, manager, kind="agent"), "vehicles.propose_fact", {"vehicle_id": v["id"], "key": "purchase_amount",
+                                                                                     "value": "9999.00", "source_kind": "message"})
+    row = await db.get(Vehicle, v["id"])
+    await db.refresh(row)
+    assert row.purchase_amount == Decimal("3300.00")
+    # the owner (and any costs.read role) still records and corrects it
+    ok = await dispatch(ctx_for(db, owner), "vehicles.propose_fact", {"vehicle_id": v["id"], "key": "purchase_amount",
+                                                                     "value": "3400.00", "source_kind": "document"})
+    assert ok.data["outcome"] == "conflicted" and ok.data["fact"]["status"] == "conflicted"

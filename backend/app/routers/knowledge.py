@@ -169,7 +169,8 @@ async def reject_item(item_id: str, payload: dict = Body(default={}), ctx: Comma
 @router.get("/api/procedures")
 async def list_procedures(status: str | None = None, workflow_key: str | None = None, limit: int = Query(100, ge=1, le=500),
                           offset: int = Query(0, ge=0), actor: Actor = Depends(require("agents.chat")), db: AsyncSession = Depends(get_db)):
-    return await psvc.list_procedures(db, status=status, workflow_key=workflow_key, limit=limit, offset=offset)
+    out = await psvc.list_procedures(db, status=status, workflow_key=workflow_key, limit=limit, offset=offset)
+    return {**out, "items": [psvc.redact_for(d, actor) for d in out["items"]]}
 
 
 @router.post("/api/procedures")
@@ -179,12 +180,12 @@ async def propose_procedure(payload: dict = Body(...), ctx: CommandContext = Dep
 
 @router.get("/api/procedures/{procedure_id}")
 async def get_procedure(procedure_id: str, actor: Actor = Depends(require("agents.chat")), db: AsyncSession = Depends(get_db)):
-    return await psvc.get_procedure(db, procedure_id)
+    return psvc.redact_for(await psvc.get_procedure(db, procedure_id), actor)
 
 
 @router.get("/api/procedures/{procedure_id}/versions")
 async def procedure_versions(procedure_id: str, actor: Actor = Depends(require("agents.chat")), db: AsyncSession = Depends(get_db)):
-    d = await psvc.get_procedure(db, procedure_id)
+    d = psvc.redact_for(await psvc.get_procedure(db, procedure_id), actor)
     return {"items": d["versions"], "total": len(d["versions"]), "current_version_id": d["current_version_id"]}
 
 
@@ -194,7 +195,7 @@ async def procedure_version(procedure_id: str, version_id: str, actor: Actor = D
     v = await db.get(ProcedureVersion, version_id)
     if v is None or v.procedure_id != procedure_id:
         raise NotFound("procedure version not found")
-    return psvc.serialize_version(v)
+    return psvc.redact_for(psvc.serialize_version(v), actor)
 
 
 @router.post("/api/procedures/{procedure_id}/versions/{version_id}/tests")

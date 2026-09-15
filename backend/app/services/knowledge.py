@@ -474,6 +474,7 @@ async def index_text(ctx: CommandContext, *, source_kind: str, source_id: str, t
         counts[source_kind] = int(counts.get(source_kind, 0)) + len(rows)
         counts["chunks"] = int(counts.get("chunks", 0)) + len(rows) - len(existing)
         manifest.counts = counts
+        ctx.touch(manifest, "corpus_manifest")  # the manifest is a business row: mutating it bumps its version
         if emb_error:
             manifest.failures = list(manifest.failures or [])[-199:] + [{"at": now.isoformat(), "source": f"{source_kind}:{source_id}",
                                                                           "stage": "embedding", "error": emb_error}]
@@ -511,7 +512,9 @@ async def tombstone_source(ctx: CommandContext, source_kind: str, source_id: str
         c.embedding = None
         c.embedding_model = None
         c.embedding_dims = None
+        c.bump(ctx.actor.user_id or ctx.actor.client_id)  # quarantining a chunk is a mutation: bump its version
     if rows:
+        ctx.changed.append({"kind": "corpus_source", "id": f"{source_kind}:{source_id}", "version": len(rows)})
         await ctx.db.flush()
         await ctx.db.execute(update(CorpusChunk).where(CorpusChunk.id.in_([c.id for c in rows]))
                              .values(tsv=None).execution_options(synchronize_session=False))

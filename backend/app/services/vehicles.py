@@ -20,7 +20,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import Text, cast, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..core.errors import Blocked, Conflict, NotFound, ValidationFailed
+from ..core.errors import Blocked, Conflict, Denied, NotFound, ValidationFailed
 from ..core.ids import human_ref, new_id, sha256_hex
 from ..core.money import parse_amount, quantize
 from ..core.time import PHOENIX, ensure_aware
@@ -877,6 +877,8 @@ async def vehicles_create(ctx: CommandContext, inp: VehicleCreateIn) -> dict:
                                          .order_by(Vehicle.created_at))).scalars().first()
         if existing is not None and (existing.extra or {}).get("create_key") == inp.create_key:
             return {"vehicle": serialize_vehicle(existing), "created": False}
+    if inp.purchase_amount is not None and not can_see_costs(ctx.actor):
+        raise Denied("recording a purchase amount needs costs.read; create the card and let the owner or books add the money")
     if inp.logistics_state not in LOGISTICS_STATES:
         raise ValidationFailed(f"logistics_state must be one of {LOGISTICS_STATES}")
     if inp.allocation not in ("inventory", "reserved", "sold", "candidate"):
@@ -1128,6 +1130,9 @@ async def vehicles_propose_fact(ctx: CommandContext, inp: FactProposeIn) -> dict
     key = inp.key.strip()
     if key == "frame_no_raw":
         key = "frame_no"
+    if key in MONEY_FACT_KEYS and not can_see_costs(ctx.actor):
+        # without costs.read the outcome (recorded / restated / conflicted) would itself disclose the hidden amount
+        raise Denied(f"recording {key} needs costs.read; the owner or books records purchase money")
     v = await get_vehicle(ctx.db, inp.vehicle_id)
     cur = await _current_fact(ctx.db, v.id, key)
     cur_value = cur.value if cur is not None else _column_value(v, key)

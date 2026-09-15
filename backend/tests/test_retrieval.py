@@ -123,7 +123,7 @@ async def test_G12_eval_target_excluded_and_private_exception_scoped(db, owner):
 
 
 # ── A02 flavour: mechanic never sees finance / contact chunks ────────────────
-async def test_mechanic_retrieval_is_limited_to_assigned_vehicles_and_never_finance_or_contacts(db, owner, mechanic):
+async def test_A02_mechanic_retrieval_is_limited_to_assigned_vehicles_and_never_finance_or_contacts(db, owner, mechanic):
     mine = await make_vehicle(db, asking_price=9500, asking_currency="USD", purchase_amount=4200, purchase_currency="USD")
     other = await make_vehicle(db)
     await assign(db, owner, mechanic, mine.id)
@@ -160,7 +160,7 @@ async def test_mechanic_retrieval_is_limited_to_assigned_vehicles_and_never_fina
     assert "4200" in joined_o and "margin" in joined_o and "4242" in joined_o
 
 
-async def test_external_client_sees_only_its_record_scope_and_never_personal(db, owner):
+async def test_A02_external_client_sees_only_its_record_scope_and_never_personal(db, owner):
     allowed = await make_vehicle(db)
     hidden = await make_vehicle(db)
     marker = f"koala{_u()}"
@@ -234,3 +234,104 @@ async def test_search_api_is_acl_safe(client, db, owner, mechanic):
     assert "4100" in r.text and r.json()["current_facts"][0]["money"]["asking_price"] is None
     r = await client.get("/api/knowledge/search", params={"q": ""})
     assert r.status_code == 422
+
+
+# ── A02/A05: contact-level content, owner-visibility notes and the personal allowlist ───────
+async def test_A02_actors_without_contacts_read_never_receive_customer_linked_chunks(db, owner, mechanic):
+    """A chunk about an assigned vehicle that is also linked to a customer is still customer material: the mechanic
+    (no contacts.read) must not receive it at all, not merely a redacted copy."""
+    v = await make_vehicle(db)
+    await assign(db, owner, mechanic, v.id)
+    buyer = await make_contact(db, owner, f"Nina Private {_u()}", email=f"nina{_u()}@example.com")
+    marker = f"ocelot{_u()}"
+    await index(db, owner, source_kind="note", source_id=f"n-{_u()}", text=f"{marker} torque the rear hubs on {v.stock_no}.", vehicle_id=v.id)
+    await index(db, owner, source_kind="note", source_id=f"cn-{_u()}",
+                text=f"{marker} the buyer asked us to call her at 602-555-0000 about {v.stock_no}; she may cancel.",
+                contact_id=buyer["id"], vehicle_id=v.id)
+    res = await retrieval.retrieve(db, actor_of(mechanic), f"{marker} {v.stock_no}")
+    texts = [h["text"] for h in res.historical_examples]
+    assert texts == [f"{marker} torque the rear hubs on {v.stock_no}."]
+    assert all(h["contact_id"] is None for h in res.historical_examples)
+    src = await retrieval.search_sources(db, actor_of(mechanic), marker)
+    assert src["total"] == 1 and "may cancel" not in str(src) and "602-555" not in str(src)
+    # the owner still sees both
+    assert len((await retrieval.retrieve(db, actor_of(owner), f"{marker} {v.stock_no}", limit=20)).historical_examples) == 2
+
+
+async def test_owner_visibility_notes_stay_with_the_owner_even_with_costs_read(db, owner):
+    """costs.read opens finance visibility, not owner-only content (spec §11.1)."""
+    v = await make_vehicle(db)
+    marker = f"tapir{_u()}"
+    await index(db, owner, source_kind="note", source_id=f"o-{_u()}", text=f"{marker} owner note: target margin 30% on {v.stock_no}.",
+                vehicle_id=v.id, visibility="owner")
+    await index(db, owner, source_kind="note", source_id=f"f-{_u()}", text=f"{marker} landed cost 4300 USD on {v.stock_no}.",
+                vehicle_id=v.id, visibility="finance")
+    books = await make_user(db, f"books-{_u()}", "books")  # costs.read = True
+    res = await retrieval.retrieve(db, actor_of(books), f"{marker} {v.stock_no}", limit=20)
+    joined = " ".join(h["text"] for h in res.historical_examples)
+    assert res.acl["costs"] is True and "4300" in joined and "margin" not in joined
+    assert "margin" in " ".join(h["text"] for h in (await retrieval.retrieve(db, actor_of(owner), f"{marker} {v.stock_no}", limit=20)).historical_examples)
+
+
+async def test_A05_personal_allowlisted_content_is_owner_only_in_storage_and_retrieval(db, owner, manager, mechanic):
+    """Storage/retrieval side of A05: the per-chunk allowlist flag is persisted and no non-owner actor — person,
+    agent-for-a-person or connector — can reach allowlisted content through retrieve or sources.search.
+    (Admission rules for new personal mail are the ingestion side, stage 2.)"""
+    v = await make_vehicle(db)
+    marker = f"gannet{_u()}"
+    sid = f"personal-{_u()}"
+    await index(db, owner, source_kind="message", source_id=sid, text=f"{marker} Sebastian: the port release fee is settled, unrelated to {v.stock_no}.",
+                vehicle_id=v.id, personal_allowlisted=True, visibility="owner")
+    ch = (await db.execute(select(CorpusChunk).where(CorpusChunk.source_id == sid))).scalar_one()
+    assert ch.acl == {"visibility": "owner", "personal_allowlisted": True}
+    assert any(h["source_id"] == sid for h in (await retrieval.retrieve(db, actor_of(owner), f"{marker} port release")).historical_examples)
+    ext = Actor(kind="external", user_id=owner.id, role="owner", perms=effective_perms("owner", {}), client_id="c-a05",
+                client_scopes=["read:vehicles", "read:sources", "read:contacts", "read:costs", "ask"],
+                client_record_scope={"vehicle_ids": [v.id]})
+    for who in (actor_of(manager), actor_of(manager, kind="agent"), actor_of(mechanic), ext):
+        res = await retrieval.retrieve(db, who, f"{marker} port release", limit=20)
+        assert not any(h["source_id"] == sid for h in res.historical_examples), who.kind
+        assert "Sebastian" not in str(res.to_dict())
+        assert not any(i["source_id"] == sid for i in (await retrieval.search_sources(db, who, marker))["items"])
+
+
+async def test_unlinked_historical_example_still_loses_a_real_customer_identity(db, owner):
+    """G12/B08: an example chunk that carries no contact link but names a real customer is still redacted — the
+    contacts table, not the chunk, is the source of truth for identity."""
+    marker = f"ibis{_u()}"
+    c = await make_contact(db, owner, "Zelda Fitzgerald", email="zelda.fitzgerald@example.com")
+    await index(db, owner, source_kind="example", source_id=f"ex-{_u()}",
+                text=f"{marker} Good tone: we told Zelda Fitzgerald we would hold the truck and she paid a $400 deposit.")
+    res = await retrieval.retrieve(db, actor_of(owner), f"{marker} hold the truck")
+    h = [x for x in res.historical_examples if marker in x["text"]]
+    assert h, res.historical_examples
+    assert "Zelda" not in h[0]["text"] and "Fitzgerald" not in h[0]["text"] and "[customer]" in h[0]["text"]
+    assert h[0]["identity_redacted"] is True and h[0]["deal_terms_stripped"] is True and "$400" not in h[0]["text"]
+    assert "Good tone" in h[0]["text"] and h[0]["is_historical"] is True
+    assert c["id"] not in str(h[0])
+
+
+async def test_external_client_with_contacts_scope_cannot_name_a_customer_outside_its_records(db, owner):
+    """Invariant 14: the client grant follows the read. A connector holding read:contacts still only reaches the
+    customers reachable from its record scope."""
+    mine = await make_vehicle(db)
+    other = await make_vehicle(db)
+    marker = f"civet{_u()}"
+    buyer = await make_contact(db, owner, f"In Scope {_u()}", email=f"ins{_u()}@example.com")
+    stranger = await make_contact(db, owner, f"Out Of Scope {_u()}", email=f"oos{_u()}@example.com")
+    mine.buyer_contact_id = buyer["id"]
+    other.buyer_contact_id = stranger["id"]
+    await db.commit()
+    await index(db, owner, source_kind="note", source_id=f"n-{_u()}", text=f"{marker} {mine.stock_no} is ready for pickup.",
+                contact_id=buyer["id"], vehicle_id=mine.id)
+    await index(db, owner, source_kind="note", source_id=f"n-{_u()}", text=f"{marker} {other.stock_no} is delayed.",
+                contact_id=stranger["id"], vehicle_id=other.id)
+    ext = Actor(kind="external", user_id=owner.id, role="owner", perms=effective_perms("owner", {}), client_id="c-scope",
+                client_scopes=["read:vehicles", "read:contacts", "read:sources", "ask"],
+                client_record_scope={"vehicle_ids": [mine.id]})
+    res = await retrieval.retrieve(db, ext, marker, contact_id=stranger["id"])
+    assert res.resolved["contact_id"] is None and res.acl["record_scoped_contacts"] is True
+    assert not any(f["kind"] == "contact" for f in res.current_facts)
+    assert [h["text"] for h in res.historical_examples] == [f"{marker} {mine.stock_no} is ready for pickup."]
+    ok = await retrieval.retrieve(db, ext, marker, contact_id=buyer["id"])
+    assert ok.resolved["contact_id"] == buyer["id"] and any(f["kind"] == "contact" for f in ok.current_facts)

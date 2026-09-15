@@ -52,6 +52,29 @@ def serialize_version(v: ProcedureVersion) -> dict:
             "created_at": _iso(v.created_at)}
 
 
+def redact_for(d: dict, actor) -> dict:
+    """Procedure specs are internal SOPs, but the stored `source.text_excerpt` can be a raw teach message or a
+    customer email example. Only an actor who may curate knowledge sees the raw source (spec §11.1)."""
+    from ..domain.policy import has_perm
+    if actor is None or has_perm(actor, "knowledge.write"):
+        return d
+    out = dict(d)
+    spec = dict(out.get("spec") or {})
+    if spec.get("source"):
+        src = {k: v for k, v in dict(spec["source"]).items() if k != "text_excerpt"}
+        src["text_excerpt"] = None
+        src["excerpt_hidden"] = True
+        spec["source"] = src
+        out["spec"] = spec
+    out["source_ref"] = None
+    for key in ("versions", "current_version"):
+        if isinstance(out.get(key), list):
+            out[key] = [redact_for(v, actor) for v in out[key]]
+        elif isinstance(out.get(key), dict):
+            out[key] = redact_for(out[key], actor)
+    return out
+
+
 def serialize_procedure(p: Procedure, versions: list[ProcedureVersion] | None = None) -> dict:
     d = {"id": p.id, "version": p.version, "key": p.key, "title": p.title, "goal": p.goal, "status": p.status,
          "current_version_id": p.current_version_id, "workflow_key": p.workflow_key, "description": p.description,

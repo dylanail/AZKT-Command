@@ -128,3 +128,13 @@
 .irq-act__what--exc { color: var(--risk); }
 @media (max-width: 560px) { .irq-act__row { grid-template-columns: 1fr; gap: 2px; } }
 .irq-notes { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 14px; line-height: 1.55; }
+
+/* ---------- contact picker (New request) ---------- */
+.irq-picker { display: flex; flex-direction: column; gap: 6px; max-height: 240px; overflow: auto; min-width: 0; }
+.irq-picker__row {
+  display: flex; justify-content: space-between; gap: 8px; align-items: center; padding: 8px 12px; min-height: 44px;
+  border-radius: 12px; border: 1px solid var(--line2); background: transparent; text-align: left; width: 100%;
+  white-space: normal; color: inherit; font-size: 14px;
+}
+.irq-picker__row[aria-checked="true"] { border-color: var(--text); background: var(--soft); }
+.irq-picker__row:hover { background: var(--row-hover); }
