@@ -539,8 +539,7 @@ class FakeGmail:
         record = {"message_id": mid, "thread_id": thread_id or f"fthread-{self._seq}", "raw": decoded,
                   "rfc_message_id": rfc}
         self.sent.append(record)
-        self.messages[mid] = {"id": mid, "threadId": record["thread_id"], "labelIds": ["SENT"],
-                              "payload": {"headers": [{"name": "Message-ID", "value": rfc}], "mimeType": "text/plain"}}
+        self.messages[mid] = _sent_resource(mid, record["thread_id"], decoded)
         if self.send_then_lose_result:
             self.send_then_lose_result = False
             raise ProviderError("network dropped after send; result unknown", kind="unknown_result",
@@ -565,6 +564,25 @@ class FakeGmail:
 
     async def archive(self, message_id: str) -> dict:
         return await self.modify_labels(message_id, remove=["INBOX"])
+
+
+def _sent_resource(message_id: str, thread_id: str, raw_mime: str) -> dict:
+    """The Gmail resource a real send creates, so a later sync sees the same message we sent."""
+    import email as _email
+    parsed = _email.message_from_string(raw_mime)
+    headers = [{"name": k, "value": v} for k, v in parsed.items()]
+    if parsed.is_multipart():
+        body = "".join((p.get_payload(decode=True) or b"").decode("utf-8", "replace")
+                       for p in parsed.walk() if p.get_content_type() == "text/plain")
+    else:
+        body = (parsed.get_payload(decode=True) or b"").decode("utf-8", "replace")
+    now = datetime.now(timezone.utc)
+    return {"id": message_id, "threadId": thread_id, "labelIds": ["SENT"],
+            "historyId": str(int(now.timestamp())), "internalDate": str(int(now.timestamp() * 1000)),
+            "snippet": body[:120], "sizeEstimate": len(raw_mime),
+            "payload": {"mimeType": "text/plain", "headers": headers,
+                        "parts": [{"mimeType": "text/plain", "filename": "",
+                                   "body": {"size": len(body), "data": base64.urlsafe_b64encode(body.encode()).decode()}}]}}
 
 
 def _header_of(raw: dict, name: str) -> str:

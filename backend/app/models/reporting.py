@@ -23,3 +23,9 @@ class MetricSnapshot(Base, BusinessRow):
     coverage: Mapped[dict] = mapped_column(JSON, default=dict)
     stale: Mapped[bool] = mapped_column(Boolean, default=False)
     invalidated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # added by the reporting domain (add-only): period/cohort identity, restatement notes and the last
+    # recompute error so a stale snapshot can be served honestly instead of a false zero (spec §2.4).
+    period_kind: Mapped[str | None] = mapped_column(String, nullable=True)  # month|7d|30d|custom
+    cohort_hash: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
+    restatements: Mapped[list] = mapped_column(JSON, default=list)
+    last_error: Mapped[str | None] = mapped_column(String, nullable=True)

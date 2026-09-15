@@ -16,7 +16,7 @@ Design rules taken from the reference and kept literal:
 from __future__ import annotations
 
 import html as _html
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Any
 
 from ..core.config import settings

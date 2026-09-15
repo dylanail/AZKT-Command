@@ -14,8 +14,7 @@ Unique delivery key: ``{task}:{revision}:{kind}:{recipient}:{channel}`` (spec §
 from __future__ import annotations
 
 import logging
-from datetime import date, datetime, time, timedelta, timezone
-from typing import Iterable
+from datetime import datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import or_, select
@@ -30,8 +29,8 @@ from ..domain.events import on_event
 from ..domain.jobs import sweep
 from ..models import User
 from ..models.legacy import Setting
-from ..models.notify import Notification, ScheduledDelivery, TelegramPairing
-from ..models.runtime import ActivityEntry, Approval
+from ..models.notify import Notification, ScheduledDelivery
+from ..models.runtime import Approval
 from ..models.tasks import Task
 from . import email_templates
 from .team import effective_notification_prefs
@@ -84,20 +83,29 @@ async def config(db: AsyncSession) -> dict:
     return base
 
 
+def resolve_mode(user: User, kind: str, business_channels: dict | None = None) -> str:
+    """Precedence: the person's own explicit choice, then the business default from Settings, then the
+    role default (email for the four designed reminders, Telegram with email fallback for updates)."""
+    own = ((user.notification_prefs or {}).get("channels") or {}).get(kind)
+    if own in CHANNELS_FOR_MODE:
+        return own
+    business = (business_channels or {}).get(kind)
+    if business in CHANNELS_FOR_MODE:
+        return business
+    fallback = (effective_notification_prefs(user.notification_prefs).get("channels") or {}).get(kind)
+    return fallback if fallback in CHANNELS_FOR_MODE else "email_only"
+
+
 def channels_for(user: User, kind: str, business_channels: dict | None = None) -> tuple[str, ...]:
-    """Channels for one person and one reminder kind. The person's own preference wins over the
-    business default; `telegram_fallback_email` means Telegram now and email only if Telegram fails."""
-    prefs = effective_notification_prefs(user.notification_prefs)
-    mode = (prefs.get("channels") or {}).get(kind) or (business_channels or {}).get(kind) or "email_only"
-    out = list(CHANNELS_FOR_MODE.get(mode, ("email",)))
-    if inapp_enabled(user, kind) and kind in ("case_update", "connection_issue", "deposit_confirmed"):
-        out.append("inapp")
-    return tuple(out)
+    """Channels for one person and one reminder kind. `telegram_fallback_email` means Telegram now and
+    email only if Telegram actually failed.
+    The in-app bell is not an outbound channel: event handlers write the Notification row directly, so a
+    person who chose "telegram + email" never gets three copies of the same fact."""
+    return tuple(CHANNELS_FOR_MODE.get(resolve_mode(user, kind, business_channels), ("email",)))
 
 
-def fallback_mode(user: User, kind: str) -> bool:
-    prefs = effective_notification_prefs(user.notification_prefs)
-    return (prefs.get("channels") or {}).get(kind) == "telegram_fallback_email"
+def fallback_mode(user: User, kind: str, business_channels: dict | None = None) -> bool:
+    return resolve_mode(user, kind, business_channels) == "telegram_fallback_email"
 
 
 def inapp_enabled(user: User, kind: str | None = None) -> bool:
@@ -298,6 +306,14 @@ async def repair_missing(session_factory) -> dict:
     (a lost enqueue, a crashed worker, a restored backup). Idempotent by dedupe key."""
     async with session_factory() as db:
         cfg = await config(db)
+        # a worker that died mid-delivery leaves a claimed row: the expired lease returns it to the queue
+        stuck = (await db.execute(select(ScheduledDelivery).where(
+            ScheduledDelivery.state == "claimed", ScheduledDelivery.lease_until < now()))).scalars().all()
+        for r in stuck:
+            r.state = "scheduled"
+            r.lease_token = None
+            r.lease_until = None
+            r.last_error = "delivery lease expired; requeued"
         horizon_past = now() - timedelta(hours=max(cfg["obsolete_after_hours"], 24))
         rows = (await db.execute(
             select(Task).where(Task.status.in_(ACTIONABLE), Task.due_at.is_not(None),
@@ -311,7 +327,7 @@ async def repair_missing(session_factory) -> dict:
             except Exception:  # noqa: BLE001
                 log.exception("repair_missing failed for task %s", t.id)
         await db.commit()
-        return {"tasks": len(rows), "created": made}
+        return {"tasks": len(rows), "created": made, "requeued": len(stuck)}
 
 
 @sweep("reminders.digest", 300)
@@ -391,7 +407,6 @@ async def digest_content(db: AsyncSession, u: User) -> dict:
         elif day_end.astimezone(timezone.utc) <= due < tomorrow_end.astimezone(timezone.utc):
             tomorrow.append({"task_id": t.id, "text": f"{t.title} · {fmt_local(due, t.timezone or PHOENIX)}"})
     approvals = []
-    from ..domain.policy import ROLE_DEFAULTS
     can_approve = u.role == "owner" or bool((u.perms or {}).get("approve"))
     if can_approve:
         arows = (await db.execute(select(Approval).where(Approval.status == "pending")
@@ -401,6 +416,40 @@ async def digest_content(db: AsyncSession, u: User) -> dict:
             approvals.append({"approval_id": a.id,
                               "text": a.title + (f" · expires {fmt_local(when, u.timezone or PHOENIX)}" if when else "")})
     return {"overdue": overdue[:10], "today": today[:10], "approvals": approvals[:10], "tomorrow": tomorrow[:5]}
+
+
+@sweep("reminders.reconcile", 300)
+async def reconcile_unknown(session_factory) -> dict:
+    """An email send whose result was lost stays `unknown` and is never blindly retried (spec §5.6).
+    It is resolved by asking the transport about the stored provider_ref — and only when the transport
+    actually supports that lookup. No lookup means the row stays visibly unknown, not silently "sent"."""
+    from ..adapters import email as email_adapter
+    async with session_factory() as db:
+        rows = (await db.execute(select(ScheduledDelivery).where(ScheduledDelivery.state == "unknown")
+                                 .order_by(ScheduledDelivery.deliver_at).limit(50))).scalars().all()
+        if not rows:
+            return {"unknown": 0, "reconciled": 0}
+        lookup = getattr(email_adapter.transport(), "lookup", None)
+        if lookup is None:
+            return {"unknown": len(rows), "reconciled": 0,
+                    "note": "this transport cannot report delivery; the results stay unknown rather than resent"}
+        done = 0
+        for r in rows:
+            if not r.provider_ref:
+                continue
+            try:
+                res = await lookup(r.provider_ref)
+            except Exception:  # noqa: BLE001
+                continue
+            if not isinstance(res, dict) or not res.get("state"):
+                continue
+            r.state = res["state"]
+            r.receipt = {**(r.receipt or {}), **res}
+            if res["state"] == "delivered":
+                r.delivered_at = now()
+            done += 1
+        await db.commit()
+        return {"unknown": len(rows), "reconciled": done}
 
 
 @sweep("reminders.deliver_due", 15)
@@ -473,7 +522,7 @@ async def _deliver_one(db: AsyncSession, delivery_id: str) -> str:
     if row.channel == "email":
         return await _send_email(db, row, user, ctx, late)
     if row.channel == "telegram":
-        return await _send_telegram(db, row, user, ctx, task, late)
+        return await _send_telegram(db, row, user, ctx, task, late, cfg)
     if row.channel == "inapp":
         return await _send_inapp(db, row, user, ctx, late)
     return _fail(row, f"unknown channel {row.channel}")
@@ -643,11 +692,11 @@ async def _send_email(db: AsyncSession, row: ScheduledDelivery, user: User, ctx:
 
 
 async def _send_telegram(db: AsyncSession, row: ScheduledDelivery, user: User, ctx: dict, task: Task | None,
-                         late: bool) -> str:
+                         late: bool, cfg: dict | None = None) -> str:
     from . import telegram_bot
     pairing = await telegram_bot.active_pairing(db, user.id)
     if pairing is None:
-        await _telegram_fallback(db, row, user, "no active Telegram pairing")
+        await _telegram_fallback(db, row, user, "no active Telegram pairing", cfg)
         return _fail(row, "setup_blocked: no active Telegram pairing for this person")
     text = telegram_bot.compose_reminder(ctx)
     markup = telegram_bot.reminder_keyboard(task) if task is not None else None
@@ -662,11 +711,11 @@ async def _send_telegram(db: AsyncSession, row: ScheduledDelivery, user: User, c
             row.deliver_at = now() + timedelta(seconds=retry)
             row.last_error = f"rate limited; retrying in {retry}s"
             row.lease_token = None
-            return "cancelled"
-        await _telegram_fallback(db, row, user, f"telegram {kind}: {e}")
+            return "rescheduled"
+        await _telegram_fallback(db, row, user, f"telegram {kind}: {e}", cfg)
         return _fail(row, f"telegram {kind}: {e}")
     except Unsupported as e:
-        await _telegram_fallback(db, row, user, str(e))
+        await _telegram_fallback(db, row, user, str(e), cfg)
         return _fail(row, f"setup_blocked: {e}")
     row.receipt = {"provider": "telegram", "chat_id": pairing.chat_id,
                    "message_id": (res.get("result") or {}).get("message_id")}
@@ -678,9 +727,10 @@ async def _send_telegram(db: AsyncSession, row: ScheduledDelivery, user: User, c
     return "sent"
 
 
-async def _telegram_fallback(db: AsyncSession, row: ScheduledDelivery, user: User, reason: str) -> None:
+async def _telegram_fallback(db: AsyncSession, row: ScheduledDelivery, user: User, reason: str,
+                             cfg: dict | None = None) -> None:
     """`telegram_fallback_email`: email only when Telegram actually failed."""
-    if not fallback_mode(user, row.kind):
+    if not fallback_mode(user, row.kind, (cfg or {}).get("channels")):
         return
     key = f"{row.dedupe_key}:fallback"
     await _ensure_delivery(db, dedupe=key, kind=row.kind, task_id=row.task_id, task_revision=row.task_revision,

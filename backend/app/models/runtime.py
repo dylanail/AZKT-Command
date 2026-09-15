@@ -69,6 +69,10 @@ class Run(Base, BusinessRow):
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     lease_token: Mapped[str | None] = mapped_column(String, nullable=True)
     lease_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Monotonic fencing token: only the holder of the newest lease may persist a step or finish the run
+    # (spec §10.4 step 2, invariant 2 / H01). A stale worker's fenced UPDATE matches no row.
+    fencing_token: Mapped[int] = mapped_column(Integer, default=0)
+    worker_id: Mapped[str | None] = mapped_column(String, nullable=True)
     trigger: Mapped[str | None] = mapped_column(String, nullable=True)
     result: Mapped[dict] = mapped_column(JSON, default=dict)
     used_model: Mapped[bool] = mapped_column(Boolean, default=False)

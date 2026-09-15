@@ -35,6 +35,8 @@ class ExternalClient(Base, BusinessRow):
     callback_url: Mapped[str | None] = mapped_column(Text, nullable=True)  # owner-configured only
     callback_secret_enc: Mapped[str | None] = mapped_column(Text, nullable=True)
     health: Mapped[dict] = mapped_column(JSON, default=dict)
+    # Per-minute rate counter: {"minute": "2026-09-15T12:34", "count": n} (spec §10.8 quotas).
+    usage_window: Mapped[dict] = mapped_column(JSON, default=dict)
     notes: Mapped[str] = mapped_column(Text, default="")
 
 

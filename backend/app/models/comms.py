@@ -66,6 +66,7 @@ class ProviderEvent(Base, BusinessRow):
 
 class Conversation(Base, BusinessRow):
     __tablename__ = "conversations"
+    __mapper_args__ = {"eager_defaults": True}  # fetch server-generated created_at/updated_at via RETURNING (async-safe)
     __table_args__ = (UniqueConstraint("connection_id", "provider_thread_id", name="uq_conversation_thread"),)
     connection_id: Mapped[str | None] = mapped_column(ForeignKey("connections.id"), nullable=True, index=True)
     channel: Mapped[str] = mapped_column(String, default="email", index=True)  # email|sms|telegram|web
@@ -99,6 +100,7 @@ class Conversation(Base, BusinessRow):
 
 class Message(Base, BusinessRow):
     __tablename__ = "messages"
+    __mapper_args__ = {"eager_defaults": True}  # fetch server-generated created_at/updated_at via RETURNING (async-safe)
     __table_args__ = (UniqueConstraint("connection_id", "provider_message_id", name="uq_message_provider"),)
     conversation_id: Mapped[str] = mapped_column(ForeignKey("conversations.id"), index=True)
     connection_id: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
@@ -140,6 +142,7 @@ class Message(Base, BusinessRow):
 class Draft(Base, BusinessRow):
     """A versioned outbound reply (spec §4.3–4.4). New version invalidates the old approval."""
     __tablename__ = "drafts"
+    __mapper_args__ = {"eager_defaults": True}  # fetch server-generated created_at/updated_at via RETURNING (async-safe)
     conversation_id: Mapped[str] = mapped_column(ForeignKey("conversations.id"), index=True)
     reply_to_message_id: Mapped[str | None] = mapped_column(String, nullable=True)
     draft_version: Mapped[int] = mapped_column(Integer, default=1)

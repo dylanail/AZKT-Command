@@ -42,8 +42,8 @@ RESERVED_ACK_RE = re.compile(r"\b(reserved|sold|on hold|no longer available|alre
 OPT_OUT_RE = re.compile(r"\b(unsubscribe|opt[- ]out|opt me out|stop emailing|remove me from|do not contact|take me off)\b", re.I)
 DISPUTE_RE = re.compile(r"\b(chargeback|charge back|dispute|disputing|attorney|lawyer|small claims|"
                         r"fraud|scam|legal action|refund demand|demand a refund)\b", re.I)
-MONEY_RE = re.compile(r"(?:(?P<c1>US\$|USD|\$|¥|￥|JPY|€|EUR)\s?(?P<a1>\d{1,3}(?:,\d{3})*(?:\.\d{1,2})?|\d+(?:\.\d{1,2})?))"
-                      r"|(?:(?P<a2>\d{1,3}(?:,\d{3})*(?:\.\d{1,2})?|\d+(?:\.\d{1,2})?)\s?(?P<c2>USD|JPY|yen|EUR|dollars))",
+MONEY_RE = re.compile(r"(?:(?P<c1>US\$|USD|\$|¥|￥|JPY|€|EUR)\s?(?P<a1>\d{1,3}(?:,\d{3})+(?:\.\d{1,2})?|\d+(?:\.\d{1,2})?))"
+                      r"|(?:(?P<a2>\d{1,3}(?:,\d{3})+(?:\.\d{1,2})?|\d+(?:\.\d{1,2})?)\s?(?P<c2>USD|JPY|yen|EUR|dollars))",
                       re.I)
 DATE_RE = re.compile(r"\b(\d{4}-\d{2}-\d{2}|\d{1,2}/\d{1,2}(?:/\d{2,4})?|"
                      r"(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+\d{1,2}(?:,\s*\d{4})?)\b", re.I)
@@ -260,9 +260,10 @@ def run(draft, conversation, facts: dict) -> list[dict]:
     # 10. dates (ETA) match the sourced shipment record (B09)
     eta = (facts.get("shipment") or {}).get("eta")
     eta_date = _as_date(eta)
-    body_dates = [d for raw, d in dates_in(body) if d]
-    eta_context = bool(ETA_CONTEXT_RE.search(body))
-    if eta_context and body_dates:
+    # only a date in a sentence that actually talks about arrival/shipping is an arrival claim
+    body_dates = [d for sentence in split_sentences(body) if ETA_CONTEXT_RE.search(sentence)
+                  for _, d in dates_in(sentence) if d]
+    if body_dates:
         date_ok = eta_date is not None and any(d == eta_date for d in body_dates)
         label = ("Quoted arrival date matches the shipment record" if date_ok else
                  ("No recorded ETA to support a date" if eta_date is None else
