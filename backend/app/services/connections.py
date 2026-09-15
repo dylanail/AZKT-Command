@@ -24,7 +24,9 @@ PROVIDER_LABELS = {
     "wordpress": "WordPress", "woocommerce": "WooCommerce", "model": "AI model", "smtp": "Reminder email",
     # the old "calendar" placeholder is gone: `google_calendar` above is the real, connectable row, and
     # leaving both would put a "coming in a later stage" line next to a calendar that now works.
-    "sms": "Business SMS", "legacy_notion": "Notion mirror (legacy)",
+    # Business SMS was dropped, so no row is created for it; the label stays for any row that predates
+    # that decision (docs/handoff/Decisions-and-Setup.md).
+    "legacy_notion": "Notion mirror (legacy)",
     "legacy_openclaw": "OpenClaw agents (legacy)",
 }
 

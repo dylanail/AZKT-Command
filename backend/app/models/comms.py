@@ -7,8 +7,11 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from ..db import Base, BusinessRow
 
-PROVIDERS = ("gmail_business", "gmail_personal", "drive", "sheets", "square", "telegram", "wordpress",
-             "woocommerce", "model", "smtp", "sms", "calendar", "legacy_notion", "legacy_openclaw")
+# `sms` and the old `calendar` placeholder stay in this tuple only so a row written before those
+# decisions still validates. Business SMS was dropped (docs/handoff/Decisions-and-Setup.md) and the
+# calendar is now the real, connectable `google_calendar` provider; neither is created any more.
+PROVIDERS = ("gmail_business", "gmail_personal", "drive", "sheets", "google_calendar", "square", "telegram",
+             "wordpress", "woocommerce", "model", "smtp", "sms", "calendar", "legacy_notion", "legacy_openclaw")
 
 
 class Connection(Base, BusinessRow):
