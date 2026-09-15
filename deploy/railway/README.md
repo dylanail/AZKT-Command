@@ -24,6 +24,13 @@ Pick one, on both `web` and `worker` (they share the files):
 `GET /api/health` reports `storage.durable`. It is `false`, and the page is not "ok", whenever the
 app is running on Railway with neither of the above. Check it after the first deploy.
 
+## The port
+
+Railway assigns each deploy a port and injects it as `PORT`. `backend.app.main` listens on that when
+it is set, falling back to `API_PORT` for a droplet behind nginx. Do not set `PORT` yourself, and do
+not set `API_PORT` on Railway — leave the injected value alone. `API_HOST` must be `0.0.0.0`; the
+default `127.0.0.1` is only reachable from inside the container and the health check would never pass.
+
 ## Both services must run
 
 The `worker` service is not optional either. It runs the sweeps: reminder delivery, provider

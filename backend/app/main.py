@@ -113,8 +113,20 @@ app = create_app()
 
 
 def main() -> None:
+    """Serve the API.
+
+    Railway assigns each deploy a port and injects it as `PORT`; a service that listens anywhere else
+    never passes its health check. `PORT` therefore wins over `API_PORT`, which stays the setting for
+    a droplet behind nginx where the port is ours to choose.
+    """
+    import os
+
     import uvicorn
-    uvicorn.run(app, host=settings.API_HOST, port=settings.API_PORT)
+    port = settings.API_PORT
+    injected = (os.environ.get("PORT") or "").strip()
+    if injected.isdigit():
+        port = int(injected)
+    uvicorn.run(app, host=settings.API_HOST, port=port)
 
 
 if __name__ == "__main__":

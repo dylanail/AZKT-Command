@@ -50,6 +50,10 @@ Two things are easy to skip and both fail quietly:
 * **The worker service.** Without it no sweep runs: no reminder delivery, no provider reconciliation,
   and no hourly website scan.
 
+Two settings the platform decides for you: `API_HOST` must be `0.0.0.0` (the default `127.0.0.1` is
+unreachable from outside the container), and the port comes from Railway's injected `PORT` — leave
+both `PORT` and `API_PORT` unset on Railway.
+
 Rollback: redeploy the previous image. Migrations are backward compatible for queued work; if a
 migration must be reverted, run `PYTHONPATH=. alembic -c backend/alembic.ini downgrade -1` on the
 previous image, then redeploy.
