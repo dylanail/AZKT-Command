@@ -1,7 +1,9 @@
 /* Tasks: My | All (scope-aware); Overdue / Next 24 hours / Upcoming / Unassigned / Blocked / Waiting /
    Awaiting verification / Completed from GET /api/tasks?view=&bucket=; summary chips from GET /api/tasks/summary;
    schedule view from GET /api/tasks/schedule grouped by local day (Tokyo alongside Phoenix when jp).
-   One task can sit in several buckets without duplicating rows. */
+   One task can sit in several buckets without duplicating rows.
+   Four views live side by side in the URL: Tasks (default) · Cases (?secondary=cases) ·
+   Promises (?secondary=promises) · Schedule (?layout=schedule, kept as it was). */
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { useAuth } from "../../lib/auth";
@@ -15,8 +17,12 @@ import { TaskRow, type TaskAbout } from "./TaskRow";
 import { useNames } from "./useNames";
 import { usePeople } from "./usePeople";
 import { useTasksSummary, todayRange, type TasksSummary } from "./useTasksSummary";
-import { defaultTz, isOverdue, withinNextHours, type TaskListResp, type TaskView } from "./types";
+import { CasesView, PromisesView } from "./SecondaryViews";
+import { defaultTz, isOverdue, withinNextHours, type CaseListResp, type PromiseListResp, type TaskListResp, type TaskView } from "./types";
 import "./tasks.css";
+
+/** The four things the Tasks screen can show; "schedule" is the old ?layout=schedule. */
+type Secondary = "tasks" | "cases" | "promises" | "schedule";
 
 type BucketId = "overdue" | "next24" | "upcoming" | "unassigned" | "blocked" | "waiting" | "awaiting_verification" | "completed";
 type ApiBucket = "overdue" | "upcoming" | "unassigned" | "blocked" | "waiting" | "awaiting_verification" | "completed";
@@ -58,7 +64,12 @@ export default function Tasks() {
   const employee = isEmployeeRole(user?.role);
   const canAll = user?.scope === "all" && !employee;
   const view: "my" | "all" = params.get("view") === "my" ? "my" : params.get("view") === "all" && canAll ? "all" : canAll ? "all" : "my";
-  const layout: "list" | "schedule" = params.get("layout") === "schedule" ? "schedule" : "list";
+  const rawSecondary = params.get("secondary");
+  const secondary: Secondary = rawSecondary === "cases" ? "cases"
+    : rawSecondary === "promises" ? "promises"
+    : params.get("layout") === "schedule" ? "schedule" : "tasks";
+  // Cases and promises share one "include closed" switch; it only applies while one of them is open.
+  const closedStatus: "open" | "all" = params.get("status") === "all" ? "all" : "open";
   const bucket: BucketId = isBucket(params.get("bucket")) ? (params.get("bucket") as BucketId) : "upcoming";
   const jp = params.get("jp") === "1";
   const tz = defaultTz(user?.timezone);
@@ -71,6 +82,17 @@ export default function Tasks() {
     if (v) p.set(k, v); else p.delete(k);
     setParams(p, { replace: true });
   }, [params, setParams]);
+  const setSecondary = useCallback((v: Secondary) => {
+    const p = new URLSearchParams(params);
+    p.delete("secondary");
+    p.delete("layout");
+    if (v === "cases" || v === "promises") p.set("secondary", v);
+    else {
+      p.delete("status");                       // "include closed" belongs to those two views only
+      if (v === "schedule") p.set("layout", "schedule");
+    }
+    setParams(p, { replace: true });
+  }, [params, setParams]);
 
   const summary = useTasksSummary();
   const summaryReload = summary.reload;
@@ -78,18 +100,31 @@ export default function Tasks() {
   const def = BUCKETS.find((b) => b.id === bucket) as BucketDef;
 
   const list = useQuery<ListData>(async (signal) => {
-    if (layout !== "list") return { main: [], overdue: [], missing: false };
+    if (secondary !== "tasks") return { main: [], overdue: [], missing: false };
     const get = (b: ApiBucket) => api.get<TaskListResp | null>(`/api/tasks?view=${view}&bucket=${b}&limit=200${jp ? "&jp=1" : ""}`, { signal, tolerate: [404, 501] });
     const [main, over] = await Promise.all([get(def.api), bucket === "upcoming" ? get("overdue") : Promise.resolve(null)]);
     return { main: main?.items || [], overdue: over?.items || [], missing: main === null };
-  }, [layout, view, bucket, jp, tick]);
+  }, [secondary, view, bucket, jp, tick]);
 
   const sched = useQuery<ScheduleResp | null>(async (signal) => {
-    if (layout !== "schedule") return null;
+    if (secondary !== "schedule") return null;
     return api.get<ScheduleResp | null>(`/api/tasks/schedule?from=${from}&to=${to}&view=${view}&tz=${encodeURIComponent(tz)}${jp ? "&jp=1" : ""}`, { signal, tolerate: [404, 501] });
-  }, [layout, view, from, to, tz, jp, tick]);
+  }, [secondary, view, from, to, tz, jp, tick]);
 
-  const allRows = useMemo(() => [...(list.data?.main || []), ...(list.data?.overdue || []), ...(sched.data?.items || [])], [list.data, sched.data]);
+  // Cases and promises load whatever the open view is, so their counts on the switch are real numbers.
+  const cases = useQuery<CaseListResp | null>(
+    (signal) => api.get<CaseListResp | null>(`/api/tasks/cases?status=${closedStatus}&limit=200`, { signal, tolerate: [403, 404, 501] }),
+    [closedStatus, tick],
+  );
+  const promises = useQuery<PromiseListResp | null>(
+    (signal) => api.get<PromiseListResp | null>(`/api/tasks/promises?status=${closedStatus}&limit=200`, { signal, tolerate: [403, 404, 501] }),
+    [closedStatus, tick],
+  );
+
+  const allRows = useMemo(
+    () => [...(list.data?.main || []), ...(list.data?.overdue || []), ...(sched.data?.items || []), ...(cases.data?.items || []), ...(promises.data?.items || [])],
+    [list.data, sched.data, cases.data, promises.data],
+  );
   const names = useNames(allRows, { contacts: can(user, "contacts.read"), opportunities: can(user, "sales.read"), vehicles: true });
   const people = usePeople(!employee);
   const dialogs = useTaskDialogs();
@@ -126,7 +161,11 @@ export default function Tasks() {
 
   const s = summary.summary;
   const title = employee ? "My tasks" : view === "my" ? "My tasks" : "Tasks";
-  const subtitle = q ? `Search: "${q}"` : s
+  const subtitle = secondary === "cases"
+    ? "Work that is waiting on someone else, each with what it waits on and when it is checked again."
+    : secondary === "promises"
+    ? "What has been promised to people, and when each one is due."
+    : q ? `Search: "${q}"` : s
     ? [s.overdue ? `${pluralize(s.overdue, "overdue")}` : null, `${s.today} due today`, s.blocked ? `${s.blocked} blocked` : null, s.awaiting_verification ? `${s.awaiting_verification} awaiting verification` : null].filter(Boolean).join(" · ")
     : employee ? "Complete with evidence; the owner verifies." : "Shop tasks, sales calls and verification in one list. Verification stays with the owner.";
 
@@ -146,17 +185,35 @@ export default function Tasks() {
             {canAll ? (
               <SegmentedControl<"my" | "all"> label="Whose tasks" size="sm" value={view} onChange={(v) => setParam("view", v)} options={[{ value: "my", label: "My" }, { value: "all", label: "All" }]} />
             ) : null}
-            <SegmentedControl<"list" | "schedule"> label="Layout" size="sm" value={layout} onChange={(v) => setParam("layout", v === "list" ? null : v)} options={[{ value: "list", label: "List" }, { value: "schedule", label: "Schedule" }]} />
+            <SegmentedControl<Secondary>
+              label="What to show"
+              size="sm"
+              value={secondary}
+              onChange={setSecondary}
+              options={[
+                { value: "tasks", label: "Tasks" },
+                { value: "cases", label: "Cases", count: cases.data?.total },
+                { value: "promises", label: "Promises", count: promises.data?.total },
+                { value: "schedule", label: "Schedule" },
+              ]}
+            />
           </div>
-          <Chip size="sm" tone={jp ? "act" : "neutral"} selected={jp} onClick={() => setParam("jp", jp ? null : "1")} title="Also show Tokyo time">Tokyo time</Chip>
+          <div className="row-wrap">
+            {secondary === "cases" || secondary === "promises" ? (
+              <Chip size="sm" tone={closedStatus === "all" ? "act" : "neutral"} selected={closedStatus === "all"}
+                onClick={() => setParam("status", closedStatus === "all" ? null : "all")}
+                title="Also show the ones that are finished or cancelled">Include closed</Chip>
+            ) : null}
+            <Chip size="sm" tone={jp ? "act" : "neutral"} selected={jp} onClick={() => setParam("jp", jp ? null : "1")} title="Also show Tokyo time">Tokyo time</Chip>
+          </div>
         </div>
-        {layout === "list" ? (
+        {secondary === "tasks" ? (
           <div className="tk-chips" role="group" aria-label="Task buckets">
             {visibleBuckets.map((b) => (
               <Chip key={b.id} size="sm" tone={bucket === b.id ? "act" : "neutral"} selected={bucket === b.id} onClick={() => setParam("bucket", b.id === "upcoming" ? null : b.id)} count={b.summary && s ? s[b.summary] as number : undefined}>{b.label}</Chip>
             ))}
           </div>
-        ) : (
+        ) : secondary === "schedule" ? (
           <div className="tk-toolbar">
             <div className="row-wrap">
               <Button size="sm" variant="soft" onClick={() => setParam("from", addDays(from, -7))}>‹ Previous week</Button>
@@ -165,12 +222,18 @@ export default function Tasks() {
             </div>
             <span className="fs13 t3 tnum">{formatWhen(new Date(`${from}T12:00:00Z`), { tz: "UTC", style: "date" })} – {formatWhen(new Date(`${addDays(from, 6)}T12:00:00Z`), { tz: "UTC", style: "date" })} · days in {tz === TZ.tokyo ? "Tokyo" : "Phoenix"} time</span>
           </div>
-        )}
+        ) : null}
       </PageHeader>
 
       {summary.error && !s ? <ErrorState error={summary.error} onRetry={summary.reload} title="Couldn't load the summary" /> : null}
 
-      {layout === "list" ? (
+      {secondary === "cases" ? (
+        <CasesView data={cases.data} loading={cases.loading} error={cases.error} reload={cases.reload}
+          names={names} tokyo={jp} showClosed={closedStatus === "all"} />
+      ) : secondary === "promises" ? (
+        <PromisesView data={promises.data} loading={promises.loading} error={promises.error} reload={promises.reload}
+          names={names} tokyo={jp} showClosed={closedStatus === "all"} />
+      ) : secondary === "tasks" ? (
         list.loading ? <GlassPanel clip><Loading label="Loading tasks" rows={4} /></GlassPanel>
         : list.error ? <ErrorState error={list.error} onRetry={list.reload} />
         : list.data?.missing ? <GlassPanel clip><EmptyState title="Tasks aren't connected yet" body="This list fills in once the tasks API is live." /></GlassPanel>

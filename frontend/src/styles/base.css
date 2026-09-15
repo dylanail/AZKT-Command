@@ -139,3 +139,8 @@ input:focus-visible, textarea:focus-visible, select:focus-visible { outline: 2px
 }
 .linklike:hover { text-decoration: underline; }
 .linklike:disabled { color: var(--t4); text-decoration: none; cursor: not-allowed; }
+/* Phone: a 24px hit area laid over the text, so the link keeps its exact size, weight and baseline. */
+@media (max-width: 767px) {
+  .linklike { position: relative; padding-inline: 4px; margin-inline: -4px; }
+  .linklike::after { content: ""; position: absolute; left: 0; right: 0; top: 50%; height: 24px; transform: translateY(-50%); }
+}

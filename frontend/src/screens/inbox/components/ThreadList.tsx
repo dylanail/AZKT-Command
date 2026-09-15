@@ -4,19 +4,12 @@
 import { useCallback, useEffect, useRef, type KeyboardEvent } from "react";
 import { Button, Chip, EmptyState, ErrorState, GlassPanel, Input, Loading, SearchIcon, SegmentedControl, Select } from "../../../ui";
 import { relativeTime } from "../../../lib/format";
-import { COUNT_LIMIT } from "../useInboxData";
 import {
   CLASSIFICATION_LABELS, FILTER_EMPTY, FILTER_LABELS, LINK_KIND_LABELS, STATE_LABELS, THREAD_FILTERS,
-  accountLabel, threadTitle, threadWho, type Conversation, type ThreadFilter,
+  accountLabel, threadTitle, threadWho, type Conversation, type ThreadCounts, type ThreadFilter,
 } from "../types";
 
 export interface AccountOption { value: string; label: string }
-
-/** Counts come from one bounded page, so the cap is shown honestly rather than as an exact total. */
-function countLabel(n: number | undefined): number | string | undefined {
-  if (n === undefined) return undefined;
-  return n >= COUNT_LIMIT ? `${COUNT_LIMIT}+` : n;
-}
 
 /** State chips, in the order they matter for triage. */
 function stateChips(c: Conversation) {
@@ -56,6 +49,9 @@ function ThreadRow({ c, selected, contactName, onOpen }: {
   const needsAttention = c.state === "needs_reply" || c.state === "unmatched" || c.state === "blocked";
   const who = contactName || threadWho(c) || "Unknown sender";
   const reason = reasonLine(c);
+  // The opening of the newest message, quoted text already stripped by the server.
+  const snippet = (c.snippet || c.last_message?.snippet || "").trim();
+  const outbound = c.last_message?.direction === "out";
   const cls = ["ib-row", selected ? "ib-row--sel" : "", needsAttention ? "ib-row--attention" : ""].filter(Boolean).join(" ");
   return (
     <button type="button" className={cls} onClick={onOpen} data-thread-row={c.id}
@@ -68,7 +64,10 @@ function ThreadRow({ c, selected, contactName, onOpen }: {
           <span className="ib-row__age tnum">{c.last_inbound_at ? relativeTime(c.last_inbound_at) : "no inbound"}</span>
         </span>
         <span className="ib-row__subject">{threadTitle(c)}</span>
-        {reason ? <span className="ib-row__snippet">{reason}</span> : null}
+        {snippet ? (
+          <span className="ib-row__snippet">{outbound ? <span className="t4">You: </span> : null}{snippet}</span>
+        ) : null}
+        {reason ? <span className="ib-row__snippet ib-row__why">{reason}</span> : null}
         <span className="ib-row__chips">
           {stateChips(c).map((s) => <Chip key={s.key} size="sm" tone={s.tone}>{s.label}</Chip>)}
           <span className="ib-row__acct t4 fs12">{accountLabel(null, c.account)}</span>
@@ -81,11 +80,11 @@ function ThreadRow({ c, selected, contactName, onOpen }: {
 export default function ThreadList({
   filter, onFilter, counts, account, accounts, onAccount, query, onQuery,
   items, loading, error, onReload, selectedId, onOpen, contactNames,
-  hasMore, onMore, loadingMore, personalHint,
+  total, hasMore, onMore, loadingMore, personalHint,
 }: {
   filter: ThreadFilter;
   onFilter: (f: ThreadFilter) => void;
-  counts: Partial<Record<ThreadFilter, number>>;
+  counts: ThreadCounts;
   account: string;
   accounts: AccountOption[];
   onAccount: (v: string) => void;
@@ -98,6 +97,7 @@ export default function ThreadList({
   selectedId: string | null;
   onOpen: (id: string) => void;
   contactNames: Record<string, string>;
+  total: number | null;
   hasMore: boolean;
   onMore: () => void;
   loadingMore: boolean;
@@ -143,7 +143,7 @@ export default function ThreadList({
         block
         value={filter}
         onChange={onFilter}
-        options={THREAD_FILTERS.map((f) => ({ value: f, label: FILTER_LABELS[f], count: countLabel(counts[f]) }))}
+        options={THREAD_FILTERS.map((f) => ({ value: f, label: FILTER_LABELS[f], count: counts[f] }))}
       />
       <div className="ib-list__tools">
         {accounts.length > 1 ? (
@@ -179,7 +179,7 @@ export default function ThreadList({
 
       {items.length ? (
         <div className="ib-list__foot">
-          <span className="fs12 t4 tnum">{items.length} shown</span>
+          <span className="fs12 t4 tnum">{total === null ? `${items.length} shown` : `${items.length} of ${total} shown`}</span>
           <Button size="xs" variant="soft" onClick={onMore} loading={loadingMore} disabled={!hasMore}
             disabledReason="Everything in this filter is already listed.">Load older</Button>
         </div>

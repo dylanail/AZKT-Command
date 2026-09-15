@@ -80,10 +80,16 @@ export default function Sales() {
   const [mStage, setMStage] = useState<Stage>("new");
   const { gate, setGate, handle } = useMoveOutcome();
 
+  // ?lead=<id> stays in the URL while the pane is open, so a refresh or Back returns to the same lead.
   const openLead = useCallback((id: string, taskType?: "call" | "meeting" | "follow_up" | null) => {
     if (mobile) setSheetLead({ id, taskType: taskType || null });
     else insp.openLead(id);
-  }, [mobile, insp]);
+    setParam("lead", id);
+  }, [mobile, insp, setParam]);
+  const closeLead = useCallback(() => {
+    setSheetLead(null);
+    setParam("lead", null);
+  }, [setParam]);
 
   // Register the inspector's lead renderer while this screen is mounted; close a lead pane on the way out.
   const register = insp.registerLeadPane;
@@ -95,16 +101,28 @@ export default function Sales() {
     return () => { register(null); if (modeRef.current === "lead") closeInsp(); };
   }, [register, closeInsp, reload]);
 
-  // Deep link: /sales?lead=<id> (from Tasks, Contacts, notifications).
+  // Deep link: /sales?lead=<id> (from Tasks, Contacts, notifications, or a reload of this page).
   const leadParam = params.get("lead");
+  const openedRef = useRef<string | null>(null);
   useEffect(() => {
-    if (!leadParam) return;
-    openLead(leadParam);
-    const p = new URLSearchParams(params);
-    p.delete("lead");
-    setParams(p, { replace: true });
+    if (!leadParam) { openedRef.current = null; return; }
+    if (openedRef.current === leadParam) return;
+    openedRef.current = leadParam;
+    if (mobile) setSheetLead({ id: leadParam, taskType: null });
+    else insp.openLead(leadParam);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [leadParam, mobile]);
+
+  // Closing the pane (or switching the inspector to Ask) drops the parameter, so Back doesn't reopen it.
+  const inspectorShowsLead = !mobile && insp.open && insp.mode === "lead" && insp.leadId === leadParam;
+  const wasOpenRef = useRef(false);
+  useEffect(() => {
+    if (mobile) { wasOpenRef.current = false; return; }
+    if (inspectorShowsLead) { wasOpenRef.current = true; return; }
+    if (!wasOpenRef.current) return;
+    wasOpenRef.current = false;
+    if (leadParam) setParam("lead", null);
+  }, [mobile, inspectorShowsLead, leadParam, setParam]);
 
   /* ---------- stage moves ---------- */
   const [dragId, setDragId] = useState<string | null>(null);
@@ -257,7 +275,7 @@ export default function Sales() {
         onConfirm={async (reason) => { if (!lostFor) return false; return move(lostFor.id, "lost", reason); }} />
       <DepositGateDialog message={gate} onClose={() => setGate(null)} />
       {mobile ? (
-        <Sheet open={!!sheetLead} onClose={() => setSheetLead(null)} title={findCard(sheetLead?.id || "")?.name || "Lead"}>
+        <Sheet open={!!sheetLead} onClose={closeLead} title={findCard(sheetLead?.id || "")?.name || "Lead"}>
           {sheetLead ? <LeadPane leadId={sheetLead.id} onChanged={reload} initialTaskType={sheetLead.taskType} /> : null}
         </Sheet>
       ) : null}

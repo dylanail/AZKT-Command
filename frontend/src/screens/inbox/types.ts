@@ -98,14 +98,30 @@ export interface Conversation {
   drafts: number | null;
   created_at: string | null;
   updated_at: string | null;
+  /** list only: the opening of the newest message, already stripped of quoted text (inbox._snippets). */
+  snippet?: string;
+  last_message?: LastMessage;
+}
+
+/** list_threads → item["last_message"]: the newest message in the thread. */
+export interface LastMessage {
+  snippet: string;
+  direction: "in" | "out" | string | null;
+  at: string | null;
 }
 
 export interface ThreadListResp {
   items: Conversation[];
+  /** The real count for this filter under the caller's scope, not the size of the page. */
   total: number;
   filter: string;
   account: string | null;
+  limit?: number;
+  offset?: number;
 }
+
+/** GET /api/inbox/counts → {filter: n}, over exactly the scope and filters the list uses. */
+export type ThreadCounts = Partial<Record<ThreadFilter, number>>;
 
 /* ── message (serialize_message) ───────────────────────────────────────── */
 export interface Attachment {
@@ -187,6 +203,17 @@ export interface DraftFacts {
   money_hidden?: boolean;
 }
 
+/** reply.send_state: the ExternalAction owns the truth about the provider call, the draft is the fallback. */
+export type SendState =
+  | "not_submitted" | "awaiting_approval" | "approved" | "sending" | "sent"
+  | "handed_off" | "failed" | "result_unknown";
+export interface DraftSend {
+  state: SendState | string;
+  external_action_id: string | null;
+  receipt: { provider_ref?: string | null };
+  at: string | null;
+}
+
 /** Draft.status — draft | blocked | pending_approval | approved | sending | sent | invalidated | superseded | declined */
 export type DraftStatus =
   | "draft" | "blocked" | "pending_approval" | "approved" | "sending" | "sent"
@@ -225,6 +252,8 @@ export interface Draft {
   sent_at: string | null;
   created_at: string | null;
   updated_at: string | null;
+  /** Where the send actually is (reply.send_state). Absent only on a response older than that field. */
+  send?: DraftSend | null;
   checks: Check[];
   failing_checks: Check[];
 }
@@ -361,17 +390,44 @@ export function blockingFailures(d: Draft | null): Check[] {
   return (d.checks || []).filter((c) => c.blocking && !c.ok);
 }
 
-/** Truthful send state for a submitted draft (spec §4.3 step 8). */
-export type SendState = "none" | "blocked" | "awaiting_approval" | "running" | "sent" | "handed_off" | "declined" | "stale";
+/* Truthful send state for a submitted draft (spec §4.3 step 8). The server decides it — the draft's own
+   status only says why a reply that was never submitted cannot be. */
+const SEND_STATES = new Set(["not_submitted", "awaiting_approval", "approved", "sending", "sent", "handed_off", "failed", "result_unknown"]);
+/** Why a draft that has not been submitted is not ready: none = it is ready to submit. */
+export type DraftSituation = "none" | "blocked" | "declined" | "stale";
+
 export function sendStateOf(d: Draft | null): SendState {
-  if (!d) return "none";
+  if (!d) return "not_submitted";
+  const s = d.send?.state;
+  if (typeof s === "string" && SEND_STATES.has(s)) return s as SendState;
+  // Fallback for a response that predates the send block; the same mapping the server uses.
   if (d.status === "sent") return "sent";
-  if (d.status === "sending") return d.external_action_id ? "running" : "awaiting_approval";
-  if (d.status === "pending_approval" || d.status === "approved") return "awaiting_approval";
+  if (d.status === "sending") return "sending";
+  if (d.status === "pending_approval") return "awaiting_approval";
+  if (d.status === "approved") return "approved";
+  return "not_submitted";
+}
+
+/** What the draft itself says when nothing has been submitted. */
+export function draftSituation(d: Draft | null): DraftSituation {
+  if (!d) return "none";
   if (d.status === "declined") return "declined";
   if (d.status === "invalidated" || d.status === "superseded") return "stale";
   if (d.status === "blocked") return "blocked";
   return "none";
+}
+
+/** True while the reply is with the owner, the provider, or a person finishing it by hand. */
+export function sendInFlight(state: SendState): boolean {
+  return state === "awaiting_approval" || state === "approved" || state === "sending" || state === "result_unknown";
+}
+
+/** The mailbox reference AZKT actually recorded, if any. */
+export function sendReceiptRef(d: Draft | null): string | null {
+  const ref = d?.send?.receipt?.provider_ref;
+  if (typeof ref === "string" && ref) return ref;
+  const legacy = (d?.receipt || {})["message_id"];
+  return typeof legacy === "string" && legacy ? legacy : null;
 }
 
 export function bytes(n: number | null | undefined): string {

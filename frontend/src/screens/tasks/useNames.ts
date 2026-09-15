@@ -2,7 +2,13 @@
    Task rows carry ids only; one list call per kind fills the labels (403/404 tolerated → ids stay). */
 import { useEffect, useMemo, useState } from "react";
 import { api } from "../../lib/api";
-import type { TaskView } from "./types";
+
+/** Any row that points at a person, a lead or a vehicle by id: tasks, cases and promises all do. */
+export interface NameRefs {
+  contact_id?: string | null;
+  opportunity_id?: string | null;
+  vehicle_id?: string | null;
+}
 
 export interface VehicleOption { id: string; title?: string | null; stock_no?: string | null; }
 interface ContactRow { id: string; name?: string | null; company?: string | null; }
@@ -37,7 +43,7 @@ export function vehicleLabel(v: VehicleOption | null | undefined, fallbackId?: s
   return t || v.stock_no || `Vehicle ${v.id.slice(0, 8)}`;
 }
 
-export function useNames(tasks: TaskView[] | null | undefined, opts: { contacts?: boolean; opportunities?: boolean; vehicles?: boolean } = {}) {
+export function useNames(tasks: NameRefs[] | null | undefined, opts: { contacts?: boolean; opportunities?: boolean; vehicles?: boolean } = {}) {
   const want = { contacts: true, opportunities: true, vehicles: true, ...opts };
   const [names, setNames] = useState<Names>(empty);
   const needs = useMemo(() => {

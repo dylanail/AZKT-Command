@@ -55,6 +55,7 @@
 .ib-row__age { font-size: 12px; color: var(--t4); white-space: nowrap; flex: none; }
 .ib-row__subject { font-size: 13px; color: var(--t2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ib-row__snippet { font-size: 12px; color: var(--t3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ib-row__why { color: var(--t4); }
 .ib-row__chips { display: flex; gap: 5px; flex-wrap: wrap; align-items: center; margin-top: 1px; }
 .ib-row__acct { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
@@ -73,7 +74,7 @@
 }
 .ib-msg--out { background: var(--soft); border-color: var(--line2); }
 .ib-msg__head { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; min-width: 0; }
-.ib-msg__dir { font-size: 11px; letter-spacing: .05em; text-transform: uppercase; color: var(--t3); flex: none; }
+.ib-msg__dir { font-size: 12px; letter-spacing: .05em; text-transform: uppercase; color: var(--t3); flex: none; }
 .ib-msg__from { font-weight: 500; min-width: 0; overflow-wrap: anywhere; }
 .ib-msg__when { font-size: 12px; color: var(--t4); margin-left: auto; white-space: nowrap; }
 .ib-msg__addr { overflow-wrap: anywhere; line-height: 1.45; }

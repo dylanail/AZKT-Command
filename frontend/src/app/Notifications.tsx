@@ -1,8 +1,8 @@
 /* Notification bell. One source for the bell, Home and the mobile sheet:
    GET /api/notifications (backend/app/services/notifications_feed.py) → {high, today, later, badge, status}.
    Badge = high + today; red when anything is high, otherwise the "wait" blue.
-   Acknowledge / Snooze / Dismiss POST to /api/notifications/{id}/{action} — only stored notifications
-   can be acted on there, so task and approval rows say so instead of offering a button that would 404.
+   Acknowledge / Snooze / Dismiss POST to /api/notifications/{id}/{action}; a derived row (task:<id>,
+   approval:<id>) works too — the server records your own notification for it and leaves the record alone.
    Reads poll every 60 s while the tab is visible and refetch on focus. */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
@@ -202,6 +202,10 @@ export function minutesUntilTomorrow8Phoenix(now: Date = new Date()): number {
 }
 const MAX_SNOOZE_MINUTES = 60 * 24 * 14; // notifications_feed.NotificationSnoozeIn
 
+/* Derived feed ids (notifications_feed.DERIVED_KINDS): acknowledging one records your own row for it.
+   Only the record's own state — the task, the approval — is left untouched. */
+const DERIVED_ID = /^(task|approval):.+/;
+
 /* ---------- one row ---------- */
 function Row({ n, color, onOpen, onActed }: { n: NotificationItem; color: string; onOpen: (n: NotificationItem) => void; onActed: () => void }) {
   const { run, busy } = useCommand();
@@ -209,12 +213,10 @@ function Row({ n, color, onOpen, onActed }: { n: NotificationItem; color: string
   const [pickAt, setPickAt] = useState("");
   const [pickError, setPickError] = useState<string | null>(null);
   const route = routeFor(n);
-  // Only stored notifications exist behind /api/notifications/{id}/… — a task or approval row is derived
-  // from the record itself, so the buttons say where to act instead of failing.
-  const actionable = n.source === "notification";
-  const why = n.source === "approval"
-    ? "An approval clears when you make the decision. Open it to review."
-    : "This comes straight from the record. Open it and act there.";
+  // Stored rows act on their own id; task and approval rows act on their derived id (task:<id>,
+  // approval:<id>), which the server turns into a real notification of yours before acting.
+  const actionable = n.source === "notification" || DERIVED_ID.test(n.id);
+  const why = "This one can't be acknowledged here. Open the record and act there.";
 
   const act = async (action: "acknowledge" | "snooze" | "dismiss", body: Record<string, unknown> = {}, success?: string) => {
     const r = await run(`${n.id}:${action}`, `/api/notifications/${encodeURIComponent(n.id)}/${action}`, body, { success });

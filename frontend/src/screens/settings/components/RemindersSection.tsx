@@ -1,7 +1,7 @@
-/* Settings › Reminders. Your own preferences: PATCH /api/me/prefs (channel per reminder kind, quiet hours,
-   digest time, reminder email — "unverified" until a verification flow confirms it — and timezone).
-   Those four are the only preference keys the server accepts (team.NotificationPrefsIn); anything else
-   on this page is shown read-only with where it is actually set.
+/* Settings › Reminders. Your own preferences: PATCH /api/me/prefs (channel and in-app bell per reminder
+   kind, quiet hours, digest time, reminder email — "unverified" until a verification flow confirms it —
+   and timezone). Those are the preference keys the server accepts (team.NotificationPrefsIn); anything
+   else on this page is shown read-only with where it is actually set.
    Owner defaults for everyone: GET/POST /api/settings/reminders (versioned).
    Business-wide reminder timing: GET /api/notifications/prefs → business_defaults. */
 import { useEffect, useMemo, useState } from "react";
@@ -18,10 +18,26 @@ import type { NotificationPrefsResp } from "./notifyTypes";
 import "../../../styles/notify.css";
 
 const TZS = ["America/Phoenix", "America/Los_Angeles", "America/Denver", "America/Chicago", "America/New_York", "Asia/Tokyo", "UTC"];
+const KINDS = REMINDER_KINDS.map((k) => k.key);
+
+/* `inapp` is a single switch for everything or one per reminder kind; a kind the map doesn't mention is
+   on (reminders.inapp_enabled). The screen keeps one switch per kind and folds them back on save. */
+type InappPref = boolean | Record<string, boolean> | undefined;
+function readInapp(v: InappPref): Record<string, boolean> {
+  if (v === false) return Object.fromEntries(KINDS.map((k) => [k, false]));
+  if (v && typeof v === "object") return Object.fromEntries(KINDS.map((k) => [k, v[k] !== false]));
+  return Object.fromEntries(KINDS.map((k) => [k, true]));
+}
+function writeInapp(m: Record<string, boolean>): boolean | Record<string, boolean> {
+  const on = KINDS.map((k) => m[k] !== false);
+  if (on.every(Boolean)) return true;
+  if (!on.some(Boolean)) return false;
+  return Object.fromEntries(KINDS.map((k) => [k, m[k] !== false]));
+}
 const OFFSETS = [{ value: "at", label: "At the time" }, { value: "15m", label: "15 minutes before" }, { value: "1h", label: "1 hour before" }, { value: "1d", label: "1 day before" }, { value: "custom", label: "Custom per task" }];
 
-/* The four settings below are not per-person preferences — team.NotificationPrefsIn accepts only
-   channels, quiet hours and the digest time — so they are shown read-only with where they are set. */
+/* The settings below are not per-person preferences — team.NotificationPrefsIn accepts only channels,
+   the in-app bell, quiet hours and the digest time — so they are shown read-only with where they are set. */
 function BusinessTiming({ biz }: { biz: NotificationPrefsResp["business_defaults"] | null }) {
   return (
     <GlassPanel clip>
@@ -33,13 +49,6 @@ function BusinessTiming({ biz }: { biz: NotificationPrefsResp["business_defaults
       </div>
       <div className="set-row">
         <div className="set-row__main">
-          <span className="set-row__title">In-app bell</span>
-          <span className="set-row__meta">The bell, Home and the mobile sheet read one list. There is no per-person switch for it yet, so it stays on.</span>
-        </div>
-        <div className="set-row__right"><Badge tone="ok">Always on</Badge></div>
-      </div>
-      <div className="set-row">
-        <div className="set-row__main">
           <span className="set-row__title">How early a task reminder arrives</span>
           <span className="set-row__meta">Chosen on each task: at the time, 15 minutes, 1 hour, 1 day, or a custom number of minutes. The owner sets which one new tasks start with.</span>
         </div>
@@ -47,6 +56,21 @@ function BusinessTiming({ biz }: { biz: NotificationPrefsResp["business_defaults
       </div>
       {biz ? (
         <>
+          <div className="set-row">
+            <div className="set-row__main">
+              <span className="set-row__title">Owner reminder address</span>
+              <span className="set-row__meta">
+                {biz.owner_reminder_email_configured
+                  ? "Where a reminder goes when the person it is for has no email of their own."
+                  : "Not set on the server. A reminder for someone with no email has nowhere to go."}
+              </span>
+            </div>
+            <div className="set-row__right">
+              {biz.owner_reminder_email_configured
+                ? <span className="fs13 t3" style={{ overflowWrap: "anywhere" }}>{biz.owner_reminder_email || biz.owner_reminder_email_masked || "Configured"}</span>
+                : <Badge tone="risk">Not configured</Badge>}
+            </div>
+          </div>
           <div className="set-row">
             <div className="set-row__main">
               <span className="set-row__title">Overdue reminder</span>
@@ -94,6 +118,7 @@ function MyPrefs() {
   const me = useQuery<MeResp>((signal) => api.get<MeResp>("/api/me", { signal }), []);
   const prefsQ = useQuery<NotificationPrefsResp | null>((signal) => api.get<NotificationPrefsResp | null>("/api/notifications/prefs", { signal, tolerate: [403, 404, 501] }), []);
   const [channels, setChannels] = useState<Record<string, string>>({});
+  const [inapp, setInapp] = useState<Record<string, boolean>>(() => readInapp(undefined));
   const [quiet, setQuiet] = useState(false);
   const [qStart, setQStart] = useState("21:00");
   const [qEnd, setQEnd] = useState("07:00");
@@ -106,6 +131,7 @@ function MyPrefs() {
     const p = me.data?.prefs;
     if (!p) return;
     setChannels({ ...p.notification_prefs.channels });
+    setInapp(readInapp(p.notification_prefs.inapp));
     setQuiet(!!p.notification_prefs.quiet_hours);
     setQStart(p.notification_prefs.quiet_hours?.start || "21:00");
     setQEnd(p.notification_prefs.quiet_hours?.end || "07:00");
@@ -121,13 +147,14 @@ function MyPrefs() {
     if (!p) return false;
     const np = p.notification_prefs;
     if (JSON.stringify(channels) !== JSON.stringify(np.channels)) return true;
+    if (JSON.stringify(writeInapp(inapp)) !== JSON.stringify(writeInapp(readInapp(np.inapp)))) return true;
     if (quiet !== !!np.quiet_hours) return true;
     if (quiet && (qStart !== np.quiet_hours?.start || qEnd !== np.quiet_hours?.end)) return true;
     if (digest !== (np.digest_time || "08:00")) return true;
     if (email.trim().toLowerCase() !== (p.reminder_email || "")) return true;
     if (tz !== (p.timezone || "America/Phoenix")) return true;
     return false;
-  }, [p, channels, quiet, qStart, qEnd, digest, email, tz]);
+  }, [p, channels, inapp, quiet, qStart, qEnd, digest, email, tz]);
 
   const save = async () => {
     if (!p) return;
@@ -136,6 +163,8 @@ function MyPrefs() {
     const prefs: Record<string, unknown> = {};
     const changedChannels = Object.fromEntries(Object.entries(channels).filter(([k, v]) => np.channels[k] !== v));
     if (Object.keys(changedChannels).length) prefs.channels = changedChannels;
+    const nextInapp = writeInapp(inapp);
+    if (JSON.stringify(nextInapp) !== JSON.stringify(writeInapp(readInapp(np.inapp)))) prefs.inapp = nextInapp;
     if (quiet && (!np.quiet_hours || qStart !== np.quiet_hours.start || qEnd !== np.quiet_hours.end)) prefs.quiet_hours = { start: qStart, end: qEnd };
     if (!quiet && np.quiet_hours) prefs.clear_quiet_hours = true;
     if (digest !== (np.digest_time || "08:00")) prefs.digest_time = digest;
@@ -157,6 +186,10 @@ function MyPrefs() {
     }
   };
 
+  const allInapp = KINDS.every((k) => inapp[k] !== false);
+  const anyInapp = KINDS.some((k) => inapp[k] !== false);
+  const setAllInapp = (on: boolean) => setInapp(Object.fromEntries(KINDS.map((k) => [k, on])));
+
   if (me.loading) return <GlassPanel clip><Loading label="Loading your preferences" rows={3} /></GlassPanel>;
   if (me.error) return <GlassPanel clip><ErrorState error={me.error} onRetry={me.reload} /></GlassPanel>;
   if (!p) return null;
@@ -173,17 +206,38 @@ function MyPrefs() {
         </Notice>
       ) : null}
       <GlassPanel clip>
-        <div className="set-row" style={{ borderBottom: "1px solid var(--line2)" }}><div className="set-row__main"><span className="eyebrow">Where each reminder reaches you</span></div></div>
+        <div className="set-row" style={{ borderBottom: "1px solid var(--line2)" }}>
+          <div className="set-row__main">
+            <span className="eyebrow">Where each reminder reaches you</span>
+            <span className="set-row__meta">The switch is the bell inside AZKT; the menu is what leaves AZKT.</span>
+          </div>
+          <div className="set-row__right">
+            <Switch checked={allInapp} onChange={setAllInapp} label="Bell for everything" style={{ width: "auto" }} />
+          </div>
+        </div>
         {REMINDER_KINDS.map((k) => (
           <div key={k.key} className="set-row">
             <div className="set-row__main"><span className="set-row__title">{k.label}</span><span className="set-row__meta">{k.hint}</span></div>
             <div className="set-row__right">
+              <Switch checked={inapp[k.key] !== false} onChange={(on) => setInapp((c) => ({ ...c, [k.key]: on }))}
+                label={<span className="sr-only">Show {k.label.toLowerCase()} in the bell</span>} style={{ width: "auto" }} />
               <Select aria-label={`${k.label} channel`} value={channels[k.key] || "email_only"} onChange={(e) => setChannels((c) => ({ ...c, [k.key]: e.target.value }))}>
                 {CHANNEL_MODES.map((m) => <option key={m.value} value={m.value}>{m.label}</option>)}
               </Select>
             </div>
           </div>
         ))}
+        <div className="set-row">
+          <div className="set-row__main">
+            <span className="set-row__meta">
+              {allInapp
+                ? "Everything AZKT files for you shows in the bell."
+                : anyInapp
+                  ? "The kinds switched off above are not filed to the bell. They still go to the channel you chose."
+                  : "Nothing new is filed to the bell. Tasks and approvals still appear there — they are read straight from the records, not filed."}
+            </span>
+          </div>
+        </div>
       </GlassPanel>
       <GlassPanel clip>
         <div className="set-row">
@@ -203,7 +257,7 @@ function MyPrefs() {
             <span className="set-row__meta">
               {p.reminder_email_verified_at ? <>Verified <When iso={p.reminder_email_verified_at} format="date" /></> : p.reminder_email ? "Reminders go here once it's verified; until then, your sign-in email is used." : "Leave blank to use your sign-in email."}
               {!p.reminder_email && !me.data?.email && user?.role === "owner"
-                ? " Your account has no email either, so reminders go to the owner address configured on the server — AZKT can't show that address here."
+                ? " Your account has no email either, so reminders go to the owner address configured on the server, shown lower down this page."
                 : ""}
             </span>
           </div>

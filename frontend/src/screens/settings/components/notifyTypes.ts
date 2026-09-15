@@ -32,6 +32,8 @@ export interface Delivery {
   state_label: string;
 }
 export interface DeliveriesResp { task_id: string; deliveries: Delivery[]; note: string }
+/** GET /api/notifications/deliveries?mine=true — the caller's own recent deliveries, newest first. */
+export interface MyDeliveriesResp { mine: true; deliveries: Delivery[]; total: number; note: string }
 
 /** Only for tone; the words always come from the server's state_label. */
 export function deliveryTone(state: string): "ok" | "risk" | "blocked" | "wait" | "neutral" {
@@ -94,6 +96,15 @@ export const PAIRING_STATUS_LABELS: Record<string, string> = {
   pending: "Waiting for the link to be used", active: "Paired", revoked: "Revoked", expired: "Expired",
 };
 
+/* ---- notification preferences (team.effective_notification_prefs) ---- */
+export interface NotificationPrefs {
+  channels: Record<string, string>;
+  /** In-app bell: one switch for everything, or one per reminder kind (absent kind = on). */
+  inapp?: boolean | Record<string, boolean>;
+  quiet_hours: { start: string; end: string } | null;
+  digest_time: string;
+}
+
 /* ---- business defaults (GET /api/notifications/prefs) ---- */
 export interface NotificationPrefsResp {
   prefs: {
@@ -101,7 +112,7 @@ export interface NotificationPrefsResp {
     reminder_email: string | null;
     reminder_email_verified: boolean;
     reminder_email_verified_at: string | null;
-    notification_prefs: { channels: Record<string, string>; quiet_hours: { start: string; end: string } | null; digest_time: string };
+    notification_prefs: NotificationPrefs;
   };
   business_defaults: {
     channels: Record<string, string>;
@@ -109,6 +120,11 @@ export interface NotificationPrefsResp {
     late_grace_minutes: number;
     obsolete_after_hours: number;
     overdue_delay_minutes: number;
+    /** reminders.owner_reminder_destination: the fallback address for reminders with no personal one. */
+    owner_reminder_email_configured: boolean;
+    /** Full for the owner, masked for everyone else. Null when the server has none. */
+    owner_reminder_email: string | null;
+    owner_reminder_email_masked: string | null;
   };
   telegram: TelegramStatus;
   write_with: string;

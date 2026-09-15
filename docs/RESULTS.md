@@ -2,7 +2,7 @@
 
 Generated from builder/reviewer reports (test names `test_<ID>_*`) plus explicit overrides. Statuses: **passed** (automated test against a real Postgres), **simulated** (fixture/fake provider stands in for a live account), **setup_blocked** (needs a real account/credential), **failed**, **not_covered**.
 
-Summary: passed: 46, simulated: 58 (of 104). Full backend suite at the final commit: 478 passed, 0 failed (`PYTHONPATH=. .venv/bin/pytest -q backend/tests -p no:cacheprovider`, real Postgres, no network). Frontend: `npm run build` green; every route was exercised against the live API for owner, manager, mechanic and logistics at 1280px and 390px (406 page loads, no runtime errors) — see the QA notes at the end.
+Summary: passed: 46, simulated: 58 (of 104). Full backend suite at the final commit: 480 passed, 0 failed (`PYTHONPATH=. .venv/bin/pytest -q backend/tests -p no:cacheprovider`, real Postgres, no network). Frontend: `npm run build` green; every route was exercised against the live API for owner, manager, mechanic and logistics at 1280px and 390px (406 page loads, no runtime errors) — see the QA notes at the end.
 
 | ID | Scenario | Status | Where / note |
 |---|---|---|---|

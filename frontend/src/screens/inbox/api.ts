@@ -3,6 +3,7 @@
 import type { ThreadFilter } from "./types";
 
 export const COVERAGE_PATH = "/api/inbox/coverage";
+export const COUNTS_PATH = "/api/inbox/counts";
 export const PASTE_PATH = "/api/inbox/paste";
 
 export const threadPath = (id: string) => `/api/inbox/threads/${encodeURIComponent(id)}`;
@@ -30,6 +31,15 @@ export function threadsPath({ filter, account, q, limit = 50, offset = 0 }: Thre
   p.set("limit", String(limit));
   if (offset) p.set("offset", String(offset));
   return `/api/inbox/threads?${p.toString()}`;
+}
+
+/** GET /api/inbox/counts — the same account/search narrowing the list uses. */
+export function countsPath({ account, q }: { account?: string | null; q?: string | null } = {}): string {
+  const p = new URLSearchParams();
+  if (account) p.set("account", account);
+  if (q) p.set("q", q);
+  const qs = p.toString();
+  return qs ? `${COUNTS_PATH}?${qs}` : COUNTS_PATH;
 }
 
 /** Search paths for the Link picker. Requests live at /api/import-requests, leads at /api/sales/opportunities. */

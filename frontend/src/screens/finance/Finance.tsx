@@ -5,7 +5,7 @@
    vehicles/{id}/money · sold-cohort · ledger/mappings · ledger/rows · export.csv
    Writes: every button posts a command under /api/finance/... and the CommandResult envelope is explained
    by useCommand (ok / needs review / blocked). */
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import "../../styles/finance.css";
 import { api, describeError } from "../../lib/api";
@@ -26,6 +26,9 @@ import { matchingTotal, type FinanceSummary } from "./types";
 
 const TABS = ["matching", "receivables", "payables", "vehicles", "sold", "ledger"] as const;
 type TabId = (typeof TABS)[number];
+
+/** Names other screens and older links use for the same tab. Normalised into the URL. */
+const TAB_ALIASES: Record<string, TabId> = { costs: "vehicles", "needs-matching": "matching" };
 
 const TAB_LABELS: Record<TabId, string> = {
   matching: "Needs matching",
@@ -99,13 +102,18 @@ export default function Finance() {
   const isOwner = user?.role === "owner";
 
   const [params, setParams] = useSearchParams();
-  const raw = params.get("tab") as TabId | null;
-  const tab: TabId = raw && TABS.includes(raw) ? raw : "matching";
+  const raw = params.get("tab");
+  const tab: TabId = raw && (TABS as readonly string[]).includes(raw) ? (raw as TabId) : TAB_ALIASES[raw || ""] || "matching";
   const setTab = (id: TabId) => {
     const next = new URLSearchParams(params);
     next.set("tab", id);
     setParams(next, { replace: true });
   };
+  // Older links say ?tab=costs / ?tab=needs-matching; open the right tab and put the real name in the URL.
+  useEffect(() => {
+    if (raw && raw !== tab) setTab(tab);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [raw, tab]);
 
   const { toast } = useToast();
   const [exporting, setExporting] = useState<string | null>(null);

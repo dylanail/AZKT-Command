@@ -163,11 +163,15 @@ export default function VehicleDetail() {
     if (out.ok) reload();
   }
 
-  /* Ask about this truck. Desktop opens the inspector; phones open the Agents screen with the
-     pinned context the Agents screen reads (?context=kind:id&label=). */
+  /* Ask about this truck. The office desktop opens the inspector; phones — and employees, who have no
+     inspector in their shell — open the Agents screen with the pinned context it reads
+     (?context=kind:id&label=). */
   const askLabel = v.stock_no || v.title || "this truck";
   const askHref = `/agents?context=${encodeURIComponent(`vehicle:${v.id}`)}&label=${encodeURIComponent(askLabel)}`;
   const askAbout = () => insp.openAsk({ label: askLabel, href: `/vehicles/${v.id}` });
+  const canAsk = can(user, "agents.chat");
+  const askReason = canAsk ? undefined : "Talking to AZKT is turned off for your account.";
+  const askOnAgentsScreen = mobile || employee;
 
   return (
     <div className="page page-wide">
@@ -210,10 +214,10 @@ export default function VehicleDetail() {
             >
               Add update
             </Button>
-            {mobile ? (
-              <Button variant="glass" to={employee ? undefined : askHref} disabled={employee} disabledReason="Ask AZKT isn't part of your view.">Ask about this truck</Button>
+            {askOnAgentsScreen ? (
+              <Button variant="glass" to={canAsk ? askHref : undefined} disabled={!canAsk} disabledReason={askReason}>Ask about this truck</Button>
             ) : (
-              <Button variant="glass" onClick={askAbout} disabled={employee} disabledReason="Ask AZKT isn't part of your view.">Ask about this truck</Button>
+              <Button variant="glass" onClick={askAbout} disabled={!canAsk} disabledReason={askReason}>Ask about this truck</Button>
             )}
             {!employee ? (
               <MoveStageButton

@@ -138,8 +138,8 @@ button.chip:disabled { opacity: .55; cursor: not-allowed; }
   font-variant-numeric: tabular-nums;
 }
 .badge--blocked { background: var(--blocked); }
-.badge--risk { background: var(--risk); }
-.badge--ok { background: var(--ok); }
+.badge--risk { background: var(--risk); font-size: 12px; }
+.badge--ok { background: var(--ok); font-size: 12px; }
 .badge--wait { background: var(--wait); }
 .badge--act { background: var(--act); }
 .badge--amber { background: var(--amber); color: #1d1d1f; }

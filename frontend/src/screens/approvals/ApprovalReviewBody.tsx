@@ -114,6 +114,13 @@ function StateNotice({ d }: { d: ApprovalDetail }) {
       return <Notice tone="wait" lead="Executing">Waiting for {provider}'s receipt.</Notice>;
     case "confirmed":
       return <Notice tone="ok" lead="Confirmed" action={<Link to={`/activity?q=${encodeURIComponent(d.title || "")}`} className="fs13">Activity</Link>}>{xa?.provider_ref ? `${provider} receipt ${xa.provider_ref}` : "Receipt recorded"}{xa?.executed_at ? <> · <When iso={xa.executed_at} format="long" /></> : d.decided_at ? <> · <When iso={d.decided_at} format="long" /></> : null}</Notice>;
+    case "handed_off":
+      return (
+        <Notice tone="wait" lead="Handed off — a person finishes this">
+          AZKT could not complete this itself, so it stopped and left it with a person. Nothing was sent or
+          changed by AZKT{xa?.error ? `: ${xa.error}` : "."} It is done when that person has done it — this page will not confirm it.
+        </Notice>
+      );
     case "failed":
       return <Notice tone="blocked" lead="Failed" role="alert">{xa?.error || (d.result && typeof d.result.error === "string" ? d.result.error : "The provider rejected this action. Nothing was retried.")}</Notice>;
     case "result_unknown":

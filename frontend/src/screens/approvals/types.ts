@@ -46,7 +46,7 @@ export function statusView(status: string): { label: string; health: Health | nu
     case "queued": return { label: "Approved · queued", health: "wait" };
     case "executing": return { label: "Executing", health: "wait" };
     case "confirmed": return { label: "Confirmed", health: "ok" };
-    case "handed_off": return { label: "Handed off · a person finishes it", health: "wait" };
+    case "handed_off": return { label: "Handed off — a person finishes this", health: "wait" };
     case "failed": return { label: "Failed", health: "blocked" };
     case "result_unknown": return { label: "Result unknown", health: "risk" };
     case "declined": return { label: "Declined", health: null };

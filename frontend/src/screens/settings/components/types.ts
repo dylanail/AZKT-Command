@@ -1,6 +1,7 @@
 /* Shapes from backend/app/services/team.py serializers, routers/connections.py, settings_store.py and health.py. */
 import type { Health } from "../../../ui";
 import type { Role, Scope } from "../../../lib/perms";
+import type { NotificationPrefs } from "./notifyTypes";
 
 export interface Person {
   id: string; version: number; handle: string; display_name: string; role: Role | string; status: "active" | "invited" | "disabled" | string;
@@ -131,7 +132,7 @@ export const REQUIREMENT_LABELS: Record<string, string> = {
 /* ---- me / prefs ---- */
 export interface MePrefs {
   timezone: string | null; reminder_email: string | null; reminder_email_verified: boolean; reminder_email_verified_at: string | null;
-  notification_prefs: { channels: Record<string, string>; quiet_hours: { start: string; end: string } | null; digest_time: string };
+  notification_prefs: NotificationPrefs;
 }
 export interface MeResp {
   id: string; version: number; handle: string; display_name: string; email: string | null; phone: string | null; role: string; scope: string;

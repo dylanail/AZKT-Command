@@ -91,7 +91,7 @@
 .lst-spec:last-child { border-bottom: 0; }
 .lst-spec__k { color: var(--t3); flex: none; }
 .lst-spec__v { text-align: right; min-width: 0; overflow-wrap: anywhere; }
-.lst-spec__src { font-size: 11px; color: var(--t4); }
+.lst-spec__src { font-size: 12px; color: var(--t4); }
 
 .lst-bullet { display: flex; gap: 8px; align-items: flex-start; font-size: 13px; line-height: 1.55; min-width: 0; }
 .lst-bullet__dot { flex: none; color: var(--t4); }

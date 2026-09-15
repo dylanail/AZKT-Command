@@ -11,6 +11,7 @@ const ROUTES: Record<string, (id: string) => string> = {
   listing: (id) => `/listings/${id}`,
   opportunity: (id) => `/sales?lead=${id}`,
   thread: (id) => `/inbox/${id}`,
+  conversation: (id) => `/inbox/${id}`,
   message: (id) => `/inbox/${id}`,
   user: () => "/settings/team",
   invitation: () => "/settings/team",

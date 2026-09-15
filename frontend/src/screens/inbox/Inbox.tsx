@@ -183,6 +183,7 @@ export default function Inbox() {
       selectedId={threadId || null}
       onOpen={openThread}
       contactNames={contactNames}
+      total={threads.total}
       hasMore={threads.hasMore}
       onMore={threads.loadMore}
       loadingMore={threads.loadingMore}
@@ -241,9 +242,10 @@ export default function Inbox() {
     </div>
   ) : null;
 
+  const shown = threads.total ?? threads.items.length;
   const subtitle = threads.loading
     ? "Loading threads…"
-    : `${threads.items.length}${threads.hasMore ? "+" : ""} in ${FILTER_LABELS[filter].toLowerCase()}${account ? ` · ${accounts.find((a) => a.value === account)?.label || account}` : ""} · replies are sent only after the owner approves`;
+    : `${shown}${threads.total === null && threads.hasMore ? "+" : ""} in ${FILTER_LABELS[filter].toLowerCase()}${account ? ` · ${accounts.find((a) => a.value === account)?.label || account}` : ""} · replies are sent only after the owner approves`;
 
   return (
     <div className="page page-wide ib-page">

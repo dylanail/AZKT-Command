@@ -18,6 +18,7 @@ import { ProceduresSection } from "./components/ProceduresSection";
 import { KnowledgeSection } from "./components/KnowledgeSection";
 import { RecoverySection } from "./components/RecoverySection";
 import { UsageSection } from "./components/UsageSection";
+import NotFound from "../NotFound";
 
 const SECTIONS = [
   { id: "connections", label: "Connections", blurb: "Every source AZKT reads or writes, with freshness. A stale source is said out loud." },
@@ -40,11 +41,15 @@ export default function Settings() {
   const nav = useNavigate();
   const { user } = useAuth();
   const { theme, toggleTheme, glass, toggleGlass, motion, setMotion } = useTheme();
-  const current: SectionId = SECTIONS.find((s) => s.id === section)?.id || "connections";
+  const known = SECTIONS.find((s) => s.id === section)?.id;
+  const current: SectionId = known || "connections";
   const owner = user?.role === "owner";
   const settingsPerm = can(user, "settings");
   const tabs = SECTIONS.filter((s) => (s.id === "usage" ? settingsPerm : true)).map((s) => ({ id: s.id, label: s.id === "team" ? (owner ? "Team" : "People") : s.label }));
   const meta = SECTIONS.find((s) => s.id === current);
+
+  // /settings/<something-else> is a wrong address, not a silent fallback to Connections.
+  if (section && !known) return <NotFound />;
 
   return (
     <div className="page">

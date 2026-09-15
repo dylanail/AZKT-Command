@@ -213,10 +213,11 @@
   padding-top: env(safe-area-inset-top);
   gap: 10px;
 }
+.mtop__logo { display: inline-flex; align-items: center; min-height: 24px; }
 .mtop__logo img { width: 92px; height: auto; display: block; filter: var(--logo-f); }
 .mtop__right { display: inline-flex; align-items: center; gap: 8px; }
 .mtop__role {
-  font-size: 11px; color: var(--t3); font-weight: 500; letter-spacing: .04em;
+  font-size: 12px; color: var(--t3); font-weight: 500; letter-spacing: .04em;
   max-width: 80px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-transform: uppercase;
 }
 .mmain { flex: 1; display: flex; flex-direction: column; gap: 20px; padding: 8px 0 24px; min-width: 0; }

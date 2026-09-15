@@ -12,7 +12,7 @@ type View = "pending" | "inflight" | "attention" | "done" | "all";
 const VIEW_STATUS: Record<View, string> = {
   pending: "pending",
   inflight: "approved,queued,executing",
-  attention: "failed,result_unknown",
+  attention: "failed,result_unknown,handed_off",
   done: "confirmed,declined,expired,invalidated,canceled",
   all: "all",
 };
@@ -48,7 +48,7 @@ export default function ApprovalsList() {
             options={[
               { value: "pending", label: "Pending", count: summary.data?.pending },
               { value: "inflight", label: "In flight", count: summary.data?.executing },
-              { value: "attention", label: "Needs attention", count: summary.data ? summary.data.failed + summary.data.unknown : undefined },
+              { value: "attention", label: "Needs attention", count: summary.data ? summary.data.failed + summary.data.unknown + (summary.data.by_status?.handed_off || 0) : undefined },
               { value: "done", label: "Done" },
               { value: "all", label: "All" },
             ]}
@@ -69,8 +69,8 @@ export default function ApprovalsList() {
       ) : !items.length ? (
         <GlassPanel clip>
           <EmptyState
-            title={view === "pending" ? "Nothing waiting for a decision" : view === "attention" ? "No failed or unknown results" : "Nothing here"}
-            body={view === "pending" ? "Drafts, orders and publications land here with the exact payload, recipient and checks." : view === "attention" ? "Failed sends and unknown provider results would show here with their receipts." : "Change the state filter to see more."}
+            title={view === "pending" ? "Nothing waiting for a decision" : view === "attention" ? "Nothing failed, unknown or handed off" : "Nothing here"}
+            body={view === "pending" ? "Drafts, orders and publications land here with the exact payload, recipient and checks." : view === "attention" ? "Failed sends, unknown provider results and anything handed to a person would show here with their receipts." : "Change the state filter to see more."}
           />
         </GlassPanel>
       ) : (

@@ -78,6 +78,85 @@ export interface TaskRelated {
 
 export interface TaskListResp { items: TaskView[]; total: number; view?: string; bucket?: string | null; }
 
+/* ---------- secondary views (routers/tasks.py list_cases / list_promises) ---------- */
+/** GET /api/tasks/cases?status=open|all&limit= — Case rows (models/tasks.py Case). */
+export interface CaseView {
+  id: string;
+  title: string;
+  /** shipping_quote | shipment | recon | sale | dispute | listing_cleanup | sourcing | reply | other */
+  kind: string;
+  /** open | waiting | blocked | needs_owner | resolved | cancelled */
+  status: string;
+  owner_role: string | null;
+  owner_user_id: string | null;
+  vehicle_id: string | null;
+  contact_id: string | null;
+  opportunity_id: string | null;
+  shipment_id: string | null;
+  import_request_id: string | null;
+  conversation_id: string | null;
+  summary: string | null;
+  waiting_on: string | null;
+  next_action: string | null;
+  next_check_at: string | null;
+  overdue_check: boolean;
+  resolved_at: string | null;
+  version: number;
+}
+export interface CaseListResp { items: CaseView[]; total: number; as_of: string }
+
+/** GET /api/tasks/promises?status=open|all&limit= — Commitment rows (models/tasks.py Commitment). */
+export interface PromiseView {
+  id: string;
+  text: string;
+  /** proposed | open | met | missed | withdrawn */
+  status: string;
+  contact_id: string | null;
+  /** null when the role cannot see contacts — never a stand-in name. */
+  contact_name: string | null;
+  vehicle_id: string | null;
+  opportunity_id: string | null;
+  made_by: string | null;
+  made_at: string | null;
+  due_at: string | null;
+  overdue: boolean;
+  source_kind: string | null;
+  source_id: string | null;
+  version: number;
+}
+export interface PromiseListResp { items: PromiseView[]; total: number; as_of: string }
+
+export const CASE_KIND_LABEL: Record<string, string> = {
+  shipping_quote: "Shipping quote", shipment: "Shipment", recon: "Recon", sale: "Sale", dispute: "Dispute",
+  listing_cleanup: "Listing cleanup", sourcing: "Sourcing", reply: "Reply", other: "Case",
+};
+export const CASE_STATUS_LABEL: Record<string, string> = {
+  open: "Open", waiting: "Waiting", blocked: "Blocked", needs_owner: "Needs the owner",
+  resolved: "Resolved", cancelled: "Cancelled",
+};
+export const PROMISE_STATUS_LABEL: Record<string, string> = {
+  proposed: "Proposed", open: "Open", met: "Kept", missed: "Missed", withdrawn: "Withdrawn",
+};
+
+/** Colour for a case row; null keeps it neutral. */
+export function caseHealth(c: Pick<CaseView, "status" | "overdue_check">): { health: "blocked" | "risk" | "wait" | "ok"; label: string } | null {
+  if (c.status === "blocked") return { health: "blocked", label: "Blocked" };
+  if (c.status === "needs_owner") return { health: "risk", label: "Needs the owner" };
+  if (c.status === "resolved") return { health: "ok", label: "Resolved" };
+  if (c.status === "waiting") return { health: "wait", label: "Waiting" };
+  if (c.overdue_check) return { health: "risk", label: "Check overdue" };
+  return null;
+}
+
+export function promiseHealth(p: Pick<PromiseView, "status" | "overdue">): { health: "blocked" | "risk" | "wait" | "ok"; label: string } | null {
+  if (p.status === "met") return { health: "ok", label: "Kept" };
+  if (p.status === "missed") return { health: "blocked", label: "Missed" };
+  if (p.status === "withdrawn") return null;
+  if (p.overdue) return { health: "risk", label: "Past due" };
+  if (p.status === "proposed") return { health: "wait", label: "Proposed" };
+  return null;
+}
+
 export const TYPE_LABEL: Record<string, string> = { call: "Call", meeting: "Meeting", follow_up: "Follow-up", operational: "Task" };
 export const STATUS_LABEL: Record<string, string> = {
   open: "Open", in_progress: "In progress", blocked: "Blocked", waiting: "Waiting",

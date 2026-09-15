@@ -43,6 +43,7 @@ export function useApprovalDetail(id: string, opts: { onNewVersion?: (newId: str
       const s = r.data.approval?.status;
       if (s === "invalidated") toast({ title: "Details changed — review again", message: r.data.approval.invalidated_reason || "A binding changed before execution; nothing ran.", tone: "risk", duration: 8000 });
       else if (s === "confirmed") toast({ message: "Done. Receipt recorded in Activity.", tone: "ok" });
+      else if (s === "handed_off") toast({ title: "Handed off", message: "AZKT stopped and left this with a person to finish. Nothing was sent by AZKT.", tone: "wait", duration: 8000 });
       else toast({ message: "Approved · awaiting execution — the provider has not confirmed yet.", tone: "wait" });
     }
     q.reload();
