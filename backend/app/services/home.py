@@ -238,7 +238,7 @@ async def needs_attention(db: AsyncSession, actor: Actor, *, now: datetime, tz: 
                 detail="; ".join(p.text for p in promises)[:400], next_action="Deliver or renegotiate the promise",
                 due_at=min(p.due_at for p in promises),
                 items=[{"kind": "commitment", "id": p.id, "text": p.text, "contact_id": p.contact_id,
-                        "due_at": _iso(p.due_at)} for p in promises], link="/tasks?view=promises", severity="high")
+                        "due_at": _iso(p.due_at)} for p in promises], link="/contacts", severity="high")
 
     # overdue tasks (grouped, deduplicated against blocked work above)
     if has_perm(actor, "tasks.read"):

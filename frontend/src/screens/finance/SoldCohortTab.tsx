@@ -2,7 +2,7 @@
    Only vehicles whose sale completed inside the period. Deposits, unsold inventory, payouts, sales tax and
    pass-through charges are excluded by the server and said out loud here. */
 import { useState, type FormEvent } from "react";
-import { Link } from "react-router-dom";
+import { Link, useSearchParams } from "react-router-dom";
 import { api } from "../../lib/api";
 import { useQuery } from "../../lib/useQuery";
 import { humanize } from "../../lib/links";
@@ -14,10 +14,28 @@ import type { SoldCohortResp } from "./types";
 type Period = "month" | "7d" | "30d" | "custom";
 
 export function SoldCohortTab({ refs }: { refs: ReturnType<typeof useRefs> }) {
-  const [period, setPeriod] = useState<Period>("month");
-  const [from, setFrom] = useState("");
-  const [to, setTo] = useState("");
-  const [range, setRange] = useState<{ from: string; to: string } | null>(null);
+  // The period lives in the URL so a Home drill-down ("Open in Finance") lands on the identical cohort (K01)
+  // and Back returns to the same view.
+  const [params, setParams] = useSearchParams();
+  const urlPeriod = params.get("period");
+  const urlFrom = params.get("from") || "";
+  const urlTo = params.get("to") || "";
+  const period: Period = urlPeriod === "7d" || urlPeriod === "30d" || urlPeriod === "custom" ? urlPeriod
+    : (urlFrom && urlTo ? "custom" : "month");
+  const [from, setFrom] = useState(urlFrom.slice(0, 10));
+  const [to, setTo] = useState(urlTo.slice(0, 10));
+  const range = urlFrom && urlTo ? { from: urlFrom, to: urlTo } : null;
+  const setPeriod = (p: Period) => {
+    const next = new URLSearchParams(params);
+    next.set("period", p);
+    if (p !== "custom") { next.delete("from"); next.delete("to"); }
+    setParams(next, { replace: true });
+  };
+  const setRange = (r: { from: string; to: string }) => {
+    const next = new URLSearchParams(params);
+    next.set("period", "custom"); next.set("from", r.from); next.set("to", r.to);
+    setParams(next, { replace: true });
+  };
 
   const query = period === "custom"
     ? (range ? `from=${encodeURIComponent(range.from)}&to=${encodeURIComponent(range.to)}` : null)
