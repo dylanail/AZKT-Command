@@ -160,7 +160,7 @@ export default function ThreadList({
         ) : !items.length ? (
           <EmptyState title={query ? "Nothing matches that search" : FILTER_LABELS[filter]} body={query ? "Try a shorter word from the subject." : FILTER_EMPTY[filter]} />
         ) : (
-          <div ref={listRef} className="ib-rows" role="list" onKeyDown={onKey}>
+          <div ref={listRef} className="ib-rows" onKeyDown={onKey}>
             {items.map((c) => (
               <ThreadRow key={c.id} c={c} selected={c.id === selectedId}
                 contactName={c.contact_id ? contactNames[c.contact_id] || null : null}

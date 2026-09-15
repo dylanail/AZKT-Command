@@ -100,6 +100,9 @@ export default function Inbox() {
     return [{ value: "", label: "All mailboxes" }, ...Array.from(byValue, ([value, label]) => ({ value, label }))];
   }, [coverage.data, threads.items]);
 
+  /** Only worth saying when a personal mailbox is actually in play. */
+  const personalConnected = (coverage.data?.accounts || []).some((a) => a.provider === "gmail_personal" && a.connected);
+
   /* ---------- dialogs ---------- */
   const [paste, setPaste] = useState(false);
   const [prompt, setPrompt] = useState<Prompt>(null);
@@ -128,9 +131,9 @@ export default function Inbox() {
   const act = useCallback(async (key: string, action: ThreadAction, body: Record<string, unknown>, success: string) => {
     if (!conv) return false;
     const r = await run(key, actionPath(conv.id, action), { ...body, expected_version: version }, { success });
-    if (r) { detail.reload(); reloadAll(); }
+    if (r) reloadAll();
     return r?.status === "ok";
-  }, [conv, run, version, detail, reloadAll]);
+  }, [conv, run, version, reloadAll]);
 
   const onPick = useCallback(async (p: PickedRecord) => {
     if (!conv) return false;
@@ -183,7 +186,7 @@ export default function Inbox() {
       hasMore={threads.hasMore}
       onMore={threads.loadMore}
       loadingMore={threads.loadingMore}
-      personalHint={isOwner}
+      personalHint={isOwner && personalConnected}
     />
   );
 
@@ -233,7 +236,7 @@ export default function Inbox() {
           {liveDraft(d.drafts) ? "Open the reply" : "Prepare a reply"}
         </Button>
       ) : (
-        <ReplyEditor detail={d} canDraft={canDraft} draftReason={draftReason} onChanged={() => { detail.reload(); reloadAll(); }} mobile={mobile} />
+        <ReplyEditor detail={d} canDraft={canDraft} draftReason={draftReason} onChanged={reloadAll} mobile={mobile} />
       )}
     </div>
   ) : null;
@@ -324,11 +327,11 @@ export default function Inbox() {
           <RecordPicker open={picker} onClose={() => setPicker(false)} onPick={onPick} mobile={mobile}
             busy={busy("link")} kinds={linkKinds} note={linkNote} />
           <ClassifyDialog conversationId={conv.id} open={classify} onClose={() => setClassify(false)} mobile={mobile}
-            current={conv.classification} version={conv.version} onSaved={() => { detail.reload(); reloadAll(); }} />
+            current={conv.classification} version={conv.version} onSaved={reloadAll} />
           <ManualReplyDialog conversationId={conv.id} open={manual} onClose={() => setManual(false)} mobile={mobile}
             defaultTo={(conv.participants || []).filter((p) => p && p !== conv.account)}
             defaultSubject={conv.subject || ""}
-            onSaved={() => { detail.reload(); reloadAll(); }} />
+            onSaved={reloadAll} />
         </>
       ) : null}
 
@@ -336,7 +339,7 @@ export default function Inbox() {
         <Sheet open={replySheet} onClose={() => setReplySheet(false)} title="Reply"
           footer={<Button variant="soft" block onClick={() => setReplySheet(false)}>Back to the thread</Button>}>
           <ReplyEditor detail={d} canDraft={canDraft} draftReason={draftReason}
-            onChanged={() => { detail.reload(); reloadAll(); }} mobile />
+            onChanged={reloadAll} mobile />
         </Sheet>
       ) : null}
     </div>

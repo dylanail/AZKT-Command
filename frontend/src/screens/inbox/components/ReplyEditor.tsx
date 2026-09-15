@@ -3,7 +3,7 @@
    Review & send posts reply.submit_for_approval and is disabled with the server's exact reason until
    every blocking check passes. After approval the thread says truthfully what happened to the send. */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Button, Chip, Expander, Field, GlassPanel, Notice, NotRecorded, Textarea, When } from "../../../ui";
+import { Button, Chip, Expander, Field, GlassPanel, Money, Notice, NotRecorded, Textarea, When } from "../../../ui";
 import { TZ } from "../../../lib/format";
 import { useCommand } from "../../../lib/useCommand";
 import { openApproval } from "../../approvals/useApprovalReview";
@@ -169,9 +169,15 @@ export default function ReplyEditor({ detail, canDraft, draftReason, onChanged, 
   const submitReason = !canDraft ? draftReason
     : !draft ? "Prepare a reply first."
     : locked ? (sendState === "sent" ? "This reply has already been sent." : "This reply is already waiting on the owner.")
+    : sendState === "stale" || sendState === "declined" ? "Prepare a new reply — this one is no longer valid."
     : dirty ? "Save your changes first so the review matches what you wrote."
     : failing.length ? (failing[0].remediation || failing[0].label)
     : "";
+
+  // A sent, declined or out-of-date draft is not the end of the thread: a new one can always be prepared.
+  const finished = sendState === "sent" || sendState === "declined" || sendState === "stale";
+  const againReason = prepareReason
+    || (sendState === "running" || sendState === "awaiting_approval" ? "This reply is still with the owner. Wait for the decision first." : "");
 
   return (
     <GlassPanel padded className="stack-sm ib-reply" aria-label="Reply">
@@ -241,7 +247,18 @@ export default function ReplyEditor({ detail, canDraft, draftReason, onChanged, 
                 })}
               </ul>
             ) : <NotRecorded text="No sources were attached to this draft." />}
-            {draft.facts?.money_hidden ? <p className="fs12 t4" style={{ margin: "6px 0 0" }}>Prices are hidden for your role, so any amount in this draft cannot be checked here.</p> : null}
+            {draft.facts?.money_hidden ? (
+              <p className="fs12 t4" style={{ margin: "6px 0 0" }}>Prices are hidden for your role, so any amount in this draft cannot be checked here.</p>
+            ) : draft.facts?.prices?.length ? (
+              <div className="stack-sm" style={{ marginTop: 6 }}>
+                <span className="fs12 t3">Prices this draft may quote</span>
+                <ul className="ib-sources">
+                  {draft.facts.prices.map((p, i) => (
+                    <li key={`${p.source}-${i}`}>{p.label} — <Money amount={p.amount} currency={p.currency} /></li>
+                  ))}
+                </ul>
+              </div>
+            ) : null}
           </Expander>
 
           <DraftVersions

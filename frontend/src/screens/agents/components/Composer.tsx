@@ -45,8 +45,16 @@ export function Composer({ role, pinned, onClearPinned, sending, blocked, restor
   const recRef = useRef<MediaRecorder | null>(null);
   const chunksRef = useRef<Blob[]>([]);
 
-  useEffect(() => { setText(readDraft(role)); setPending([]); }, [role]);
-  useEffect(() => { writeDraft(role, text); }, [role, text]);
+  // `loadedRole` keeps the draft that is on screen and the draft being written in step, so switching roles
+  // never writes one role's words into another role's draft.
+  const [loadedRole, setLoadedRole] = useState<AgentRole>(role);
+  useEffect(() => {
+    if (loadedRole === role) return;
+    setText(readDraft(role));
+    setPending([]);
+    setLoadedRole(role);
+  }, [role, loadedRole]);
+  useEffect(() => { if (loadedRole === role) writeDraft(role, text); }, [role, text, loadedRole]);
   useEffect(() => {
     if (!restored) return;
     setText((t) => (t ? t : restored));

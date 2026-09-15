@@ -177,8 +177,11 @@ export function useChat(role: AgentRole, enabled: boolean): ChatState {
       }
       patch((m) => ({ ...m, streaming: false, state: "interrupted", failure: message }));
     } finally {
-      if (aliveRef.current) setSending(false);
-      if (abortRef.current === c) abortRef.current = null;
+      // Only the newest send owns the busy flag; an older, superseded stream must not clear it.
+      if (abortRef.current === c) {
+        abortRef.current = null;
+        if (aliveRef.current) setSending(false);
+      }
     }
   }, [role]);
 

@@ -137,7 +137,7 @@
 .ag-cov__name { font-weight: 500; overflow-wrap: anywhere; }
 
 @media (max-width: 767px) {
-  .ag-thread__scroll { padding: 14px; max-height: none; min-height: 200px; }
+  .ag-thread__scroll { padding: 14px; max-height: 56vh; min-height: 200px; }
   .ag-composer__row .btn, .ag-composer__row .iconbtn { min-height: 44px; min-width: 44px; }
   .ag-turn--me > *, .ag-turn--agent > * { max-width: 100%; }
   .ag-updates__state { min-width: 0; }

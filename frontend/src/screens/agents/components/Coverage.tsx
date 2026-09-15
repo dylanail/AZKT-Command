@@ -44,6 +44,7 @@ export function Coverage() {
 
   return (
     <div className="stack">
+      <h3>What the Manager can do for you</h3>
       <div className="fs14 t2" style={{ maxWidth: 680 }}>
         The Manager reaches your records through the same commands the screens use. {mine} of {counts.commands} of them are
         available to you right now; {counts.read_tools} read-only lookups back its answers.

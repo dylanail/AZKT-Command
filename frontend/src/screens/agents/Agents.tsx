@@ -8,20 +8,19 @@ import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import "../../styles/agents.css";
 import { describeError } from "../../lib/api";
 import { useAuth } from "../../lib/auth";
-import { can, whyNot } from "../../lib/perms";
+import { can } from "../../lib/perms";
 import { useQuery } from "../../lib/useQuery";
 import { useIsMobile } from "../../lib/viewport";
 import { Button, EmptyState, ErrorState, GlassPanel, Loading, Notice, PageHeader, Tabs, When, useToast } from "../../ui";
 import { getStatus } from "./api";
-import { parsePinnedContext } from "./context";
-import { contextDiffers } from "./context";
+import { contextDiffers, parsePinnedContext } from "./context";
 import { Composer } from "./components/Composer";
 import { Coverage } from "./components/Coverage";
 import { MissionPanel } from "./components/MissionPanel";
 import { RoleRail, RoleStatusPanel } from "./components/RoleRail";
 import { Turn } from "./components/Turn";
 import { useChat } from "./useChat";
-import { AGENT_ROLES, ROLE_META, TERMINAL_MISSION, isAgentRole, type AgentRole, type AgentStatus } from "./types";
+import { AGENT_ROLES, ROLE_META, isAgentRole, type AgentRole, type AgentStatus } from "./types";
 
 type TabId = "chat" | "coverage";
 const STATUS_REFRESH_MS = 30000;
@@ -117,7 +116,15 @@ export default function Agents() {
 
   const note = modelNote(status);
   const live = chat.live;
-  const missionOpen = !!live?.mission_id && !TERMINAL_MISSION.has(live.status);
+  // After a reload there is no live reply, so follow the run the newest stored turn belongs to instead.
+  const follow = useMemo(() => {
+    if (live?.run_id) return { runId: live.run_id, missionId: live.mission_id, cursor: live.cursor || 0 };
+    for (let i = chat.messages.length - 1; i >= 0; i--) {
+      const m = chat.messages[i];
+      if (m.who === "agent" && m.runId) return { runId: m.runId, missionId: m.missionId || null, cursor: m.cursor || 0 };
+    }
+    return null;
+  }, [live, chat.messages]);
   const echoDiffers = !!live && contextDiffers(pinned?.context, live.context);
 
   const tabs = owner
@@ -141,7 +148,9 @@ export default function Agents() {
       ) : null}
       {note ? <Notice tone="wait" lead="AI">{note}</Notice> : null}
       {!mayChat ? (
-        <Notice tone="neutral" lead="Read only">{whyNot("agents.chat")} You can read this conversation but not add to it.</Notice>
+        <Notice tone="neutral" lead="Read only">
+          Your role can't use the AI Manager, so you can read this conversation but not add to it.
+        </Notice>
       ) : null}
 
       {tab === "coverage" ? (
@@ -176,17 +185,17 @@ export default function Agents() {
                   />
                 ) : (
                   chat.messages.map((m) => (
-                    <Turn key={m.key} m={m} role={role} live={m.key === lastAgentKey} onReload={chat.reload} />
+                    <Turn key={m.key} m={m} role={role} live={m.key === lastAgentKey && m.key.startsWith("agent-")} onReload={chat.reload} />
                   ))
                 )}
               </div>
             </GlassPanel>
 
-            {missionOpen || live?.run_id ? (
+            {follow ? (
               <MissionPanel
-                runId={live?.run_id || null}
-                missionId={live?.mission_id || null}
-                startCursor={live?.cursor || 0}
+                runId={follow.runId}
+                missionId={follow.missionId}
+                startCursor={follow.cursor}
                 onChanged={chat.reload}
               />
             ) : null}
@@ -196,7 +205,7 @@ export default function Agents() {
               pinned={pinned}
               onClearPinned={clearPinned}
               sending={chat.sending}
-              blocked={mayChat ? null : whyNot("agents.chat")}
+              blocked={mayChat ? null : "Your role can't use the AI Manager."}
               restored={chat.restored}
               onRestoredConsumed={chat.clearRestored}
               focusSignal={focusSignal}
