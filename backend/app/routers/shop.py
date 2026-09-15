@@ -13,7 +13,7 @@ from ..domain.actors import Actor
 from ..domain.commands import CommandContext, dispatch
 from ..models.vehicles import RECON_STATES, Part, ReconIssue, Vehicle
 from ..services import shop as svc
-from ..services.vehicles import serialize_part, serialize_vehicle
+from ..services.vehicles import sanitize_command_result, serialize_part, serialize_vehicle
 
 router = APIRouter(prefix="/api/shop", tags=["shop"])
 
@@ -81,7 +81,7 @@ async def move(vehicle_id: str, payload: dict = Body(...), ctx: CommandContext =
     if body.get("source") not in (None, *MOVE_SOURCES):
         raise HTTPException(422, f"source must be one of {MOVE_SOURCES}")
     res = await dispatch(ctx, "shop.move_stage", body)
-    return res.to_dict()
+    return sanitize_command_result(ctx.actor, res.to_dict())
 
 
 @router.post("/vehicles/{vehicle_id}/inspections")
@@ -89,7 +89,7 @@ async def log_inspection(vehicle_id: str, payload: dict = Body(...), ctx: Comman
     body = dict(payload or {})
     body["vehicle_id"] = vehicle_id
     res = await dispatch(ctx, "shop.log_inspection", body)
-    return res.to_dict()
+    return sanitize_command_result(ctx.actor, res.to_dict())
 
 
 @router.post("/vehicles/{vehicle_id}/issues")
@@ -97,7 +97,7 @@ async def create_issue(vehicle_id: str, payload: dict = Body(...), ctx: CommandC
     body = dict(payload or {})
     body["vehicle_id"] = vehicle_id
     res = await dispatch(ctx, "shop.create_issue", body)
-    return res.to_dict()
+    return sanitize_command_result(ctx.actor, res.to_dict())
 
 
 @router.post("/issues/{issue_id}/{action}")
@@ -111,7 +111,7 @@ async def issue_action(issue_id: str, action: str, payload: dict = Body(default=
     body = dict(payload or {})
     body.update({"issue_id": issue_id, "vehicle_id": i.vehicle_id})
     res = await dispatch(ctx, name, body)
-    return res.to_dict()
+    return sanitize_command_result(ctx.actor, res.to_dict())
 
 
 @router.post("/vehicles/{vehicle_id}/work-orders")
@@ -119,7 +119,7 @@ async def create_work_order(vehicle_id: str, payload: dict = Body(...), ctx: Com
     body = dict(payload or {})
     body["vehicle_id"] = vehicle_id
     res = await dispatch(ctx, "shop.create_work_order", body)
-    return res.to_dict()
+    return sanitize_command_result(ctx.actor, res.to_dict())
 
 
 @router.get("/parts")
@@ -134,7 +134,7 @@ async def request_part(vehicle_id: str, payload: dict = Body(...), ctx: CommandC
     body = dict(payload or {})
     body["vehicle_id"] = vehicle_id
     res = await dispatch(ctx, "shop.request_part", body)
-    return res.to_dict()
+    return sanitize_command_result(ctx.actor, res.to_dict())
 
 
 @router.post("/parts/{part_id}/{action}")
@@ -150,4 +150,4 @@ async def part_action(part_id: str, action: str, payload: dict = Body(default={}
     if action == "order" and not body.get("part_name"):
         body["part_name"] = p.name
     res = await dispatch(ctx, name, body)
-    return res.to_dict()
+    return sanitize_command_result(ctx.actor, res.to_dict())

@@ -239,6 +239,12 @@ async def sales_request_override(ctx: CommandContext, inp: OverrideIn) -> dict:
     active = (await ctx.db.execute(select(Sale).where(Sale.id == inp.active_sale_id).with_for_update())).scalar_one_or_none()
     if active is None:
         raise NotFound("active sale not found")
+    other = (await ctx.db.execute(select(Sale).where(Sale.vehicle_id == v.id, Sale.is_active.is_(True),
+                                                     Sale.id != inp.active_sale_id))).scalars().first()
+    if other is not None:
+        # invariant 7: the decision was prepared against one reservation; never leave two active sales behind
+        raise Conflict("another reservation is active on this vehicle; re-run the conflict decision",
+                       active_sale_id=other.id, decided_against=inp.active_sale_id)
     if active.is_active:
         active.status, active.is_active, active.cancelled_at = "cancelled", False, ctx.now
         active.cancel_reason = f"owner override: {inp.reason}"

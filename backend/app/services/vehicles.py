@@ -49,6 +49,10 @@ MONEY_KEYS = ("purchase_amount", "purchase_currency", "landed_cost_usd", "sold_p
               "cost_items", "cost_allocations")
 CONDITION_SOURCES = ("owner_reported", "image_observed", "proposed_check", "inspection", "customer")
 MILESTONE_STATUSES = ("planned", "estimated", "completed")
+# Recon milestones mirror the gated shop stage (spec §8.4, invariant 10): a completed one is written by the
+# shop command that checked the gates, never by hand — otherwise inspected_at / ready_at could turn a factual
+# gate green without an inspection, verified recon work, photos or disclosures. Forecasts stay allowed.
+SHOP_OWNED_MILESTONES = {"inspected": "shop.log_inspection", "recon_started": "shop.move_stage", "ready": "shop.move_stage"}
 MILESTONE_COLUMNS = {"purchased": "acquired_at", "received": "received_at", "inspected": "inspected_at",
                      "ready": "ready_at", "listed": "listed_at", "reserved": "reserved_at", "sold": "sold_at",
                      "delivered": "delivered_at"}
@@ -451,6 +455,23 @@ def serialize_list_item(v: Vehicle) -> dict:
 
 def sanitize_vehicle(actor: Actor, payload: dict) -> dict:
     return sanitize_money(actor, payload, MONEY_KEYS)
+
+
+def sanitize_command_result(actor: Actor, envelope: dict) -> dict:
+    """Strip owner-only money from a CommandResult envelope before it leaves any router (vehicles, shop, intake).
+    Handlers return the full record; actors without costs.read never see amounts or money facts."""
+    data = envelope.get("data")
+    if isinstance(data, dict):
+        if isinstance(data.get("vehicle"), dict):
+            data["vehicle"] = sanitize_vehicle(actor, data["vehicle"])
+        if not can_see_costs(actor):
+            if isinstance(data.get("facts"), list):
+                data["facts"] = [f for f in data["facts"] if isinstance(f, dict)
+                                 and f.get("key") not in ("purchase_amount", "asking_price") and f.get("visibility") != "owner"]
+            if isinstance(data.get("fact"), dict) and (data["fact"].get("key") in ("purchase_amount", "asking_price")
+                                                       or data["fact"].get("visibility") == "owner"):
+                data["fact"] = {"id": data["fact"].get("id"), "key": data["fact"].get("key"), "money_hidden": True}
+    return envelope
 
 
 async def facts_of(db: AsyncSession, vehicle_id: str, *, include_history: bool = False) -> list[VehicleFact]:
@@ -1083,6 +1104,10 @@ async def apply_milestone(ctx: CommandContext, v: Vehicle, *, kind: str, status:
          description="Record a planned / estimated / completed milestone with its source; supersedes the prior one of the "
                      "same kind (history kept). A completed milestone needs a sourced time.")
 async def vehicles_record_milestone(ctx: CommandContext, inp: MilestoneIn) -> dict:
+    if inp.status == "completed" and inp.kind in SHOP_OWNED_MILESTONES:
+        raise Blocked(f"a completed {inp.kind} milestone is recorded by {SHOP_OWNED_MILESTONES[inp.kind]} once the shop "
+                      f"gates are met; record it there (a planned/estimated date is fine here)",
+                      command=SHOP_OWNED_MILESTONES[inp.kind], kind=inp.kind)
     v = await get_vehicle(ctx.db, inp.vehicle_id, expected_version=inp.expected_version)
     out = await apply_milestone(ctx, v, kind=inp.kind, status=inp.status, at=aware(inp.at, inp.timezone),
                                 source_kind=inp.source_kind, source_ref=inp.source_ref, note=inp.note, shipment_id=inp.shipment_id)

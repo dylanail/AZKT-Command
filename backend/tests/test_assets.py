@@ -270,3 +270,28 @@ async def test_upload_slot_ownership_and_png(client, owner, db):
     s = await db.get(UploadSession, up["id"])
     await db.refresh(s)
     assert s.state == "finalized" and s.asset_id == fin["asset"]["id"]
+
+
+async def test_external_client_reaches_only_permitted_vehicles(db, owner):
+    """Spec §10.8 / invariant 14: an external client downloads an asset only through an entity inside its grant."""
+    from backend.app.domain.actors import Actor
+    from backend.app.domain.policy import effective_perms
+    from backend.app.services.assets import can_access_asset
+    a_id = await upload_via_commands(db, owner, jpeg_bytes(34), "ext.jpg")
+    mine = (await dispatch(ctx_for(db, owner), "vehicles.create", {"make": "Suzuki", "model": "Carry"})).data["vehicle"]
+    theirs = (await dispatch(ctx_for(db, owner), "vehicles.create", {"make": "Honda", "model": "Acty"})).data["vehicle"]
+    await dispatch(ctx_for(db, owner), "assets.link", {"asset_id": a_id, "entity_kind": "vehicle", "entity_id": mine["id"], "role": "photo"})
+    a = await db.get(Asset, a_id)
+
+    def ext(scopes, vehicle_ids) -> Actor:
+        return Actor(kind="external", user_id=owner.id, role="owner", perms=effective_perms("owner", {}), client_id=f"c-{_u()}",
+                     client_scopes=list(scopes), client_record_scope={"vehicle_ids": list(vehicle_ids)})
+
+    assert await can_access_asset(db, ext(["read:vehicles"], [mine["id"]]), a) is True
+    assert await can_access_asset(db, ext(["read:vehicles"], [theirs["id"]]), a) is False   # outside the record scope
+    assert await can_access_asset(db, ext(["intake"], [mine["id"]]), a) is False            # no read:vehicles scope
+    # a sensitive document needs read:sources as well, and the owner's role never leaks through the client
+    await dispatch(ctx_for(db, owner), "assets.classify", {"asset_id": a_id, "classification": "invoice"})
+    await db.refresh(a)
+    assert a.sensitive is True and a.public_eligible is False
+    assert await can_access_asset(db, ext(["read:vehicles"], [mine["id"]]), a) is False

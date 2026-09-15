@@ -74,6 +74,8 @@ async def cost_lines(db, vehicle_ids: list[str] | None = None, *, as_of: datetim
     for it in items:
         allocs = allocs_by_item.get(it.id, [])
         estimate = it.status in ESTIMATE_STATUSES or it.amount_invoiced is None
+        # a multi-vehicle split that no longer balances to the source amount is never read as recorded (invariant 5)
+        unbalanced = it.allocation_state == "unbalanced"
         if allocs:
             amounts = [(a.amount or ZERO) - (a.amount_credited or ZERO) for a in allocs]
             for idx, a in enumerate(allocs):
@@ -82,8 +84,10 @@ async def cost_lines(db, vehicle_ids: list[str] | None = None, *, as_of: datetim
                 paid_share = split_balanced(paid_total, amounts, it.currency)[idx] if paid_total > 0 and sum(amounts) > 0 else ZERO
                 add(a.vehicle_id, {"cost_item_id": it.id, "category": it.category, "description": it.description, "vendor": it.vendor_name,
                                    "currency": it.currency, "amount": amounts[idx], "usd_amount": usd, "fx_missing": fx_missing,
-                                   "status": it.status, "estimate": estimate, "basis": "allocation", "allocation_state": a.state,
-                                   "needs_review": a.state != "confirmed", "pass_through": it.is_pass_through, "shared": len(allocs) > 1,
+                                   "status": it.status, "estimate": estimate, "basis": "allocation",
+                                   "allocation_state": "unbalanced" if unbalanced else a.state,
+                                   "needs_review": a.state != "confirmed" or unbalanced, "unbalanced": unbalanced,
+                                   "pass_through": it.is_pass_through, "shared": len(allocs) > 1,
                                    "paid": paid_share, "paid_usd": _paid_usd(paid_share, amounts[idx], usd),
                                    "credited": a.amount_credited or ZERO, "occurred_at": it.occurred_at, "fx_actual": it.fx_actual})
         elif it.vehicle_id:
@@ -91,7 +95,8 @@ async def cost_lines(db, vehicle_ids: list[str] | None = None, *, as_of: datetim
             usd, fx_missing = _usd_share(it, amt, None, None)
             add(it.vehicle_id, {"cost_item_id": it.id, "category": it.category, "description": it.description, "vendor": it.vendor_name,
                                 "currency": it.currency, "amount": amt, "usd_amount": usd, "fx_missing": fx_missing, "status": it.status,
-                                "estimate": estimate, "basis": "direct", "allocation_state": it.allocation_state, "needs_review": False,
+                                "estimate": estimate, "basis": "direct", "allocation_state": it.allocation_state,
+                                "needs_review": False, "unbalanced": False,
                                 "pass_through": it.is_pass_through, "shared": False, "paid": min(it.amount_paid or ZERO, amt),
                                 "paid_usd": _paid_usd(min(it.amount_paid or ZERO, amt), amt, usd),
                                 "credited": it.amount_credited or ZERO, "occurred_at": it.occurred_at, "fx_actual": it.fx_actual})

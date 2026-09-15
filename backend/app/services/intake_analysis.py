@@ -12,7 +12,7 @@ repair, mileage or hidden damage. Uncertain identifiers stay uncertain until leg
 from __future__ import annotations
 
 import re
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from pydantic import BaseModel, Field
 
@@ -179,7 +179,7 @@ def _date_for(word: str | None, now: datetime) -> tuple[str | None, str]:
 
 def deterministic_extract(text: str, now: datetime | None = None) -> IntakeExtraction:
     """Split notes on commas / 'and' / newlines into owner-reported bullets; map known verbs to verb-first tasks."""
-    now = now or datetime.utcnow()
+    now = now or datetime.now(timezone.utc)   # UTC instant; callers pass ctx.now
     out = IntakeExtraction(notes=text or "")
     raw = (text or "").strip()
     if not raw:

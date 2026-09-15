@@ -230,3 +230,34 @@ async def test_sales_router_reserve_conflict_returns_409(client, db, owner):
     assert lst.status_code == 200 and lst.json()["total"] == 1
     got = await client.get(f"/api/finance/sales/{r1.json()['data']['sale']['id']}")
     assert got.status_code == 200 and got.json()["sale"]["status"] == "reserved"
+
+
+async def test_A03_sale_reads_hide_every_money_field_from_finance_status_only(client, db, owner, manager):
+    """A03: a finance.status holder sees the sale's state, never its numbers — including the amounts carried inside
+    terms, credit history, restatements and reconciliation exceptions."""
+    v = await vehicle(db)
+    c = await contact(db)
+    agr = (await cmd(db, owner, "agreements.create", {"kind": "sale", "contact_id": c.id, "vehicle_id": v.id,
+                                                      "price_amount": "8000.00", "price_currency": "USD",
+                                                      "deposit_amount": "500.00", "deposit_currency": "USD",
+                                                      "terms": {"reservation_days": 7, "reservation_amount": "500.00",
+                                                                "shipping_amount": "1200.00"}})).data["agreement"]
+    s = (await cmd(db, owner, "sales.reserve", {"vehicle_id": v.id, "buyer_contact_id": c.id, "agreement_id": agr["id"]})).data["sale"]
+    await cmd(db, owner, "sales.agree", {"sale_id": s["id"], "price": "8000.00", "currency": "USD"})
+    await cmd(db, owner, "sales.mark_completed", {"sale_id": s["id"]})
+    await cmd(db, owner, "sales.record_credit", {"sale_id": s["id"], "amount": "250.00", "reason": "goodwill"})
+    login(client, manager)
+    body = (await client.get(f"/api/finance/sales/{s['id']}")).json()
+    sale = body["sale"]
+    assert sale["money_hidden"] is True and sale["price"] is None and sale["net_sale_value"] is None
+    assert sale["status"] == "completed" and sale["terms"]["reservation_days"] == 7      # state and non-money terms stay
+    for key in ("terms", "credits_history", "restatements", "exceptions"):
+        blob = str(sale[key])
+        assert not any(tok in blob for tok in ("8000", "500.00", "1200", "250")), f"money leaked in {key}"
+    assert body["invoices"] == [] and body["agreement"] is None
+    row = next(x for x in (await client.get("/api/finance/sales")).json()["items"] if x["id"] == s["id"])
+    assert row["money_hidden"] is True and "250" not in str(row["credits_history"]) and "1200" not in str(row["terms"])
+    login(client, owner)
+    full = (await client.get(f"/api/finance/sales/{s['id']}")).json()["sale"]
+    assert full["price"]["amount"] == "8000.00" and full["net_sale_value"]["amount"] == "7750.00"
+    assert full["credits_history"][0]["amount"] == "250.00"

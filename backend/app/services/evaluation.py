@@ -15,6 +15,7 @@ workflow (WorkflowControl `workflow:<key>`), pauses its proposals and pauses sta
 """
 from __future__ import annotations
 
+import fnmatch
 import re
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
@@ -287,9 +288,34 @@ def serialize_proposal(p: PromotionProposal) -> dict:
                          "withdrawn": "Blocked"}.get(p.status, "Needs review")}
 
 
-def is_high_risk(workflow_key: str) -> bool:
-    k = (workflow_key or "").lower()
-    return any(k == pfx or k.startswith(pfx + ".") or k.startswith(pfx + "_") for pfx in HIGH_RISK_PREFIXES)
+def is_high_risk(key: str) -> bool:
+    """True for a workflow key or action pattern in a family that never becomes automatic from sample counts
+    (spec §11.2 last rows). Plural heads count too, so `payments.record_manual_confirmed` is high risk."""
+    k = (key or "").lower().strip()
+    heads = {k, k.split(".")[0]}
+    heads |= {h[:-1] for h in list(heads) if h.endswith("s")}
+    return any(h == pfx or h.startswith(pfx + ".") or h.startswith(pfx + "_")
+               for h in heads for pfx in HIGH_RISK_PREFIXES)
+
+
+def validate_action_pattern(pattern: str) -> str:
+    """A promotion proposal may only ever propose the narrow action it measured. It can never propose a catch-all
+    glob, a high-risk family, or anything matching a command the owner must decide individually (spec §11.2/§11.3).
+    Unregistered names are allowed: the proposal may name a command a later domain registers."""
+    p = (pattern or "").strip()
+    if not p:
+        raise Blocked("a promotion proposal needs an exact action pattern")
+    if not p.strip("*.? "):
+        raise Blocked("a promotion proposal cannot propose a catch-all action pattern", action_pattern=p)
+    if is_high_risk(p):
+        raise Blocked("high-risk actions are never enabled from a promotion proposal", action_pattern=p)
+    from ..domain.commands import REGISTRY
+    covered = sorted(n for n, spec in REGISTRY.items()
+                     if fnmatch.fnmatchcase(n, p) and spec.action_class in ("owner_only", "forbidden_for_agents"))
+    if covered:
+        raise Blocked(f"action pattern covers owner-only actions ({', '.join(covered[:3])})", action_pattern=p,
+                      covers=covered[:10])
+    return p
 
 
 def action_for_workflow(workflow_key: str) -> str | None:
@@ -384,6 +410,7 @@ async def proposals_generate(ctx: CommandContext, inp: ProposalGenerateIn) -> di
                                   f"{quiet_until.date().isoformat()} without meaningful new evidence ({new_since['cases']} new cases)"}
     action_class = "consequential"
     permission = default_permission(inp.workflow_key, inp.action_pattern, now, evidence, inp.permission_overrides)
+    validate_action_pattern(permission["action_pattern"])
     exclusions = list(permission["excluded_cases"])
     # retry-safe for the same evidence window and decision state; a decided proposal never blocks a later ask
     dedupe = stable_hash({"w": inp.workflow_key, "to": evidence["window_to"], "cases": evidence["cases"], "n": len(existing)})[:32]
@@ -450,6 +477,7 @@ async def proposals_decide(ctx: CommandContext, inp: ProposalDecideIn) -> dict:
     if is_high_risk(p.workflow_key):
         raise Blocked("high-risk workflows cannot be enabled from a promotion proposal")
     spec = {**(p.proposed_permission or {}), **{k: v for k, v in (inp.permission_edits or {}).items() if k in (p.proposed_permission or {})}}
+    validate_action_pattern(spec.get("action_pattern") or "")  # re-checked at enable time: owner edits cannot widen the class
     from ..core.time import parse_iso
     permission_row = Permission(
         subject_kind=spec.get("subject_kind") or "workflow", subject_id=spec.get("subject_id"), workflow_key=p.workflow_key,
@@ -473,7 +501,10 @@ async def proposals_decide(ctx: CommandContext, inp: ProposalDecideIn) -> dict:
                entity_id=permission_row.id, kind="access", state="active", visibility="owner",
                details={"proposal_id": p.id, "rate_limit": permission_row.rate_limit, "expires_at": _iso(permission_row.expires_at)})
     ctx.emit("permission.created", aggregate_type="permission", aggregate_id=permission_row.id,
-             payload={"workflow_key": p.workflow_key, "action_pattern": permission_row.action_pattern, "proposal_id": p.id})
+             aggregate_version=permission_row.version,
+             payload={"permission_id": permission_row.id, "subject_kind": permission_row.subject_kind,
+                      "subject_id": permission_row.subject_id, "workflow_key": p.workflow_key,
+                      "action_pattern": permission_row.action_pattern, "proposal_id": p.id, "status": "active"})
     ctx.emit("promotion_proposal.decided", aggregate_type="promotion_proposal", aggregate_id=p.id,
              payload={"workflow_key": p.workflow_key, "status": "approved", "permission_id": permission_row.id})
     return {"proposal": serialize_proposal(p), "permission": serialize_permission(permission_row), "mode": "bounded_automatic"}
@@ -543,8 +574,10 @@ async def proposals_record_regression(ctx: CommandContext, inp: RegressionIn) ->
             perm.status = "paused"
             ctx.touch(perm, "permission")
             paused_permissions.append(perm.id)
-            ctx.emit("permission.revoked", aggregate_type="permission", aggregate_id=perm.id,
-                     payload={"workflow_key": inp.workflow_key, "reason": "paused after critical regression", "paused": True})
+            ctx.emit("permission.revoked", aggregate_type="permission", aggregate_id=perm.id, aggregate_version=perm.version,
+                     payload={"permission_id": perm.id, "subject_kind": perm.subject_kind, "subject_id": perm.subject_id,
+                              "workflow_key": inp.workflow_key, "reason": "paused after critical regression",
+                              "paused": True, "status": "paused"})
         await ctx.db.flush()
         ctx.changed.append({"kind": "workflow_control", "id": ckey, "version": 0})
         ctx.record(f"Critical regression in {inp.workflow_key}: workflow paused, returned to review", entity_kind="workflow_control",

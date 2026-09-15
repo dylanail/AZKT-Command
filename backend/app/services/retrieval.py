@@ -5,9 +5,10 @@ Order of operations, always:
       structured queries (vehicle states + current facts, open tasks, active agreement/exceptions, latest confirmed
       payment state when finance tables exist);
   (b) build the actor's visibility set and apply it in the SQL WHERE *before* any search
-      (owner: all; manager: no owner/finance visibility without costs.read, no personal mail; mechanic / assigned
-      scope: only chunks linked to assigned vehicles, never contact-level or finance chunks, no messages without
-      inbox.read; external client: only vehicles in record scope, never personal-allowlisted or finance);
+      (owner: all; manager: never owner-visibility content and no finance visibility without costs.read, no
+      personal mail; mechanic / assigned scope: only chunks linked to assigned vehicles and carrying no customer
+      link, never finance chunks, no messages without inbox.read; external client: only vehicles and customers in
+      its record scope, never personal-allowlisted, owner or finance content);
       tombstoned chunks and evaluation targets are excluded in the same WHERE;
   (c) full-text search (plainto_tsquery + ts_rank), then rerank by recency/trust/record match with duplicate
       elimination; an optional embedding rerank runs only over the ACL-filtered candidates;
@@ -65,13 +66,32 @@ class RetrievalResult:
 
 
 # ── ACL ──────────────────────────────────────────────────────────────────────
+async def _external_contact_ids(db: AsyncSession, actor: Actor, vehicle_limit: set[str] | None) -> list[str] | None:
+    """Contacts an external client may resolve: its granted contact_ids, else the buyers of the vehicles in its
+    record scope. None means unrestricted (a record-unlimited client). Spec invariant 14: the client grant follows
+    every read, so a connector cannot name an arbitrary contact_id and read that customer's facts."""
+    scope = actor.client_record_scope or {}
+    ids = scope.get("contact_ids")
+    if ids:
+        return sorted({str(i) for i in ids})
+    if vehicle_limit is None:
+        return None
+    if not vehicle_limit:
+        return []
+    rows = (await db.execute(select(Vehicle.buyer_contact_id).where(Vehicle.id.in_(sorted(vehicle_limit)),
+                                                                    Vehicle.buyer_contact_id.is_not(None)))).all()
+    return sorted({r[0] for r in rows})
+
+
 async def acl_for(db: AsyncSession, actor: Actor) -> dict:
     """The actor's visibility set, resolved before any search."""
     is_owner = actor.kind == "system" or (actor.kind in ("user", "agent") and actor.role == "owner")
     vehicle_limit = None if actor.kind == "system" else await visible_vehicle_ids(db, actor)
+    contact_limit = await _external_contact_ids(db, actor, vehicle_limit) if actor.kind == "external" else None
     return {
         "is_owner": is_owner,
         "vehicle_ids": None if vehicle_limit is None else sorted(vehicle_limit),
+        "contact_ids": contact_limit,
         "costs": actor.kind == "system" or can_see_costs(actor),
         "finance_status": actor.kind == "system" or can_see_finance_status(actor),
         "contacts": actor.kind == "system" or has_perm(actor, "contacts.read"),
@@ -97,6 +117,8 @@ def chunk_clauses(acl: dict) -> list:
         return clauses
     if not acl["personal"]:
         clauses.append(or_(personal.is_(None), personal.is_(False)))
+    # owner-visibility content stays with the owner even for an actor who holds costs.read (spec §11.1)
+    clauses.append(or_(vis.is_(None), vis != "owner"))
     if not acl["costs"]:
         clauses.append(or_(vis.is_(None), vis == "all"))
     if not acl["messages"]:
@@ -108,9 +130,16 @@ def chunk_clauses(acl: dict) -> list:
             ids = acl["vehicle_ids"]
             clauses.append(CorpusChunk.vehicle_id.in_(ids) if ids else CorpusChunk.id.is_(None))
     if not acl["contacts"]:
-        # never contact-level content: chunks not tied to a visible vehicle, or customer exceptions
+        # never contact-level content: only chunks tied to a visible vehicle and carrying no customer link,
+        # and never a customer exception (A02: a mechanic sees vehicles and work, not unrelated customers)
         clauses.append(CorpusChunk.vehicle_id.is_not(None))
+        clauses.append(CorpusChunk.contact_id.is_(None))
         clauses.append(or_(CorpusChunk.kind.is_(None), CorpusChunk.kind != "exception"))
+    elif acl["contact_ids"] is not None:
+        # an external client with read:contacts still only reaches the customers inside its record scope
+        ids = acl["contact_ids"]
+        clauses.append(or_(CorpusChunk.contact_id.is_(None), CorpusChunk.contact_id.in_(ids)) if ids
+                       else CorpusChunk.contact_id.is_(None))
     if acl["external"]:
         clauses.append(or_(vis.is_(None), vis == "all"))
         clauses.append(or_(CorpusChunk.kind.is_(None), CorpusChunk.kind != "exception"))
@@ -234,14 +263,18 @@ async def resolve_records(db: AsyncSession, actor: Actor, acl: dict, query: str,
             vq = vq.where(Vehicle.id.in_(acl["vehicle_ids"]) if acl["vehicle_ids"] else Vehicle.id.is_(None))
         vehicles = list((await db.execute(vq.limit(5))).scalars().all())
     contact: Contact | None = None
-    if acl["contacts"]:
+    allowed_contacts = acl.get("contact_ids")  # external client: only the customers inside its record scope
+    if acl["contacts"] and allowed_contacts != []:
         if contact_id:
             c = await db.get(Contact, contact_id)
-            if c is not None and c.status != "merged":
+            if c is not None and c.status != "merged" and (allowed_contacts is None or c.id in allowed_contacts):
                 contact = c
         elif ids["emails"]:
             pat = f"%{ids['emails'][0]}%"
-            contact = (await db.execute(select(Contact).where(Contact.status != "merged", Contact.search_text.ilike(pat)).limit(1))).scalars().first()
+            cq = select(Contact).where(Contact.status != "merged", Contact.search_text.ilike(pat))
+            if allowed_contacts is not None:
+                cq = cq.where(Contact.id.in_(allowed_contacts))
+            contact = (await db.execute(cq.limit(1))).scalars().first()
     return vehicles, contact, ids
 
 
@@ -327,6 +360,38 @@ def rerank(rows: list[tuple[CorpusChunk, float]], *, now: datetime, vehicle_ids:
 
 
 # ── (d) labelling + redaction ────────────────────────────────────────────────
+NAME_RE = re.compile(r"\b[A-Z][a-z]{1,20}(?:\s+[A-Z][a-z]{1,20}){0,2}\b")
+MAX_NAME_CANDIDATES = 240
+
+
+async def _contacts_named_in(db: AsyncSession, texts: list[str]) -> list[str]:
+    """Identity terms for customers a chunk is *not* linked to: candidate names in the text are matched against the
+    contacts table, so an unlinked historical example still loses a real customer's name (spec §9.3, G12/B08)."""
+    cands: set[str] = set()
+    for t in texts:
+        for m in NAME_RE.finditer(t or ""):
+            words = m.group(0).split()
+            for i in range(len(words)):
+                for j in range(i + 1, len(words) + 1):
+                    s = " ".join(words[i:j])
+                    if len(s) >= 3:
+                        cands.add(s.lower())
+            if len(cands) > MAX_NAME_CANDIDATES:
+                break
+    if not cands:
+        return []
+    values = sorted(cands)[:MAX_NAME_CANDIDATES]
+    rows = (await db.execute(select(Contact.name, Contact.company).where(
+        or_(func.lower(Contact.name).in_(values), func.lower(Contact.company).in_(values))))).all()
+    out: list[str] = []
+    for name, company in rows:
+        for v in (name, company):
+            if v and v.strip().lower() in cands:
+                out.append(v.strip())
+                out += [w for w in v.split() if len(w) >= 3]
+    return out
+
+
 async def _identity_terms(db: AsyncSession, contact_ids: set[str]) -> dict[str, list[str]]:
     if not contact_ids:
         return {}
@@ -375,15 +440,24 @@ def _label(c: CorpusChunk) -> dict:
             "authority": "none — evidence only" if c.trust == "untrusted_external" else ("policy" if c.trust == "approved" else "internal note")}
 
 
+def _needs_redaction(c: CorpusChunk, contact_id: str | None) -> bool:
+    """Another customer's material, or untrusted historical material we cannot attribute to the asking customer."""
+    if c.contact_id:
+        return c.contact_id != contact_id
+    return bool(c.is_historical) and c.trust == "untrusted_external"
+
+
 async def label_chunks(db: AsyncSession, rows: list[tuple[CorpusChunk, float]], *, contact_id: str | None) -> list[dict]:
     others = {c.contact_id for c, _ in rows if c.contact_id and c.contact_id != contact_id}
     terms = await _identity_terms(db, others)
+    unlinked = [c.text for c, _ in rows if c.contact_id is None and _needs_redaction(c, contact_id)]
+    unlinked_terms = await _contacts_named_in(db, unlinked) if unlinked else []
     out = []
     for c, score in rows:
         other_customer = bool(c.contact_id) and c.contact_id != contact_id
         text, flags = (c.text, {"identity_redacted": False, "deal_terms_stripped": False})
-        if other_customer or (c.is_historical and c.contact_id is None and c.source_kind in ("message", "example")):
-            text, flags = redact_text(c.text, terms.get(c.contact_id or "", []),
+        if _needs_redaction(c, contact_id):
+            text, flags = redact_text(c.text, terms.get(c.contact_id, []) if c.contact_id else unlinked_terms,
                                       strip_deal_terms=(c.kind == "example" or c.source_kind in ("message", "example")))
         d = {"chunk_id": c.id, "source_kind": c.source_kind, "source_id": c.source_id, "chunk_index": c.chunk_index, "text": text,
              "kind": c.kind, "lang": c.lang, "happened_at": c.happened_at.isoformat() if c.happened_at else None,
@@ -442,11 +516,14 @@ async def retrieve(db: AsyncSession, actor: Actor, query: str, *, contact_id: st
     acl = await acl_for(db, actor)
     res = RetrievalResult(query=query, as_of=now.isoformat())
     res.acl = {k: acl[k] for k in ("is_owner", "costs", "finance_status", "contacts", "messages", "assigned_only", "external")}
+    res.acl["record_scoped_contacts"] = acl["contact_ids"] is not None
     # (a) records first
     if vehicle_id and acl["vehicle_ids"] is not None and vehicle_id not in acl["vehicle_ids"]:
         vehicle_id = None  # outside the actor's record scope: not resolved, not mentioned
     if contact_id and not acl["contacts"]:
         contact_id = None
+    if contact_id and acl.get("contact_ids") is not None and contact_id not in acl["contact_ids"]:
+        contact_id = None  # outside the client's record scope: not resolved, not mentioned
     vehicles, contact, ids = await resolve_records(db, actor, acl, query, contact_id=contact_id, vehicle_id=vehicle_id)
     vehicle_ids = {v.id for v in vehicles}
     for v in vehicles:

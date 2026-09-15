@@ -210,6 +210,16 @@ async def _allocations_of(db, item_id: str) -> list[CostAllocation]:
                                   .order_by(CostAllocation.created_at))).scalars().all())
 
 
+def _mark_changed(ctx: CommandContext, kind: str, row) -> None:
+    """Keep the result envelope's version for a row bumped outside ctx.touch (secondary rows in the same command),
+    so a client's next expected_version is the version that was actually written."""
+    for entry in ctx.changed:
+        if entry.get("kind") == kind and entry.get("id") == row.id:
+            entry["version"] = row.version
+            return
+    ctx.changed.append({"kind": kind, "id": row.id, "version": row.version})
+
+
 def _emit_cost(ctx: CommandContext, c: CostItem, change: str, **extra) -> None:
     ctx.emit("cost.changed", aggregate_type="cost_item", aggregate_id=c.id, aggregate_version=c.version,
              payload={"cost_item_id": c.id, "vehicle_id": c.vehicle_id, "change": change, "status": c.status, **extra})
@@ -408,7 +418,9 @@ async def costs_observe(ctx: CommandContext, inp: CostObserveIn) -> dict:
 
 
 async def _rebalance_single(ctx: CommandContext, c: CostItem) -> None:
-    """After the active amount changes: a single allocation follows it; several allocations become unbalanced."""
+    """After the active amount changes: a single allocation follows it; a multi-vehicle split cannot be re-derived
+    without a decision, so it is marked unbalanced AND each line carries the imbalance as a review reason —
+    invariant 5 is never silently broken (the per-vehicle money would otherwise under/over-report with no flag)."""
     allocs = await _allocations_of(ctx.db, c.id)
     if not allocs:
         return
@@ -419,8 +431,18 @@ async def _rebalance_single(ctx: CommandContext, c: CostItem) -> None:
             allocs[0].bump(ctx.actor.user_id)
         c.allocation_state = "balanced" if allocs[0].state == "confirmed" else "proposed"
         return
-    if sum(a.amount for a in allocs) != active:
+    total = sum(a.amount for a in allocs)
+    if total != active:
         c.allocation_state = "unbalanced"
+        reason = (f"allocations total {total} {c.currency} no longer balance to the source amount {active} {c.currency}; "
+                  "re-allocate before these costs are read as recorded")
+        for a in allocs:
+            if reason not in (a.review_reasons or []):
+                a.review_reasons = list(a.review_reasons or []) + [reason]
+                a.bump(ctx.actor.user_id)
+                ctx.changed.append({"kind": "cost_allocation", "id": a.id, "version": a.version})
+    else:
+        c.allocation_state = "balanced" if all(a.state == "confirmed" for a in allocs) else "proposed"
 
 
 class CostFxIn(BaseModel):
@@ -769,11 +791,27 @@ def _apply_evidence(ctx: CommandContext, ev: CostEvidence, c: CostItem) -> dict:
                    invoice_no=ev.invoice_no, order_no=ev.order_no)
     applied["applied"] = True
     if ev.is_settlement and ev.amount is not None:
-        already = any(o.get("evidence_id") == ev.id and o.get("kind") == "paid" for o in (c.observations or []))
-        if not already:
-            _observe(ctx, c, "paid", ev.amount, c.currency, source_ref=ev.source_ref, evidence_id=ev.id,
-                     note="verified settlement column")
+        # ONE settlement source settles once: a later revision of the same source (changed ledger row) restates the
+        # paid amount by its delta and never adds a second payment for the same money.
+        prior = ZERO
+        for o in (c.observations or []):
+            if o.get("kind") != "paid" or o.get("amount") is None:
+                continue
+            if o.get("evidence_id") == ev.id or (ev.source_ref and o.get("source_ref") == ev.source_ref):
+                prior += parse_amount(o["amount"])
+        delta = quantize(ev.amount, c.currency) - prior
+        if delta != 0:
+            _observe(ctx, c, "paid", delta, c.currency, source_ref=ev.source_ref, evidence_id=ev.id,
+                     note="verified settlement column" if prior == ZERO else
+                          f"verified settlement restated from {prior} (same ledger source)")
             applied["settlement"] = True
+            applied["settlement_delta"] = str(delta)
+            settled = (c.amount_paid or ZERO)
+            owed = (c.active_amount or ZERO) - (c.amount_credited or ZERO)
+            if delta < 0 and c.status == "paid" and settled < owed:
+                c.status = "partially_paid" if settled > ZERO else "invoiced"
+        else:
+            applied["settlement"] = "unchanged"
     if obs.get("discrepancy"):
         applied["discrepancy"] = obs["discrepancy"]
     return applied
@@ -1044,7 +1082,9 @@ async def costs_allocate(ctx: CommandContext, inp: AllocateIn) -> dict:
         tax_parts = split_balanced(tax, weights, cur) if tax else [ZERO] * len(weights)
         freight_parts = split_balanced(freight, weights, cur) if freight else [ZERO] * len(weights)
         finals = [quantize(b + t + f, cur) for b, t, f in zip(base_parts, tax_parts, freight_parts)]
-    assert sum(finals) == active, "balanced split invariant"
+    if sum(finals) != active:   # invariant 5 is enforced, not assumed (asserts vanish under -O)
+        raise ValidationFailed("allocation split did not balance to the source amount (invariant 5)",
+                               lines_total=str(sum(finals)), active_amount=str(active))
     confirmed = inp.confirm and ctx.actor.is_human and inp.basis == "explicit"
     review_reasons = [] if confirmed else [f"{inp.basis} split proposed by {ctx.actor.kind}; needs finance review"]
     existing = {a.vehicle_id: a for a in await _allocations_of(ctx.db, c.id)}
@@ -1419,6 +1459,7 @@ async def _availability_check(ctx: CommandContext, p: Payment) -> list[str]:
         inv.exceptions = list(inv.exceptions or []) + [{"kind": kind, "at": ctx.now.isoformat(), "payment_id": p.id,
                                                         "allocation_id": a.id}]
         inv.bump(ctx.actor.user_id)
+        _mark_changed(ctx, "invoice", inv)
         h = dict(inv.handoff or {})
         if h.get("done") and h.get("id"):
             key = await _pause_thread(ctx, f"thread:{h['id']}", f"{kind}: payment {p.id[:8]} — owner review required")
@@ -1837,6 +1878,7 @@ async def _deposit_handoff(ctx: CommandContext, inv: Invoice, p: Payment, a: Pay
          "cancelled_tasks": cancelled, "notes": notes, "reversals": [], "exceptions": []}
     inv.handoff = h
     inv.bump(ctx.actor.user_id)
+    _mark_changed(ctx, "invoice", inv)
     ctx.record(f"Deposit Paid: {inv.amount_due} {inv.currency} confirmed → {kind or 'no handoff target'}"
                + (f" ({', '.join(notes)})" if notes else ""), entity_kind="invoice", entity_id=inv.id, kind="payment", state="deposit_paid",
                visibility="finance", sources=[source_ref], exception=bool(notes), details=h)

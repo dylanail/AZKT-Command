@@ -414,3 +414,26 @@ async def test_employee_intake_limited_to_permitted_records(client, db, owner, m
     with pytest.raises(Blocked):
         await dispatch(ctx_for(db, mechanic), "intake.add_note", {"intake_id": it2["id"], "text": "x"})
     await db.rollback()
+
+
+# ── F01: only an evidenced identity auto-links; similarity never assigns ─────
+async def test_F01_only_evidenced_identity_auto_links(db, owner):
+    tag = uuid.uuid4().int % 900000 + 100000
+    similar = await _vehicle(db, owner, make="Subaru", model="Sambar", model_year=1996, color="gold")
+    evidenced = await _vehicle(db, owner, make="Subaru", model="Sambar", model_year=1996, color="gold",
+                               frame_no_raw=f"TT2-{tag}")
+    # model / year / colour alone: one candidate, still no automatic assignment
+    it = (await dispatch(ctx_for(db, owner), "intake.start", {"target_mode": "find"})).data["intake"]
+    await dispatch(ctx_for(db, owner), "intake.add_note", {"intake_id": it["id"], "text": "gold 1996 sambar needs tires"})
+    an = (await dispatch(ctx_for(db, owner), "intake.analyze", {"intake_id": it["id"]})).data
+    assert an["intake"]["status"] == "needs_choice" and an["intake"]["vehicle_id"] is None
+    assert similar["id"] in an["intake"]["candidate_vehicle_ids"]
+    ap = (await dispatch(ctx_for(db, owner), "intake.apply", {"intake_id": it["id"]})).data
+    assert ap["decision"] == "Blocked" and await _task_titles(db, similar["id"]) == []
+    # a stated frame number is evidence: it resolves to that card and only that card
+    it2 = (await dispatch(ctx_for(db, owner), "intake.start", {"target_mode": "find"})).data["intake"]
+    await dispatch(ctx_for(db, owner), "intake.add_note", {"intake_id": it2["id"], "text": f"frame TT2-{tag}, needs tires"})
+    ap2 = (await dispatch(ctx_for(db, owner), "intake.apply", {"intake_id": it2["id"]})).data
+    assert ap2["decision"] == "Allowed" and ap2["result"]["vehicle_id"] == evidenced["id"]
+    assert ap2["intake"]["choice"]["resolved"] in ("exact", "matched")
+    assert await _task_titles(db, evidenced["id"]) == ["Inspect and replace tires"] and await _task_titles(db, similar["id"]) == []

@@ -358,22 +358,30 @@ async def procedures_promote(ctx: CommandContext, inp: VersionRef) -> dict:
     v.promoted_by = ctx.actor.user_id
     v.stage_history = list(v.stage_history or []) + [{"from": prev_stage, "to": target, "at": ctx.now.isoformat(), "by": ctx.actor.user_id}]
     ctx.touch(v, "procedure_version")
-    # the promoted version becomes current; an older current version is superseded (history retained)
-    if p.current_version_id and p.current_version_id != v.id:
-        old = await ctx.db.get(ProcedureVersion, p.current_version_id)
-        if old is not None and old.superseded_at is None:
-            old.superseded_at = ctx.now
-    p.current_version_id = v.id
-    p.status = target
+    # The promoted version becomes current only when it reaches at least the live version's rung: climbing a fresh
+    # v2 to `offline_tested` must never quietly replace a v1 already running in shadow/supervised (spec §9.4).
+    cur = await ctx.db.get(ProcedureVersion, p.current_version_id) if p.current_version_id and p.current_version_id != v.id else None
+    cur_idx = LADDER.index(cur.stage) if cur is not None and cur.withdrawn_at is None and cur.stage in LADDER else -1
+    becomes_current = cur is None or (idx + 1) >= cur_idx
+    if becomes_current:
+        if cur is not None and cur.superseded_at is None:
+            cur.superseded_at = ctx.now
+        p.current_version_id = v.id
+        p.status = target
     p.last_promoted_at = ctx.now
     p.stage_history = list(p.stage_history or []) + [{"version_id": v.id, "from": prev_stage, "to": target, "at": ctx.now.isoformat(),
-                                                      "by": ctx.actor.user_id}]
+                                                      "by": ctx.actor.user_id, "became_current": becomes_current}]
     ctx.touch(p, "procedure")
-    ctx.record(f"Promoted procedure {p.key} v{v.version_no}: {prev_stage} → {target}", entity_kind="procedure", entity_id=p.id,
-               kind="system", state=target, details={"version_id": v.id, "permission_id": v.permission_id, "permission_created": False})
+    ctx.record(f"Promoted procedure {p.key} v{v.version_no}: {prev_stage} → {target}"
+               + ("" if becomes_current else f" (v{cur.version_no} stays current at {cur.stage})"),
+               entity_kind="procedure", entity_id=p.id, kind="system", state=target,
+               details={"version_id": v.id, "permission_id": v.permission_id, "permission_created": False,
+                        "became_current": becomes_current, "current_version_id": p.current_version_id})
     ctx.emit("procedure.promoted", aggregate_type="procedure", aggregate_id=p.id, aggregate_version=p.version,
-             payload={"version_id": v.id, "from": prev_stage, "to": target, "permission_created": False})
-    return {"procedure": serialize_procedure(p), "version": serialize_version(v), "permission_created": False}
+             payload={"version_id": v.id, "from": prev_stage, "to": target, "permission_created": False,
+                      "became_current": becomes_current})
+    return {"procedure": serialize_procedure(p), "version": serialize_version(v), "permission_created": False,
+            "became_current": becomes_current}
 
 
 async def _invalidate_bound_approvals(ctx: CommandContext, version_id: str) -> int:

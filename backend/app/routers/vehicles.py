@@ -28,12 +28,7 @@ SEARCHABLE = (Vehicle.stock_no, Vehicle.frame_no_raw, Vehicle.frame_no_norm, Veh
 
 
 def _sanitize_result(actor: Actor, d: dict) -> dict:
-    data = d.get("data")
-    if isinstance(data, dict) and isinstance(data.get("vehicle"), dict):
-        data["vehicle"] = svc.sanitize_vehicle(actor, data["vehicle"])
-        if not svc.can_see_costs(actor) and isinstance(data.get("facts"), list):
-            data["facts"] = [f for f in data["facts"] if f.get("key") != "purchase_amount" and f.get("visibility") != "owner"]
-    return d
+    return svc.sanitize_command_result(actor, d)
 
 
 async def _base_query(db: AsyncSession, actor: Actor, *, include_archived: bool):

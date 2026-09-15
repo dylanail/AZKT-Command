@@ -166,3 +166,30 @@ async def test_ledger_router_lists_mappings_and_rows(client, db, owner, source):
     assert lst.status_code == 200 and lst.json()["total"] == 2
     got = await client.get(f"/api/finance/ledger/mappings/{mid}")
     assert got.json()["mapping"]["sheet_link"].endswith("gid=303")
+
+
+async def test_settled_row_change_restates_paid_without_double_counting(db, owner, source):
+    """A verified-settlement row that changes is the SAME money: the later revision restates the paid amount by its
+    delta instead of recording a second payment (invariants 6/15 — one non-duplicated basis)."""
+    tag = _u()
+    sheet = f"sheet-{tag}"
+    headers = ["ID", "Date", "Payee", "Memo", "Total USD", "Stock", "Settled"]
+    source.add_sheet(sheet, "Ledger 4", {"Ledger": {"tab_id": "404", "headers": headers,
+                                                    "rows": [["L-1", "08/01/2026", f"Parts {tag}", "pads", "$120.00", "", "yes"]]}})
+    m = await activate(db, owner, sheet, settlement_column="Settled", settlement_verified=True)
+    await cmd(db, owner, "ledger.import_rows", {"mapping_id": m["id"]})
+    it = (await db.execute(select(CostItem).where(CostItem.vendor_name == f"Parts {tag}"))).scalar_one()
+    assert it.amount_paid == 120 and it.status == "paid"
+    # the same settled row is edited in the sheet (memo corrected): identity kept, money not duplicated
+    source.set_rows(sheet, "Ledger", [["L-1", "08/01/2026", f"Parts {tag}", "pads (corrected)", "$120.00", "", "yes"]])
+    assert (await cmd(db, owner, "ledger.import_rows", {"mapping_id": m["id"]})).data["summary"]["changed"] == 1
+    await db.refresh(it)
+    assert it.amount_paid == 120 and len([o for o in it.observations if o["kind"] == "paid"]) == 1
+    # a corrected settled amount restates the paid total by the delta and keeps the correction visible
+    source.set_rows(sheet, "Ledger", [["L-1", "08/01/2026", f"Parts {tag}", "pads (corrected)", "$100.00", "", "yes"]])
+    await cmd(db, owner, "ledger.import_rows", {"mapping_id": m["id"]})
+    await db.refresh(it)
+    assert it.amount_paid == 100
+    paid_obs = [o for o in it.observations if o["kind"] == "paid"]
+    assert [o["amount"] for o in paid_obs] == ["120.00", "-20.00"] and "restated" in paid_obs[-1]["note"]
+    assert it.amount_invoiced == 120 and it.status in ("partially_paid", "invoiced")   # unconfirmed change never rewrites the cost

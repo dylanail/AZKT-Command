@@ -331,12 +331,10 @@ async def _create_issue(ctx: CommandContext, v: Vehicle, inp: IssueCreateIn) -> 
         i = existing
         changed = False
         ids = list(i.asset_ids or [])
-        for a in inp.asset_ids:
-            if a not in ids:
-                ids.append(a)
-                changed = True
-        if changed:
-            i.asset_ids = ids
+        added_assets = [a for a in inp.asset_ids if a not in ids]
+        if added_assets:
+            i.asset_ids = [*ids, *added_assets]
+            changed = True
         if inp.detail and inp.detail not in (i.detail or ""):
             i.detail = (i.detail + "\n" if i.detail else "") + inp.detail
             changed = True
@@ -345,6 +343,13 @@ async def _create_issue(ctx: CommandContext, v: Vehicle, inp: IssueCreateIn) -> 
             changed = True
         if changed:
             ctx.touch(i, "recon_issue")
+            ctx.record(f"Recon issue re-reported: {i.title} (merged, still {i.status})", entity_kind="vehicle", entity_id=v.id,
+                       kind="task", state=i.status, exception=(i.status == "deferred"),
+                       details={"issue_id": i.id, "source_kind": inp.source_kind, "asset_ids": list(i.asset_ids or []),
+                                "observation_id": inp.intake_observation_id, "merged": True})
+            if added_assets:
+                ctx.emit("evidence.saved", aggregate_type="recon_issue", aggregate_id=i.id,
+                         payload={"vehicle_id": v.id, "asset_ids": added_assets, "context": "recon_issue"})
     else:
         i = ReconIssue(vehicle_id=v.id, title=inp.title.strip(), detail=inp.detail, severity=inp.severity, status="open",
                        source_kind=inp.source_kind, source_ref=inp.source_ref, intake_observation_id=inp.intake_observation_id,

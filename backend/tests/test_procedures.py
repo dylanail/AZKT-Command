@@ -16,6 +16,7 @@ from backend.app.models.knowledge import Procedure, ProcedureVersion, PromotionP
 from backend.app.models.runtime import Approval, Event, Permission, WorkflowControl
 from backend.app.services import evaluation as ev
 from backend.app.services import procedures as psvc
+from backend.tests import test_foundation as _foundation  # noqa: F401  (registers the test.send command used below)
 from backend.tests.conftest import actor_of, ctx_for, login, make_user
 
 
@@ -379,3 +380,75 @@ async def test_proposals_api(client, db, owner, manager):
     assert r.status_code == 200 and r.json()["data"]["paused"] is True
     r = await client.get(f"/api/knowledge/workflows/{wf}")
     assert r.json()["mode"] == "paused"
+
+
+async def test_promoting_a_new_version_never_demotes_the_live_one(db, owner):
+    """A fresh v2 climbing to offline_tested must not replace a v1 already running in shadow (spec §9.4)."""
+    wf = f"reply.availability.{_u()}"
+    d = await propose(db, owner, workflow_key=wf)
+    proc, v1 = d["procedure"], d["version"]
+    await dispatch(ctx_for(db, owner), "procedures.run_tests", {"version_id": v1["id"]})
+    await dispatch(ctx_for(db, owner), "procedures.promote", {"version_id": v1["id"]})       # offline_tested
+    p2 = await dispatch(ctx_for(db, owner), "procedures.promote", {"version_id": v1["id"]})  # shadow
+    assert p2.data["became_current"] is True and p2.data["procedure"]["current_version_id"] == v1["id"]
+    v2 = (await dispatch(ctx_for(db, owner), "procedures.propose", {"key": proc["key"], "title": proc["title"],
+                                                                    "text": TEACH + "Always cite the vehicle card.\n",
+                                                                    "test_cases": CASES})).data["version"]
+    await dispatch(ctx_for(db, owner), "procedures.run_tests", {"version_id": v2["id"]})
+    low = await dispatch(ctx_for(db, owner), "procedures.promote", {"version_id": v2["id"]})  # proposed -> offline_tested
+    assert low.data["version"]["stage"] == "offline_tested" and low.data["became_current"] is False
+    assert low.data["procedure"]["current_version_id"] == v1["id"] and low.data["procedure"]["status"] == "shadow"
+    assert (await psvc.current_version_for(db, wf)).id == v1["id"]
+    # once v2 reaches the same rung it takes over and v1 is superseded (history retained)
+    up = await dispatch(ctx_for(db, owner), "procedures.promote", {"version_id": v2["id"]})   # -> shadow
+    assert up.data["became_current"] is True and up.data["procedure"]["current_version_id"] == v2["id"]
+    assert (await db.get(ProcedureVersion, v1["id"])).superseded_at is not None
+
+
+async def test_proposal_never_proposes_owner_only_or_catch_all_authority(db, owner):
+    """§11.2: bids, payments, price/terms and permission changes are not eligible for self-proposed promotion, and a
+    proposal can never smuggle a wider grant in through action_pattern."""
+    wf = f"reply.availability.{_u()}"
+    await seed_outcomes(db, owner, wf, n=52, accepted=52, days=15)
+    await seed_failure_tests(db, owner, wf, passing=True)
+    for bad in ("*", "*.*", "team.*", "payments.*", "approvals.approve", "vehicles.set_asking_price"):
+        with pytest.raises(Blocked):
+            await dispatch(ctx_for(db, owner), "promotion_proposals.generate", {"workflow_key": wf, "action_pattern": bad})
+    assert ev.is_high_risk("payments.record_manual_confirmed") and ev.is_high_risk("bids.submit") and not ev.is_high_risk("reply.availability")
+    r = await dispatch(ctx_for(db, owner), "promotion_proposals.generate", {"workflow_key": wf, "action_pattern": "test.send"})
+    assert r.data["created"] is True
+    prop = r.data["proposal"]
+    # an owner edit at decide time cannot widen the class either
+    with pytest.raises(Blocked):
+        await dispatch(ctx_for(db, owner), "promotion_proposals.decide",
+                       {"proposal_id": prop["id"], "decision": "approve", "permission_edits": {"action_pattern": "team.*"}})
+    assert (await db.get(PromotionProposal, prop["id"])).status == "proposed"
+    assert not (await db.execute(select(Permission).where(Permission.proposal_id == prop["id"]))).scalars().all()
+
+
+async def test_owner_only_commands_are_denied_for_every_other_actor(db, owner, manager, mechanic):
+    """Matrix: approving knowledge, promoting/rolling back a procedure and deciding a proposal are owner_only.
+    Non-owner people and external connectors are Denied; the owner's own agent gets an exact approval, never silent
+    execution (spec §11.2, §10.9)."""
+    from backend.app.domain.actors import Actor
+    from backend.app.domain.commands import CommandContext
+    from backend.app.domain.policy import effective_perms as _perms
+
+    cases = [("knowledge.approve", {"item_id": "k-none"}), ("knowledge.retire", {"item_id": "k-none"}),
+             ("knowledge.reject", {"item_id": "k-none"}), ("procedures.promote", {"version_id": "v-none"}),
+             ("procedures.rollback", {"version_id": "v-none"}),
+             ("promotion_proposals.decide", {"proposal_id": "p-none", "decision": "approve"})]
+    external = Actor(kind="external", user_id=owner.id, role="owner", perms=_perms("owner", {}), client_id="c-matrix",
+                     client_scopes=["read:vehicles", "write:vehicles", "read:sources", "draft:messages", "ask"],
+                     client_record_scope={})
+    for name, payload in cases:
+        for user in (manager, mechanic):
+            for kind in ("user", "agent"):
+                with pytest.raises(Denied):
+                    await dispatch(ctx_for(db, user, kind=kind), name, payload)
+        with pytest.raises(Denied):
+            await dispatch(CommandContext(db=db, actor=external), name, payload)
+        res = await dispatch(ctx_for(db, owner, kind="agent"), name, payload)
+        assert res.status == "needs_review" and res.approval_id, (name, res.status)
+    # the owner-agent's pending approvals carry the exact command; nothing executed
+    assert not (await db.execute(select(Permission).where(Permission.action_pattern == "*"))).scalars().all()

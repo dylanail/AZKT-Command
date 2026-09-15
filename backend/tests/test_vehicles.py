@@ -303,3 +303,70 @@ async def test_I06_partial_owner_edits_through_commands_employee_scoped(db, owne
         await dispatch(ctx_for(db, mechanic), "vehicles.confirm_fact", {"vehicle_id": v["id"], "key": "odometer_km", "value": "1"})
     with pytest.raises(Denied):
         await dispatch(ctx_for(db, mechanic, kind="agent"), "vehicles.set_asking_price", {"vehicle_id": v["id"], "amount": "1"})
+
+
+# ── money never leaves a command envelope without costs.read (spec §11.1) ────
+async def test_money_hidden_in_every_command_envelope(client, db, owner, manager, mechanic):
+    tag = _u()
+    v = (await _create(db, owner, make="Daihatsu", model=f"Hijet {tag}", purchase_amount="4200.00", purchase_currency="USD",
+                       logistics_state="received", create_missing_task=False))["vehicle"]
+    await dispatch(ctx_for(db, owner), "tasks.create", {"title": f"Check lights {tag}", "vehicle_id": v["id"], "owner_user_id": mechanic.id})
+    login(client, manager)
+    r = await client.post(f"/api/shop/vehicles/{v['id']}/move", json={"to_state": "in_recon", "source": "button"})
+    veh = r.json()["data"]["vehicle"]
+    assert veh["purchase_amount"] is None and veh["money_hidden"] is True and veh["landed_cost_usd"] is None
+    r = await client.post(f"/api/shop/vehicles/{v['id']}/inspections", json={"findings": [], "note": "walkaround"})
+    assert r.json()["data"]["vehicle"]["purchase_amount"] is None
+    it = (await client.post("/api/vehicle-intakes", json={"target_mode": "existing", "vehicle_id": v["id"]})).json()["data"]["intake"]
+    await client.post(f"/api/vehicle-intakes/{it['id']}/notes", json={"text": "needs tires"})
+    ap = (await client.post(f"/api/vehicle-intakes/{it['id']}/apply", json={})).json()["data"]
+    assert ap["vehicle"]["purchase_amount"] is None and ap["vehicle"]["money_hidden"] is True
+    # the vehicles router keeps hiding money on fact commands too
+    r = await client.post(f"/api/vehicles/{v['id']}/propose_fact", json={"key": "purchase_amount", "value": "9999", "source_kind": "message"})
+    assert r.json()["data"]["vehicle"]["purchase_amount"] is None and r.json()["data"]["fact"].get("money_hidden") is True
+    # the mechanic (assigned) gets the same treatment through the shop API
+    login(client, mechanic)
+    r = await client.post(f"/api/shop/vehicles/{v['id']}/inspections", json={"findings": []})
+    assert r.status_code == 200 and r.json()["data"]["vehicle"]["purchase_amount"] is None
+    # the owner still sees the real amount, unchanged by the conflicting proposal
+    login(client, owner)
+    d = (await client.get(f"/api/vehicles/{v['id']}")).json()
+    assert d["vehicle"]["purchase_amount"] == "4200.00" and d["tabs"]["money"]["money_hidden"] is False
+
+
+# ── owner-only matrix: verify / confirm critical facts / asking price (spec §10.9, §11.1) ──
+async def test_owner_only_commands_denied_for_manager_mechanic_agent_and_external(db, owner, manager, mechanic):
+    from backend.app.domain.actors import Actor
+    from backend.app.domain.commands import CommandContext
+    from backend.app.domain.policy import effective_perms
+    from backend.tests.test_assets import upload_via_commands as _upload
+    v = (await _create(db, owner, make="Suzuki", model="Every", create_missing_task=False))["vehicle"]
+    # assign the mechanic so the refusal is about the action, not the record scope
+    await dispatch(ctx_for(db, owner), "tasks.create", {"title": f"Fit mirror {_u()}", "vehicle_id": v["id"], "owner_user_id": mechanic.id})
+    part = (await dispatch(ctx_for(db, owner), "shop.request_part", {"vehicle_id": v["id"], "name": f"Mirror {_u()}"})).data["part"]
+    await dispatch(ctx_for(db, owner), "shop.mark_part_arrived", {"part_id": part["id"], "vehicle_id": v["id"]})
+    photo = await _upload(db, owner, jpeg_bytes(91), "mirror.jpg")
+    await dispatch(ctx_for(db, owner), "shop.mark_part_installed", {"part_id": part["id"], "vehicle_id": v["id"], "asset_ids": [photo]})
+    ext = Actor(kind="external", user_id=owner.id, role="owner", perms=effective_perms("owner", {}), client_id=f"c-{_u()}",
+                client_scopes=["read:vehicles", "write:vehicles", "write:tasks", "intake"], client_record_scope={"vehicle_ids": [v["id"]]})
+    calls = {
+        "vehicles.confirm_fact": {"vehicle_id": v["id"], "key": "odometer_km", "value": "42000"},
+        "vehicles.set_asking_price": {"vehicle_id": v["id"], "amount": "8500", "currency": "USD"},
+        "shop.verify_part": {"part_id": part["id"], "vehicle_id": v["id"]},
+    }
+    for name, payload in calls.items():
+        for user in (manager, mechanic):
+            for kind in ("user", "agent"):
+                with pytest.raises(Denied):
+                    await dispatch(ctx_for(db, user, kind=kind), name, payload)
+        with pytest.raises(Denied):   # an external client never inherits an owner-only decision (spec §10.8)
+            await dispatch(CommandContext(db=db, actor=ext), name, payload)
+        prepared = await dispatch(ctx_for(db, owner, kind="agent"), name, payload)
+        assert prepared.status == "needs_review" and prepared.approval_id, name   # Manager prepares; the owner decides
+    # nothing was changed by any of the refusals
+    row = await db.get(Vehicle, v["id"])
+    await db.refresh(row)
+    assert row.odometer_km is None and row.asking_price is None and row.price_approved_at is None
+    assert (await db.get(__import__("backend.app.models.vehicles", fromlist=["Part"]).Part, part["id"])).state == "installed"
+    ok = await dispatch(ctx_for(db, owner), "shop.verify_part", {"part_id": part["id"], "vehicle_id": v["id"]})
+    assert ok.data["part"]["state"] == "verified" and ok.data["part"]["verified_by"] == owner.id

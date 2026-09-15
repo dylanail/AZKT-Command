@@ -55,6 +55,23 @@ async def finance_status_actor(actor: Actor = Depends(current_actor)) -> Actor:
     return _finance_status(actor)
 
 
+MONEY_TERM_HINTS = ("amount", "price", "deposit", "fee", "cost", "total", "usd", "jpy", "tax", "credit")
+
+
+def _redact_sale_money(sale: dict) -> dict:
+    """A finance.status-only actor sees the sale's state, never its numbers — including the numbers carried inside
+    terms, credit history, restatements and reconciliation exceptions (A03, spec §6.2)."""
+    out = {**sale, "price": None, "sales_tax": None, "pass_through": None, "credits": None, "net_sale_value": None,
+           "money_hidden": True}
+    out["terms"] = {k: v for k, v in (sale.get("terms") or {}).items()
+                    if not any(h in str(k).lower() for h in MONEY_TERM_HINTS)}
+    out["credits_history"] = [{k: v for k, v in e.items() if k != "amount"} for e in (sale.get("credits_history") or [])]
+    out["restatements"] = [{k: v for k, v in e.items() if k not in ("old", "new")} for e in (sale.get("restatements") or [])]
+    out["exceptions"] = [{k: v for k, v in e.items() if k not in ("invoices", "allocated", "amount")}
+                         for e in (sale.get("exceptions") or [])]
+    return out
+
+
 async def _run(group: str, action: str, payload: dict, ctx: CommandContext) -> dict:
     name = COMMANDS.get(group, {}).get(action)
     if name is None:
@@ -287,7 +304,7 @@ async def list_sales(vehicle_id: str | None = None, status: str | None = None, a
         rows = [s for s in rows if s.vehicle_id in limit]
     items = [sr.serialize_sale(s) for s in rows]
     if not can_see_costs(actor):
-        items = [{**s, "price": None, "sales_tax": None, "pass_through": None, "credits": None, "net_sale_value": None, "money_hidden": True} for s in items]
+        items = [_redact_sale_money(s) for s in items]
     return {"items": items, "total": len(items)}
 
 
@@ -302,7 +319,7 @@ async def get_sale(sale_id: str, actor: Actor = Depends(require("sales.read")), 
     agr = await db.get(Agreement, s.agreement_id) if s.agreement_id else None
     out = sr.serialize_sale(s)
     if not can_see_costs(actor):
-        out.update({"price": None, "sales_tax": None, "pass_through": None, "credits": None, "net_sale_value": None, "money_hidden": True})
+        out = _redact_sale_money(out)
     return {"sale": out, "documents": [sr.serialize_document(d) for d in docs],
             "invoices": [fin.serialize_invoice(i) for i in invs] if can_see_costs(actor) else [],
             "agreement": sr.serialize_agreement(agr) if agr and can_see_costs(actor) else None}

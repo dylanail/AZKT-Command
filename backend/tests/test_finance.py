@@ -13,7 +13,9 @@ import pytest_asyncio
 from sqlalchemy import select
 
 from backend.app.core.errors import Blocked, Denied, ValidationFailed
-from backend.app.domain.commands import dispatch
+from backend.app.domain.actors import Actor
+from backend.app.domain.commands import CommandContext, dispatch
+from backend.app.domain.policy import effective_perms
 from backend.app.models.contacts import Contact
 from backend.app.models.finance import CostAllocation, CostEvidence, CostItem, Invoice, Payment, PaymentAllocation, Sale
 from backend.app.models.runtime import Approval, Event, WorkflowControl
@@ -496,6 +498,105 @@ async def test_K02_inputs_estimates_fx_negative_profit_and_zero_denominator(db, 
     # K03 input: a late cost correction restates the sold cohort with a note
     rs = (await cmd(db, owner, "costs.restate", {"cost_item_id": jpy["id"], "field": "amount_invoiced", "new_value": "52000", "note": "customs corrected"})).data
     assert rs["sales_restated"] and (await fq.sold_cohort(db, datetime(2020, 6, 1, tzinfo=timezone.utc), datetime(2020, 7, 1, tzinfo=timezone.utc)))["restatements"]
+
+
+# ── invariant 4 under concurrency ────────────────────────────────────────────
+async def test_invariant4_concurrent_confirmations_cannot_over_allocate_a_payment(db, owner):
+    """Two sessions confirming two proposals on the same payment serialize on the payment row: the sum of confirmed
+    allocations never exceeds amount − refunded (invariant 4)."""
+    import asyncio
+
+    from backend.app import db as dbmod
+    from backend.tests.conftest import actor_of
+    c = await contact(db)
+    o1 = (await cmd(db, owner, "sales.create_opportunity", {"contact_id": c.id, "pipeline": "irq", "enquiry": "A"})).data["opportunity"]
+    o2 = (await cmd(db, owner, "sales.create_opportunity", {"contact_id": c.id, "pipeline": "irq", "enquiry": "B"})).data["opportunity"]
+    i1 = (await cmd(db, owner, "invoices.create", {"kind": "shipping", "opportunity_id": o1["id"], "amount_due": "300.00", "currency": "USD"})).data["invoice"]
+    i2 = (await cmd(db, owner, "invoices.create", {"kind": "shipping", "opportunity_id": o2["id"], "amount_due": "300.00", "currency": "USD"})).data["invoice"]
+    pay = await confirmed_payment(db, owner, "500.00", contact_id=c.id)
+    a1 = (await cmd(db, owner, "payments.propose_allocation", {"payment_id": pay["id"], "invoice_id": i1["id"], "amount": "300.00"})).data["allocations"][0]
+    a2 = (await cmd(db, owner, "payments.propose_allocation", {"payment_id": pay["id"], "invoice_id": i2["id"], "amount": "300.00"})).data["allocations"][0]
+
+    async def confirm(alloc_id: str):
+        async with dbmod.SessionLocal() as s:
+            ctx = ctx_for(s, owner)
+            try:
+                return (await dispatch(ctx, "payments.confirm_allocation", {"allocation_id": alloc_id})).data["confirmed"]
+            except Blocked as e:
+                return e.message
+
+    r1, r2 = await asyncio.gather(confirm(a1["id"]), confirm(a2["id"]))
+    assert sorted([r1 is True, r2 is True]) == [False, True], (r1, r2)
+    refused = r1 if r1 is not True else r2
+    assert "available amount" in refused
+    total = sum(a.amount for a in (await db.execute(select(PaymentAllocation).where(
+        PaymentAllocation.payment_id == pay["id"], PaymentAllocation.state == "confirmed"))).scalars().all())
+    assert total == D("300.00") <= D("500.00")
+    p = await db.get(Payment, pay["id"])
+    await db.refresh(p)
+    assert p.allocated_amount == D("300.00") and p.allocated_amount <= p.available_amount
+    assert actor_of(owner).is_human
+
+
+# ── invariant 5: a split that stops balancing is never read as recorded ───────
+async def test_invariant5_unbalanced_split_is_visible_and_blocks_confirmation(db, owner):
+    """A multi-vehicle allocation cannot be re-derived when the source amount is restated: the split is flagged
+    unbalanced, every line needs review, and the owner cannot confirm it until it balances again (invariant 5)."""
+    v1, v2 = await vehicle(db), await vehicle(db)
+    it = await item(db, owner, category="transport", vendor_name=f"Shipper {_u()}", currency="USD", amount_invoiced="1000.00")
+    await cmd(db, owner, "costs.allocate", {"cost_item_id": it["id"], "basis": "explicit",
+                                            "lines": [{"vehicle_id": v1.id, "amount": "600.00"}, {"vehicle_id": v2.id, "amount": "400.00"}]})
+    out = (await cmd(db, owner, "costs.restate", {"cost_item_id": it["id"], "field": "amount_invoiced", "new_value": "1200.00",
+                                                  "note": "vendor corrected the invoice"})).data["cost_item"]
+    assert out["allocation_state"] == "unbalanced"
+    m1 = await fq.vehicle_money(db, v1.id)
+    line = next(l for l in m1["lines"] if l["cost_item_id"] == it["id"])
+    assert line["needs_review"] is True and line["unbalanced"] is True and line["allocation_state"] == "unbalanced"
+    assert m1["completeness"]["allocations_needing_review"] >= 1 and m1["completeness"]["label"] == "Estimated"
+    allocs = (await db.execute(select(CostAllocation).where(CostAllocation.cost_item_id == it["id"]))).scalars().all()
+    assert all(any("no longer balance" in r for r in (a.review_reasons or [])) for a in allocs)
+    with pytest.raises(Blocked):
+        await cmd(db, owner, "costs.confirm_allocations", {"cost_item_id": it["id"]})
+    fixed = (await cmd(db, owner, "costs.allocate", {"cost_item_id": it["id"], "basis": "explicit",
+                                                     "lines": [{"vehicle_id": v1.id, "amount": "720.00"},
+                                                               {"vehicle_id": v2.id, "amount": "480.00"}]})).data
+    assert fixed["cost_item"]["allocation_state"] == "balanced" and sum(D(a["amount"]["amount"]) for a in fixed["allocations"]) == D("1200.00")
+    line = next(l for l in (await fq.vehicle_money(db, v1.id))["lines"] if l["cost_item_id"] == it["id"])
+    assert line["needs_review"] is False and line["amount"]["amount"] == "720.00"
+
+
+# ── owner-only matrix ────────────────────────────────────────────────────────
+OWNER_ONLY = [
+    ("costs.confirm_allocations", {"cost_item_id": "cost-item-placeholder"}),
+    ("payments.record_manual_confirmed", {"amount": "100.00", "currency": "USD", "evidence_ref": "bank:1"}),
+    ("payments.confirm_allocation", {"allocation_id": "allocation-placeholder"}),
+    ("payments.reverse_allocation", {"allocation_id": "allocation-placeholder", "reason": "refund", "kind": "refund"}),
+    ("sales.agree", {"sale_id": "sale-placeholder", "price": "8000.00", "currency": "USD"}),
+    ("sales.mark_completed", {"sale_id": "sale-placeholder"}),
+    ("sales.record_credit", {"sale_id": "sale-placeholder", "amount": "100.00", "reason": "return"}),
+    ("ledger.activate_mapping", {"mapping_id": "mapping-placeholder"}),
+]
+
+
+async def test_owner_only_commands_denied_for_manager_mechanic_agent_and_external(db, owner, manager, mechanic):
+    """Owner decisions (money confirmation, agreed terms, completion, ledger authority) are server-side owner-only:
+    managers, mechanics and connectors are Denied; an agent acting for the owner only ever prepares an approval."""
+    from backend.app.models.finance import CostItem as _CI
+    before = len((await db.execute(select(_CI))).scalars().all())
+    external = Actor(kind="external", user_id=owner.id, role="owner", scope="all", perms=effective_perms("owner", {}),
+                     client_id="client-review", client_name="Connector",
+                     client_scopes=["write:sales", "read:costs", "write:vehicles"], client_record_scope={})
+    for name, payload in OWNER_ONLY:
+        for user in (manager, mechanic):
+            with pytest.raises(Denied):
+                await cmd(db, user, name, payload)
+        with pytest.raises(Denied):
+            await dispatch(CommandContext(db=db, actor=external, correlation_id="matrix"), name, payload)
+        agent = await cmd(db, owner, name, payload, kind="agent")
+        assert agent.status == "needs_review" and agent.approval_id, f"{name} executed for an agent"
+        assert agent.changed == []
+    # nothing was created or mutated by any refused attempt
+    assert len((await db.execute(select(_CI))).scalars().all()) == before
 
 
 # ── A03 / router ─────────────────────────────────────────────────────────────
