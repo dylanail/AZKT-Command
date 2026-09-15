@@ -6,8 +6,15 @@ What is proved here:
   status and never invents an arrival date, and class gates are enforced — an unconfigured gate blocks
   publication instead of being skipped (F09);
 * publication is an exact approval bound to package hash + profile version + channel, executed once as
-  a persisted external action; an existing site listing is imported before anything is created and a
-  title-only similarity is a proposal for a person (F05);
+  a persisted external action; an existing site listing is imported before anything is created, and
+  only AZKT's own marker (or a SKU AZKT owns) binds one automatically — anything weaker is a proposal
+  a person confirms, and a listing another vehicle already owns is not offered at all (F05);
+* listing photos are uploaded into the site's own media library and referenced by media id, because a
+  live site cannot fetch an AZKT asset URL; the upload is content-addressed and reused across
+  packages, publications and vehicles, and a publish whose photos are missing fails rather than
+  writing a product without them;
+* the routine hourly scan re-reads everything live on the site, so an edit made in wp-admin after a
+  listing settled is still noticed (spec §12.3);
 * a lost response after the site accepted the write is `unknown`, reconciled **by mapping** before any
   retry, and never produces a second post (F06);
 * an API success with a stale public page is `pending_verification`, never a false `verified`, and
@@ -54,11 +61,15 @@ def _load(stmt):
     return stmt.execution_options(populate_existing=True)
 
 
-async def _profile(db, owner, *, gates: dict | None = LIGHT_GATES) -> SiteProfile:
+async def _profile(db, owner, *, gates: dict | None = LIGHT_GATES, sku_strategy: str | None = None,
+                   sku_prefix: str | None = None) -> SiteProfile:
     """Discover → configure gates → preview on staging → activate. Writes are impossible before this."""
     await db.execute(delete(SiteProfile))
     await db.commit()
     p = (await dispatch(ctx_for(db, owner), "site.discover", {"staging_url": STAGING_URL})).data["profile"]
+    if sku_strategy is not None:
+        await dispatch(ctx_for(db, owner), "site.set_sku_strategy",
+                       {"profile_id": p["id"], "sku_strategy": sku_strategy, "sku_prefix": sku_prefix})
     if gates is not None:
         await dispatch(ctx_for(db, owner), "site.set_listing_gates", {"profile_id": p["id"], "listing_gates": gates})
     await dispatch(ctx_for(db, owner), "site.validate", {"profile_id": p["id"]})
@@ -201,12 +212,13 @@ async def test_media_comes_only_from_approved_public_photos_and_the_hash_covers_
 
 # ── F05: import the existing listing before creating one ─────────────────────
 async def test_F05_existing_product_is_matched_before_a_new_one_is_created(db, owner):
+    """Where AZKT owns the SKU column, its own stock number identifies the existing product."""
     sku = f"STK-{_u()[:4].upper()}"
     site = wordpress_fake(with_existing=False)
     site.add_product(sku=sku, name="2018 Daihatsu Hijet Jumbo", price="9000.00", external_id="501")
     await wordpress_connections(db)
     with install_wordpress(site):
-        await _profile(db, owner)
+        await _profile(db, owner, sku_strategy="stock_no")
         v = await _vehicle(db, owner, stock_no=sku)          # the site already lists this truck
         pkg = (await _build(db, owner, v["id"]))["package"]
         await dispatch(ctx_for(db, owner), "listings.submit_for_review", {"package_id": pkg["id"]})
@@ -219,7 +231,7 @@ async def test_F05_existing_product_is_matched_before_a_new_one_is_created(db, o
         assert pub.external_id == "501" and pub.state == "verified"
         assert len(site.items) == 1                       # the existing product was updated, not duplicated
         assert site.items["501"]["regular_price"] == "12500.00" and site.items["501"]["sku"] == sku
-        assert [h["state"] for h in pub.history][:2] == ["queued", "mapped"]
+        assert "mapped" in [h["state"] for h in pub.history]
         assert pub.package_hash == pkg["package_hash"] and pub.profile_version == 1
 
 
@@ -234,7 +246,7 @@ async def test_F05_title_only_similarity_is_a_proposal_not_an_automatic_mapping(
         await _approve_publish(db, owner, pkg["id"], package_hash=pkg["package_hash"])
         await run_jobs()
         pub = await _publication(db, v["id"])
-        assert pub.state == "needs_review" and "title only" in pub.error
+        assert pub.state == "needs_review" and "no AZKT marker" in pub.error
         assert pub.external_id is None and len(site.items) == 1   # nothing created from a guess
         task = await db.get(Task, pub.manual_task_id)
         assert task is not None and "Confirm the existing website listing" in task.title
@@ -299,7 +311,7 @@ async def test_F07_stale_public_page_is_pending_verification_not_verified(db, ow
     site.add_product(sku=sku, name="2018 Daihatsu Hijet", price="12500.00", external_id="501")
     await wordpress_connections(db)
     with install_wordpress(site):
-        await _profile(db, owner)
+        await _profile(db, owner, sku_strategy="stock_no")
         v = await _vehicle(db, owner, price="15000.00", stock_no=sku)
         site.set_public_stale("501", "regular_price", "12500.00")     # the CDN still serves the old price
         pkg = (await _build(db, owner, v["id"]))["package"]
@@ -327,6 +339,13 @@ async def test_F07_stale_public_page_is_pending_verification_not_verified(db, ow
 def _sessions():
     from backend.app import db as dbmod
     return dbmod.SessionLocal
+
+
+async def _only_this_publication(db, publication_id: str) -> None:
+    """The suite shares one database, so a sweep over *every* live publication would also pick up
+    rows other scenarios left behind. Scope it to the publication under test."""
+    await db.execute(delete(Publication).where(Publication.id != publication_id))
+    await db.commit()
 
 
 async def _milestones(db, vehicle_id: str) -> list[VehicleMilestone]:
@@ -555,6 +574,12 @@ async def test_listings_reconcile_sweep_is_registered():
     assert SWEEPS["listings.reconcile"][1] == svc.VERIFY_SECONDS == 15 * 60
 
 
+async def test_the_availability_scan_is_registered_hourly():
+    """The routine scan only exists if the worker runs it (spec §12.3: every hour)."""
+    from backend.app.domain.jobs import SWEEPS
+    assert SWEEPS["listings.availability_scan"][1] == svc.AVAILABILITY_SCAN_SECONDS == 60 * 60
+
+
 # ── review regressions ───────────────────────────────────────────────────────
 async def test_a_retry_after_a_failed_publish_actually_runs(db, owner):
     """A publication that failed at the provider must be re-publishable. Reusing the dead external
@@ -615,7 +640,7 @@ async def test_F08_a_changed_price_on_the_site_pauses_writes_without_an_editor_m
     site.add_product(sku=sku, name="2018 Daihatsu Hijet", price="1.00", external_id="501")
     await wordpress_connections(db)
     with install_wordpress(site):
-        profile = await _profile(db, owner)
+        profile = await _profile(db, owner, sku_strategy="stock_no")
         v = await _vehicle(db, owner, stock_no=sku)
         site.set_public_stale("501", "regular_price", "1.00")      # the CDN lags: pending_verification
         pkg = (await _build(db, owner, v["id"]))["package"]
@@ -715,3 +740,344 @@ async def test_a_pending_publish_approval_is_bound_to_its_vehicle(db, owner):
         await db.refresh(a)
         assert n >= 1 and a.status == "invalidated" and "review the listing again" in (a.invalidated_reason or "")
         assert not site.items, "nothing was published"
+
+
+# ── media: photos live in the site's own library, never as AZKT URLs ─────────
+async def test_listing_photos_are_uploaded_to_the_site_media_library_and_referenced_by_id(db, owner):
+    """A WooCommerce product cannot fetch `/api/assets/...`: the dashboard needs a signed-in session.
+    Every approved photo is uploaded into the site's media library and the product carries media ids."""
+    site = wordpress_fake(with_existing=False)
+    await wordpress_connections(db)
+    with install_wordpress(site):
+        await _profile(db, owner)
+        v = await _vehicle(db, owner, photos=2)
+        pkg = (await _build(db, owner, v["id"]))["package"]
+        await _approve_publish(db, owner, pkg["id"], package_hash=pkg["package_hash"])
+        await run_jobs()
+        pub = await _publication(db, v["id"])
+        assert pub.state in ("verified", "pending_verification")
+        assert len(site.uploads) == 2                       # both photos really were uploaded
+        product = site.items[pub.external_id]
+        assert len(product["images"]) == 2
+        for img in product["images"]:
+            assert str(img["id"]) in site.media             # the id is a row in the site's library
+            assert img["src"].startswith(f"{site.base_url}/wp-content/uploads/")
+            assert "/api/assets/" not in (img["src"] or "")
+        assert set(pub.media_map.values()) == {str(i["id"]) for i in product["images"]}
+        assert pub.verification["media"]["ok"] is True and pub.verification["media"]["order_ok"] is True
+
+
+async def test_republishing_reuses_the_uploaded_media_instead_of_filling_the_library(db, owner):
+    site = wordpress_fake(with_existing=False)
+    await wordpress_connections(db)
+    with install_wordpress(site):
+        await _profile(db, owner)
+        v = await _vehicle(db, owner, photos=2)
+        pkg = (await _build(db, owner, v["id"]))["package"]
+        await _approve_publish(db, owner, pkg["id"], package_hash=pkg["package_hash"])
+        await run_jobs()
+        assert len(site.uploads) == 2
+        # a new package version for the same truck: the same photos must not be uploaded again
+        await dispatch(ctx_for(db, owner), "vehicles.set_asking_price",
+                       {"vehicle_id": v["id"], "amount": "13900.00", "currency": "USD"})
+        second = (await _build(db, owner, v["id"]))["package"]
+        assert second["package_hash"] != pkg["package_hash"]
+        await _approve_publish(db, owner, second["id"], package_hash=second["package_hash"])
+        await run_jobs()
+        assert len(site.uploads) == 2                       # still two: both were reused
+        assert len(site.media) == 2
+        pub = await _publication(db, v["id"])
+        assert site.items[pub.external_id]["regular_price"] == "13900.00"
+
+
+async def test_two_vehicles_sharing_a_photo_upload_it_once(db, owner):
+    """The checksum map lives per site, not per publication, so the same image never fills the
+    library with duplicates however many listings use it."""
+    from backend.app.models.listings import SiteMedia
+    site = wordpress_fake(with_existing=False)
+    await wordpress_connections(db)
+    with install_wordpress(site):
+        await _profile(db, owner)
+        shared = jpeg(4242)
+        first = None
+        for i in range(2):
+            v = (await dispatch(ctx_for(db, owner), "vehicles.create", {
+                "make": "Daihatsu", "model": "Hijet", "model_year": 2018, "color": "white",
+                "logistics_state": "received", "create_missing_task": False,
+                "stock_no": f"SH-{_u()[:5]}"})).data["vehicle"]
+            await dispatch(ctx_for(db, owner), "vehicles.set_asking_price",
+                           {"vehicle_id": v["id"], "amount": "12500.00", "currency": "USD"})
+            asset_id = await upload_via_commands(db, owner, shared, f"shared-{i}.jpg")
+            await dispatch(ctx_for(db, owner), "assets.link", {"asset_id": asset_id, "entity_kind": "vehicle",
+                                                               "entity_id": v["id"], "role": "photo", "position": 0})
+            await dispatch(ctx_for(db, owner), "assets.classify", {"asset_id": asset_id,
+                                                                   "classification": "listing_photo",
+                                                                   "public_eligible": True})
+            pkg = (await _build(db, owner, v["id"]))["package"]
+            await _approve_publish(db, owner, pkg["id"], package_hash=pkg["package_hash"])
+            await run_jobs()
+            pub = await _publication(db, v["id"])
+            assert pub.state in ("verified", "pending_verification")
+            first = first or list(pub.media_map.values())[0]
+            assert list(pub.media_map.values())[0] == first     # both listings point at one media row
+            assert len(site.items) == i + 1                     # a stablemate is never mistaken for this truck
+        assert len(site.uploads) == 1 and len(site.media) == 1
+        # one row per (site, checksum): the map that makes the reuse possible
+        sha = site.uploads[0]["sha256"]
+        rows = (await db.execute(select(SiteMedia).where(SiteMedia.sha256 == sha,
+                                                         SiteMedia.site_key == site.base_url))).scalars().all()
+        assert len(rows) == 1 and rows[0].media_id == first
+
+
+async def test_a_photo_deleted_from_the_media_library_is_uploaded_again(db, owner):
+    site = wordpress_fake(with_existing=False)
+    await wordpress_connections(db)
+    with install_wordpress(site):
+        await _profile(db, owner)
+        v = await _vehicle(db, owner, photos=1)
+        pkg = (await _build(db, owner, v["id"]))["package"]
+        await _approve_publish(db, owner, pkg["id"], package_hash=pkg["package_hash"])
+        await run_jobs()
+        pub = await _publication(db, v["id"])
+        gone = list(pub.media_map.values())[0]
+        site.delete_media(gone)                             # somebody emptied the library in wp-admin
+        await dispatch(ctx_for(db, owner), "vehicles.set_asking_price",
+                       {"vehicle_id": v["id"], "amount": "14100.00", "currency": "USD"})
+        second = (await _build(db, owner, v["id"]))["package"]
+        await _approve_publish(db, owner, second["id"], package_hash=second["package_hash"])
+        await run_jobs()
+        assert len(site.uploads) == 2                       # re-uploaded rather than left dangling
+        pub = await _publication(db, v["id"])
+        assert list(pub.media_map.values())[0] != gone
+
+
+async def test_a_failed_media_upload_never_publishes_a_product_without_its_photos(db, owner):
+    site = wordpress_fake(with_existing=False)
+    site.fail_media_upload = True
+    await wordpress_connections(db)
+    with install_wordpress(site):
+        await _profile(db, owner)
+        v = await _vehicle(db, owner, photos=1)
+        pkg = (await _build(db, owner, v["id"]))["package"]
+        res = await dispatch(ctx_for(db, owner), "listings.publish",
+                             {"package_id": pkg["id"], "channel": "website",
+                              "expected_package_hash": pkg["package_hash"]})
+        a = await db.get(Approval, res.approval_id)
+        await dispatch(ctx_for(db, owner), "approvals.approve",
+                       {"approval_id": a.id, "expected_version": a.approval_version})
+        await run_jobs()
+        pub = await _publication(db, v["id"])
+        assert pub.state == "failed" and "photos could not be uploaded" in (pub.error or "")
+        assert site.items == {}                             # nothing half-published
+
+
+# ── SKU: the shop numbers its own products ───────────────────────────────────
+async def test_the_sites_own_sku_is_never_overwritten_under_the_default_strategy(db, owner):
+    site = wordpress_fake(with_existing=False)
+    site.add_product(sku="WEB-0099", name="2018 Daihatsu Hijet", price="1.00", external_id="6601",
+                     meta={"azkt_vehicle_id": None})
+    await wordpress_connections(db)
+    with install_wordpress(site):
+        await _profile(db, owner)
+        v = await _vehicle(db, owner, stock_no="STK-4242")
+        pkg = (await _build(db, owner, v["id"]))["package"]
+        await _approve_publish(db, owner, pkg["id"], package_hash=pkg["package_hash"])
+        await run_jobs()
+        pub = await _publication(db, v["id"])
+        # the stock number is not this shop's SKU, so nothing was mapped automatically
+        assert pub.state == "needs_review" and pub.external_id is None
+        assert site.items["6601"]["sku"] == "WEB-0099"
+        # after a person confirms it, publishing updates that product and still leaves the SKU alone
+        await dispatch(ctx_for(db, owner), "listings.link_existing",
+                       {"vehicle_id": v["id"], "external_id": "6601"})
+        again = (await _build(db, owner, v["id"]))["package"]
+        await _approve_publish(db, owner, again["id"], package_hash=again["package_hash"])
+        await run_jobs()
+        assert len(site.items) == 1                         # updated, not duplicated
+        assert site.items["6601"]["sku"] == "WEB-0099"      # the shop's own number survived
+        assert site.items["6601"]["regular_price"] == "12500.00"
+        meta = {m["key"]: m["value"] for m in site.items["6601"]["meta_data"]}
+        assert meta["azkt_vehicle_id"] == v["id"]
+
+
+async def test_linking_refuses_a_listing_that_belongs_to_another_vehicle(db, owner):
+    site = wordpress_fake(with_existing=False)
+    site.add_product(sku="WEB-1", name="Another truck", price="1.00", external_id="777",
+                     meta={"azkt_vehicle_id": "some-other-vehicle"})
+    await wordpress_connections(db)
+    with install_wordpress(site):
+        await _profile(db, owner)
+        v = await _vehicle(db, owner)
+        with pytest.raises(Blocked):
+            await dispatch(ctx_for(db, owner), "listings.link_existing",
+                           {"vehicle_id": v["id"], "external_id": "777"})
+        with pytest.raises(Exception):
+            await dispatch(ctx_for(db, owner), "listings.link_existing",
+                           {"vehicle_id": v["id"], "external_id": "999"})   # no such listing
+
+
+# ── routine hourly availability scan ─────────────────────────────────────────
+async def test_the_hourly_scan_notices_a_price_changed_on_the_site_after_publication(db, owner):
+    """Verification after a publish stops once a listing settles, so a later edit in wp-admin would go
+    unseen. The routine scan re-reads everything that is live and drift pauses writes (spec §12.3)."""
+    site = wordpress_fake(with_existing=False)
+    await wordpress_connections(db)
+    with install_wordpress(site):
+        profile = await _profile(db, owner)
+        v = await _vehicle(db, owner)
+        pkg = (await _build(db, owner, v["id"]))["package"]
+        await _approve_publish(db, owner, pkg["id"], package_hash=pkg["package_hash"])
+        await run_jobs()
+        pub = await _publication(db, v["id"])
+        assert pub.state == "verified" and profile.writes_paused is False
+        # a person changes the price in wp-admin, long after the publish settled
+        site.manual_edit(pub.external_id, "regular_price", "9999.00")
+        await _only_this_publication(db, pub.id)
+        out = await svc.listings_availability_scan(_sessions())
+        assert out["scanned"] == 1
+        assert await run_jobs() >= 1
+        pub = await _publication(db, v["id"])
+        assert pub.state == "mismatch" and "9999.00" in (pub.error or "")
+        await db.refresh(profile)
+        assert profile.writes_paused is True
+
+
+async def test_the_hourly_scan_leaves_a_healthy_listing_verified(db, owner):
+    site = wordpress_fake(with_existing=False)
+    await wordpress_connections(db)
+    with install_wordpress(site):
+        profile = await _profile(db, owner)
+        v = await _vehicle(db, owner)
+        pkg = (await _build(db, owner, v["id"]))["package"]
+        await _approve_publish(db, owner, pkg["id"], package_hash=pkg["package_hash"])
+        await run_jobs()
+        pub = await _publication(db, v["id"])
+        assert pub.state == "verified"
+        attempts_before = pub.attempts
+        await _only_this_publication(db, pub.id)
+        assert (await svc.listings_availability_scan(_sessions()))["scanned"] == 1
+        await run_jobs()
+        pub = await _publication(db, v["id"])
+        assert pub.state == "verified" and pub.attempts == attempts_before   # a scan is not a retry
+        await db.refresh(profile)
+        assert profile.writes_paused is False
+
+
+async def test_a_photo_missing_from_storage_blocks_the_publish_instead_of_publishing_without_it(db, owner):
+    """Railway throws the container filesystem away on every deploy. If photo bytes are gone, the
+    publish must say so on the publication rather than write a product with missing images."""
+    from backend.app.models.assets import Asset
+    from backend.app.services.storage import storage
+    site = wordpress_fake(with_existing=False)
+    await wordpress_connections(db)
+    with install_wordpress(site):
+        await _profile(db, owner)
+        v = await _vehicle(db, owner, photos=1)
+        pkg = (await _build(db, owner, v["id"]))["package"]
+        asset_id = (pkg["media_detail"] or [{}])[0].get("asset_id")
+        asset = await db.get(Asset, asset_id)
+        st = storage()
+        for key in [asset.storage_key] + [d.get("key") for d in (asset.derivatives or {}).values() if isinstance(d, dict)]:
+            if key:
+                st.delete(key)
+        res = await dispatch(ctx_for(db, owner), "listings.publish",
+                             {"package_id": pkg["id"], "channel": "website",
+                              "expected_package_hash": pkg["package_hash"]})
+        a = await db.get(Approval, res.approval_id)
+        await dispatch(ctx_for(db, owner), "approvals.approve",
+                       {"approval_id": a.id, "expected_version": a.approval_version})
+        await run_jobs()
+        pub = await _publication(db, v["id"])
+        assert pub.state == "failed" and pub.error_kind == "unreadable_media"
+        assert "no readable image bytes" in (pub.error or "")
+        assert site.items == {} and site.uploads == []
+
+
+async def test_a_published_product_lands_in_the_mapped_category_with_its_specs_as_attributes(db, owner):
+    """A WooCommerce product with no category never shows on a shop category page, and specs kept only
+    in AZKT meta are invisible to the theme. Both are mapped from what discovery found on the site."""
+    site = wordpress_fake(with_existing=False)
+    await wordpress_connections(db)
+    with install_wordpress(site):
+        profile = await _profile(db, owner)
+        await dispatch(ctx_for(db, owner), "site.set_product_mapping", {
+            "profile_id": profile.id, "category_ids": [9],
+            "attribute_map": {"model_year": {"id": 1, "visible": True}, "color": {"name": "Colour"}}})
+        v = await _vehicle(db, owner)
+        pkg = (await _build(db, owner, v["id"]))["package"]
+        await _approve_publish(db, owner, pkg["id"], package_hash=pkg["package_hash"])
+        await run_jobs()
+        pub = await _publication(db, v["id"])
+        product = site.items[pub.external_id]
+        assert [c["id"] for c in product["categories"]] == ["9"]
+        attrs = {a.get("id") or a.get("name"): a["options"] for a in product["attributes"]}
+        assert attrs[1] == ["2018"] and attrs["Colour"] == ["white"]
+
+
+async def test_an_unmapped_shop_leaves_the_editors_categories_and_attributes_alone(db, owner):
+    """Mapping nothing is a valid answer: AZKT then sends neither field, so updating a product the
+    shop already categorised never wipes that work."""
+    site = wordpress_fake(with_existing=False)
+    site.add_product(sku="WEB-7", name="2018 Daihatsu Hijet", price="1.00", external_id="7701")
+    site.items["7701"]["categories"] = [{"id": "9", "name": "Kei Trucks"}]
+    site.items["7701"]["attributes"] = [{"id": 1, "name": "Transmission", "options": ["Manual"]}]
+    await wordpress_connections(db)
+    with install_wordpress(site):
+        await _profile(db, owner)
+        v = await _vehicle(db, owner)
+        await dispatch(ctx_for(db, owner), "listings.link_existing",
+                       {"vehicle_id": v["id"], "external_id": "7701"})
+        pkg = (await _build(db, owner, v["id"]))["package"]
+        await _approve_publish(db, owner, pkg["id"], package_hash=pkg["package_hash"])
+        await run_jobs()
+        product = site.items["7701"]
+        assert [c["name"] for c in product["categories"]] == ["Kei Trucks"]
+        assert product["attributes"][0]["options"] == ["Manual"]
+        assert product["regular_price"] == "12500.00"      # AZKT's own fields still landed
+
+
+async def test_product_mapping_refuses_taxonomy_the_site_does_not_have(db, owner):
+    from backend.app.core.errors import ValidationFailed
+    site = wordpress_fake(with_existing=False)
+    await wordpress_connections(db)
+    with install_wordpress(site):
+        profile = await _profile(db, owner)
+        with pytest.raises(ValidationFailed):
+            await dispatch(ctx_for(db, owner), "site.set_product_mapping",
+                           {"profile_id": profile.id, "category_ids": [4242]})
+        with pytest.raises(ValidationFailed):
+            await dispatch(ctx_for(db, owner), "site.set_product_mapping",
+                           {"profile_id": profile.id, "attribute_map": {"color": {"id": 99}}})
+        with pytest.raises(ValidationFailed):
+            await dispatch(ctx_for(db, owner), "site.set_product_mapping",
+                           {"profile_id": profile.id, "attribute_map": {"color": {}}})
+        await db.refresh(profile)
+        assert list(profile.category_ids or []) == [] and dict(profile.attribute_map or {}) == {}
+
+
+async def test_the_original_file_is_never_published_only_the_stripped_rendition(db, owner):
+    """The web rendition is the copy with its metadata removed. Publishing the original instead would
+    put the camera's EXIF — the GPS fix of wherever the truck was photographed — on a public page."""
+    from backend.app.models.assets import Asset
+    from backend.app.services.storage import storage
+    site = wordpress_fake(with_existing=False)
+    await wordpress_connections(db)
+    with install_wordpress(site):
+        await _profile(db, owner)
+        v = await _vehicle(db, owner, photos=1)
+        pkg = (await _build(db, owner, v["id"]))["package"]
+        asset = await db.get(Asset, (pkg["media_detail"] or [{}])[0].get("asset_id"))
+        web = (asset.derivatives or {}).get("web") or {}
+        assert web.get("key") and asset.storage_key != web["key"]
+        storage().delete(web["key"])          # only the stripped copy is gone; the original remains
+        res = await dispatch(ctx_for(db, owner), "listings.publish",
+                             {"package_id": pkg["id"], "channel": "website",
+                              "expected_package_hash": pkg["package_hash"]})
+        a = await db.get(Approval, res.approval_id)
+        await dispatch(ctx_for(db, owner), "approvals.approve",
+                       {"approval_id": a.id, "expected_version": a.approval_version})
+        await run_jobs()
+        pub = await _publication(db, v["id"])
+        assert pub.state == "failed" and pub.error_kind == "unreadable_media"
+        assert "EXIF is not stripped" in (pub.error or "")
+        assert site.uploads == [] and site.items == {}

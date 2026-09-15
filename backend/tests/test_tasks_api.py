@@ -257,3 +257,103 @@ async def test_cases_and_promises_views_are_scoped_and_name_contacts_only_with_c
     assert [i["text"] for i in items] == ["Call back with the price"] and items[0]["contact_name"] is None
     # the literal path segments never resolve to a task id lookup
     assert (await client.get("/api/tasks/cases?status=all")).status_code == 200
+
+
+async def test_case_actions_resolve_re_date_and_respect_record_scope(client, db, owner, mechanic):
+    """Cases were a read-only list. Resolving one from the Tasks screen goes through cases.update,
+    which is writable on exactly the terms the list is readable on."""
+    from backend.app.models.tasks import Case
+    mine = (await dispatch(ctx_for(db, owner), "vehicles.create", {
+        "make": "Suzuki", "model": "Carry", "logistics_state": "received", "create_missing_task": False,
+        "stock_no": f"CA-{uuid.uuid4().hex[:6]}"})).data["vehicle"]
+    hidden = (await dispatch(ctx_for(db, owner), "vehicles.create", {
+        "make": "Honda", "model": "Acty", "logistics_state": "received", "create_missing_task": False,
+        "stock_no": f"CB-{uuid.uuid4().hex[:6]}"})).data["vehicle"]
+    t = (await dispatch(ctx_for(db, owner), "tasks.create", {"title": "Inspect", "vehicle_id": mine["id"]})).data["task"]
+    await dispatch(ctx_for(db, owner), "tasks.assign", {"task_id": t["id"], "owner_user_id": mechanic.id})
+    open_case = Case(title="Quote from MOL", kind="shipping_quote", status="waiting", vehicle_id=mine["id"],
+                     waiting_on="MOL")
+    other = Case(title="Dispute", kind="dispute", status="open", vehicle_id=hidden["id"])
+    db.add_all([open_case, other])
+    await db.commit()
+
+    login(client, owner)
+    # resolving needs evidence or a summary: an empty close is refused, not silently accepted
+    r = await client.post(f"/api/tasks/cases/{open_case.id}/resolve", json={})
+    assert r.status_code == 409 and r.json()["error"] == "blocked"
+    r = await client.post(f"/api/tasks/cases/{open_case.id}/resolve",
+                          json={"summary": "MOL quoted 210,000 JPY", "expected_version": open_case.version})
+    assert r.status_code == 200, r.text
+    assert r.json()["data"]["case"]["status"] == "resolved"
+    assert r.json()["data"]["case"]["resolved_at"] is not None
+
+    # a next check can be set without changing the status
+    r = await client.post(f"/api/tasks/cases/{other.id}/update",
+                          json={"next_action": "Chase the broker", "next_check_at": "2026-10-01T09:00:00",
+                                "timezone": "America/Phoenix"})
+    assert r.status_code == 200 and r.json()["data"]["case"]["status"] == "open"
+    assert r.json()["data"]["case"]["next_check_at"].startswith("2026-10-01T16:00")
+
+    r = await client.post(f"/api/tasks/cases/{open_case.id}/nonsense", json={})
+    assert r.status_code == 404
+
+    login(client, mechanic)   # assigned scope: the hidden vehicle's case is not writable
+    r = await client.post(f"/api/tasks/cases/{other.id}/resolve", json={"summary": "x"})
+    assert r.status_code == 403 and r.json()["error"] == "denied"
+    await db.refresh(other)
+    assert other.status == "open"
+
+
+async def test_promise_actions_record_kept_missed_and_withdrawn(client, db, owner):
+    """A promise had no update command at all, so it could never be marked kept or missed."""
+    from backend.app.models.contacts import Contact
+    from backend.app.models.tasks import Commitment
+    c = Contact(name="Maria Reyes")
+    db.add(c)
+    await db.flush()
+    # unique texts: the suite shares one database and another scenario also promises a call back
+    tag = uuid.uuid4().hex[:6]
+    kept = Commitment(text=f"Call back with the price {tag}", contact_id=c.id, status="open")
+    missed = Commitment(text=f"Send photos Friday {tag}", contact_id=c.id, status="open")
+    db.add_all([kept, missed])
+    await db.commit()
+
+    login(client, owner)
+    r = await client.post(f"/api/tasks/promises/{kept.id}/kept", json={"expected_version": kept.version})
+    assert r.status_code == 200 and r.json()["data"]["commitment"]["status"] == "met"
+
+    # closing one as missed says what happened; an unexplained close is refused
+    r = await client.post(f"/api/tasks/promises/{missed.id}/missed", json={})
+    assert r.status_code == 409 and r.json()["error"] == "blocked"
+    r = await client.post(f"/api/tasks/promises/{missed.id}/missed",
+                          json={"note": "Photos were not ready; customer told on Monday"})
+    assert r.json()["data"]["commitment"]["status"] == "missed"
+
+    # a closed promise is not re-dated behind the owner's back
+    r = await client.post(f"/api/tasks/promises/{missed.id}/update", json={"due_at": "2026-10-02T10:00:00"})
+    assert r.status_code == 409 and r.json()["error"] == "blocked"
+    r = await client.post(f"/api/tasks/promises/{missed.id}/reopen", json={})
+    assert r.json()["data"]["commitment"]["status"] == "open"
+    r = await client.post(f"/api/tasks/promises/{missed.id}/update",
+                          json={"due_at": "2026-10-02T10:00:00", "timezone": "America/Phoenix"})
+    assert r.json()["data"]["commitment"]["due_at"].startswith("2026-10-02T17:00")
+
+    # and the closed rows leave the open view
+    r = await client.get("/api/tasks/promises?status=open")
+    assert kept.text not in [i["text"] for i in r.json()["items"]]
+    r = await client.get("/api/tasks/promises?status=met")
+    assert kept.text in [i["text"] for i in r.json()["items"]]
+
+
+async def test_a_promise_marked_kept_twice_is_not_silently_reclosed(client, db, owner):
+    from backend.app.models.tasks import Commitment
+    p = Commitment(text="Hold the truck until Tuesday", status="open")
+    db.add(p)
+    await db.commit()
+    login(client, owner)
+    assert (await client.post(f"/api/tasks/promises/{p.id}/withdraw",
+                              json={"note": "Customer cancelled"})).json()["data"]["commitment"]["status"] == "withdrawn"
+    r = await client.post(f"/api/tasks/promises/{p.id}/kept", json={})
+    assert r.status_code == 409 and r.json()["error"] == "blocked"
+    await db.refresh(p)
+    assert p.status == "withdrawn"

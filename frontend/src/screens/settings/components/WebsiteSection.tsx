@@ -18,7 +18,7 @@ import { useCommand } from "../../../lib/useCommand";
 import { useQuery } from "../../../lib/useQuery";
 import {
   Button, Chip, EmptyState, ErrorState, Expander, Field, GlassPanel, Input, KeyValues, Loading, Notice,
-  NotRecorded, When,
+  NotRecorded, Select, When,
 } from "../../../ui";
 import type { ConnectionsResp } from "./types";
 
@@ -41,9 +41,31 @@ interface SiteProfile {
   pause_reason: string | null;
   preview: { at?: string; staging_url?: string; ok?: boolean; errors?: string[]; warnings?: string[]; written?: boolean };
   connection_id: string | null;
+  sku_strategy?: string;
+  sku_prefix?: string | null;
+  category_ids?: Array<string | number>;
+  attribute_map?: Record<string, { id?: string | number; name?: string; visible?: boolean }>;
   validated_at: string | null; activated_at: string | null; activated_by: string | null;
   discovered_at: string | null; drift_detected_at: string | null; created_at: string | null;
 }
+/** The slices of `discovered` this screen reads (adapters/wordpress.py discover()). */
+interface SiteTaxonomy {
+  product_categories?: Array<{ id: number | string; name?: string; slug?: string }>;
+  product_attributes?: Array<{ id: number | string; name?: string; slug?: string }>;
+}
+/* Recorded vehicle facts a shop usually shows on the product. Mapping is per site attribute and
+   entirely optional; an unmapped spec still lives on the vehicle and in the listing copy. */
+const SPEC_KEYS: Array<{ key: string; label: string }> = [
+  { key: "make", label: "Make" },
+  { key: "model", label: "Model" },
+  { key: "model_year", label: "Year" },
+  { key: "color", label: "Colour" },
+  { key: "grade", label: "Grade" },
+  { key: "transmission", label: "Transmission" },
+  { key: "mileage", label: "Mileage" },
+  { key: "engine", label: "Engine" },
+];
+
 interface ProfileOverview {
   active: SiteProfile | null;
   versions: SiteProfile[];
@@ -95,11 +117,44 @@ export function WebsiteSection() {
   const profile = q.data?.active || q.data?.versions?.[0] || null;
   const [baseUrl, setBaseUrl] = useState("");
   const [stagingUrl, setStagingUrl] = useState("");
+  const [skuStrategy, setSkuStrategy] = useState("preserve");
+  const [skuPrefix, setSkuPrefix] = useState("");
   useEffect(() => {
     if (!profile) return;
     setBaseUrl((b) => b || profile.base_url || "");
     setStagingUrl((s) => s || profile.staging_url || "");
+    setSkuStrategy(profile.sku_strategy || "preserve");
+    setSkuPrefix(profile.sku_prefix || "");
   }, [profile?.id]);  // eslint-disable-line react-hooks/exhaustive-deps
+  const skuDirty = !!profile
+    && (skuStrategy !== (profile.sku_strategy || "preserve") || skuPrefix !== (profile.sku_prefix || ""));
+
+  /* Shop categories and product attributes, chosen only from taxonomy discovery actually found. */
+  const siteCategories = ((profile?.discovered as SiteTaxonomy | undefined)?.product_categories) || [];
+  const siteAttributes = ((profile?.discovered as SiteTaxonomy | undefined)?.product_attributes) || [];
+  const [categoryIds, setCategoryIds] = useState<string[]>([]);
+  const [attrMap, setAttrMap] = useState<Record<string, string>>({});
+  useEffect(() => {
+    if (!profile) return;
+    setCategoryIds((profile.category_ids || []).map(String));
+    const m: Record<string, string> = {};
+    for (const [key, cfg] of Object.entries(profile.attribute_map || {})) {
+      if (cfg?.id != null) m[key] = String(cfg.id);
+    }
+    setAttrMap(m);
+  }, [profile?.id]);  // eslint-disable-line react-hooks/exhaustive-deps
+  const savedCats = (profile?.category_ids || []).map(String).sort().join(",");
+  const savedAttrs = JSON.stringify(Object.fromEntries(
+    Object.entries(profile?.attribute_map || {}).filter(([, c]) => c?.id != null).map(([k, c]) => [k, String(c!.id)])));
+  const mappingDirty = !!profile
+    && (categoryIds.slice().sort().join(",") !== savedCats || JSON.stringify(attrMap) !== savedAttrs);
+  const saveMapping = () => act("product-mapping", {
+    profile_id: profile!.id,
+    category_ids: categoryIds,
+    attribute_map: Object.fromEntries(Object.entries(attrMap)
+      .filter(([, id]) => id)
+      .map(([key, id]) => [key, { id, visible: true }])),
+  }, "Saved. It applies to the next publish.");
 
   /* Is the site connected at all? The adapter refuses with these exact reasons (adapters/wordpress.py). */
   const wp = conns.data?.items?.find((c) => c.provider === "wordpress") || null;
@@ -220,6 +275,96 @@ export function WebsiteSection() {
                       <Input type="url" value={stagingUrl} onChange={(e) => setStagingUrl(e.target.value)} placeholder="https://staging…" disabled={!manage && !draft} />
                     </Field>
                   </div>
+
+                  <div className="form-grid">
+                    <Field label="Product numbers (SKU)"
+                      hint="Your shop numbers its own products, so by default AZKT never touches that column and
+                            recognises its own listings by a hidden marker instead.">
+                      <Select value={skuStrategy} onChange={(e) => setSkuStrategy(e.target.value)} disabled={!manage}>
+                        <option value="preserve">Leave the site's SKU alone (recommended)</option>
+                        <option value="stock_no">Write the AZKT stock number as the SKU</option>
+                        <option value="prefix">Write a prefixed stock number</option>
+                      </Select>
+                    </Field>
+                    {skuStrategy === "prefix" ? (
+                      <Field label="Prefix" hint="Goes in front of the stock number, e.g. AZKT-">
+                        <Input value={skuPrefix} onChange={(e) => setSkuPrefix(e.target.value)}
+                          placeholder="AZKT-" disabled={!manage} />
+                      </Field>
+                    ) : null}
+                  </div>
+                  {siteCategories.length || siteAttributes.length ? (
+                    <div className="stack-sm">
+                      <span className="fs13 t3">
+                        Where a published truck lands in the shop. Nothing here is guessed — these are the
+                        categories and attributes read from your site. Leaving them empty means AZKT sends
+                        neither, so anything your editors set stays exactly as it is.
+                      </span>
+                      {siteCategories.length ? (
+                        <Field label="Shop categories"
+                          hint={categoryIds.length ? undefined
+                            : "A product with no category never appears on a category page."}>
+                          <div className="row-wrap">
+                            {siteCategories.map((c) => {
+                              const id = String(c.id);
+                              const on = categoryIds.includes(id);
+                              return (
+                                <Button key={id} size="xs" variant={on ? "primary" : "soft"} disabled={!manage}
+                                  disabledReason={whyNot("connections")}
+                                  onClick={() => setCategoryIds((cur) =>
+                                    on ? cur.filter((x) => x !== id) : [...cur, id])}>
+                                  {c.name || c.slug || id}
+                                </Button>
+                              );
+                            })}
+                          </div>
+                        </Field>
+                      ) : null}
+                      {siteAttributes.length ? (
+                        <div className="form-grid">
+                          {SPEC_KEYS.map(({ key, label }) => (
+                            <Field key={key} label={label}>
+                              <Select value={attrMap[key] || ""} disabled={!manage}
+                                onChange={(e) => setAttrMap((m) => ({ ...m, [key]: e.target.value }))}>
+                                <option value="">Don't show it on the product</option>
+                                {siteAttributes.map((a) => (
+                                  <option key={String(a.id)} value={String(a.id)}>{a.name || a.slug}</option>
+                                ))}
+                              </Select>
+                            </Field>
+                          ))}
+                        </div>
+                      ) : null}
+                      {mappingDirty ? (
+                        <div className="row-wrap">
+                          <Button variant="soft" loading={busy("product-mapping")} disabled={!manage}
+                            disabledReason={whyNot("connections")} onClick={saveMapping}>
+                            Save where listings go
+                          </Button>
+                          <Button variant="ghost" onClick={() => {
+                            setCategoryIds((profile.category_ids || []).map(String));
+                            setAttrMap(Object.fromEntries(Object.entries(profile.attribute_map || {})
+                              .filter(([, c]) => c?.id != null).map(([k, c]) => [k, String(c!.id)])));
+                          }}>Undo</Button>
+                        </div>
+                      ) : null}
+                    </div>
+                  ) : null}
+
+                  {skuDirty ? (
+                    <div className="row-wrap">
+                      <Button variant="soft" loading={busy("sku")} disabled={!manage} disabledReason={whyNot("connections")}
+                        onClick={() => act("sku", { profile_id: profile.id, sku_strategy: skuStrategy,
+                                                    sku_prefix: skuPrefix.trim() || null },
+                                          "Saved. It applies to the next publish.")}>
+                        Save the SKU rule
+                      </Button>
+                      <Button variant="ghost" onClick={() => {
+                        setSkuStrategy(profile.sku_strategy || "preserve");
+                        setSkuPrefix(profile.sku_prefix || "");
+                      }}>Undo</Button>
+                    </div>
+                  ) : null}
 
                   <div className="row-wrap">
                     <Button variant="soft" loading={busy("discover")} disabled={!!discoverReason} disabledReason={discoverReason}

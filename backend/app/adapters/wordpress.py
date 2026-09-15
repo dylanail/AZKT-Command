@@ -14,6 +14,10 @@ Two authentications with different capabilities are kept apart:
 `WebsiteAdapter` is the facade the listings service talks to; it routes each operation to the API that
 owns it according to the active site profile (`content_type` product | post | custom).
 
+Listing photos are **uploaded into the site's own media library** and referenced by media id. The site
+never fetches an AZKT URL: the dashboard requires a signed-in session, so a `src` URL would publish a
+product with no images. Uploads are content-addressed by the asset checksum and reused across publishes.
+
 `FakeWordPress` implements the same facade in memory with the fixtures the acceptance scenarios need:
 an existing product for a vehicle with no local mapping (F05), a manual price edit by a human editor
 (F08), a public page whose cache lags behind the API (F07) and a network failure *after* the site
@@ -22,11 +26,14 @@ accepted a write (F06).
 from __future__ import annotations
 
 import base64
+import logging
 import re
 from typing import Any
 
 from ..core.destinations import assert_destination_allowed
 from ..core.errors import ProviderError, Unsupported
+
+log = logging.getLogger("azkt.wordpress")
 
 WP_NAMESPACE = "wp/v2"
 WC_NAMESPACE = "wc/v3"
@@ -50,6 +57,12 @@ def _fail(kind: str, message: str, **extra) -> ProviderError:
     return ProviderError(message, kind=kind, provider="wordpress", **extra)
 
 
+def _safe_filename(name: str) -> str:
+    """A filename WordPress will accept verbatim: no path separators, no quotes, no spaces."""
+    base = re.sub(r"[^A-Za-z0-9._-]+", "-", (name or "photo.jpg").strip()).strip("-.") or "photo.jpg"
+    return base[:96]
+
+
 class UnknownWriteResult(Exception):
     """The site may have accepted the write but the result was lost (network failure after accept)."""
 
@@ -66,6 +79,12 @@ DEFAULT_PROFILE_FIELD_MAP = {
              "sku": "meta.stock_no", "media": "meta.gallery", "availability": "meta.availability",
              "visibility": "status", "status": "status"},
 }
+# How the SKU field is treated on the installed site. The live AZKT catalogue already uses its own SKUs
+# that are not stock numbers, so the default leaves that column to the site's editors and identifies a
+# managed listing by the `azkt_vehicle_id` meta instead.
+SKU_STRATEGIES = ("preserve", "stock_no", "prefix")
+DEFAULT_SKU_STRATEGY = "preserve"
+
 DEFAULT_AVAILABILITY_MAP = {
     "product": {"available": {"stock_status": "instock", "catalog_visibility": "visible", "purchasable": False},
                 "reserved": {"stock_status": "outofstock", "catalog_visibility": "visible", "purchasable": False},
@@ -97,6 +116,95 @@ def availability_map_for(profile: dict | None) -> dict:
     return base
 
 
+def product_taxonomy(package: dict, profile: dict | None) -> dict:
+    """Category and attribute fields for a WooCommerce product, or {} when nothing is mapped.
+
+    A product created with no category does not appear in any shop category page, and specs that live
+    only in AZKT meta are invisible to the theme. Both are therefore mappable — but only from what
+    discovery actually found on the site, and only once the owner has chosen. When nothing is mapped
+    the keys are left out entirely, which also means an AZKT update never wipes categories or
+    attributes an editor set by hand.
+    """
+    out: dict[str, Any] = {}
+    category_ids = [c for c in ((profile or {}).get("category_ids") or []) if c not in (None, "")]
+    if category_ids:
+        out["categories"] = [{"id": _as_media_id(c)} for c in category_ids]
+    amap = (profile or {}).get("attribute_map") or {}
+    if amap:
+        by_key = {}
+        for spec in (package.get("specs") or []):
+            key, value = spec.get("key"), spec.get("value")
+            if key and value not in (None, "") and key not in by_key:
+                by_key[key] = str(value)
+        attributes = []
+        for position, (key, cfg) in enumerate(amap.items()):
+            value = by_key.get(key)
+            if not value or not isinstance(cfg, dict):
+                continue
+            attr: dict[str, Any] = {"options": [value], "visible": cfg.get("visible", True),
+                                    "variation": False, "position": position}
+            if cfg.get("id"):
+                attr["id"] = _as_media_id(cfg["id"])
+            else:
+                attr["name"] = cfg.get("name") or key.replace("_", " ").title()
+            attributes.append(attr)
+        if attributes:
+            out["attributes"] = attributes
+    return out
+
+
+def sku_strategy_for(profile: dict | None) -> str:
+    strategy = ((profile or {}).get("sku_strategy") or DEFAULT_SKU_STRATEGY)
+    return strategy if strategy in SKU_STRATEGIES else DEFAULT_SKU_STRATEGY
+
+
+def site_sku(package: dict, profile: dict | None) -> str | None:
+    """The SKU AZKT writes, or None when the site's own SKU column is left alone.
+
+    `preserve` is the default: the installed catalogue numbers products its own way, so AZKT never
+    overwrites that column and identifies its listings by the `azkt_vehicle_id` meta.
+    """
+    strategy = sku_strategy_for(profile)
+    stock_no = package.get("sku") or package.get("stock_no")
+    if strategy == "preserve" or not stock_no:
+        return None
+    if strategy == "prefix":
+        prefix = (profile or {}).get("sku_prefix") or ""
+        return f"{prefix}{stock_no}"
+    return str(stock_no)
+
+
+def media_entries(package: dict, profile: dict | None) -> list[dict]:
+    """Ordered image references for the site payload.
+
+    An entry carries the uploaded media id whenever one is known — that is what the site stores. A
+    `src` is only ever included as context for a preview; a payload that reaches a live site without
+    ids is rejected before the write (`unuploaded_media`), never sent in the hope the site fetches it.
+    """
+    out = []
+    for i, m in enumerate(package.get("media") or []):
+        entry: dict[str, Any] = {"alt": m.get("alt") or package.get("headline"), "position": i,
+                                 "sha256": m.get("sha256")}
+        if m.get("media_id"):
+            entry["id"] = _as_media_id(m["media_id"])
+        if m.get("media_src") or m.get("url"):
+            entry["src"] = m.get("media_src") or m.get("url")
+        out.append(entry)
+    return out
+
+
+def _as_media_id(value) -> Any:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return value
+
+
+def unuploaded_media(package: dict) -> list[str]:
+    """Checksums of approved photos that have no media id yet."""
+    return [m.get("sha256") or m.get("asset_id") or "?" for m in (package.get("media") or []) if not m.get("media_id")]
+
+
 def render_payload(package: dict, profile: dict | None) -> dict:
     """Deterministic mapping of a listing package onto the site's schema. Pure: never calls the site."""
     fmap = field_map_for(profile)
@@ -117,11 +225,17 @@ def render_payload(package: dict, profile: dict | None) -> dict:
     put("short_description", package.get("short_description"))
     if package.get("price") is not None:
         put("price", str(package["price"]))
-    put("sku", package.get("sku"))
-    media = [{"src": m.get("url"), "alt": m.get("alt") or package.get("headline"), "sha256": m.get("sha256"),
-              "position": i} for i, m in enumerate(package.get("media") or [])]
+    put("sku", site_sku(package, profile))
+    media = media_entries(package, profile)
     if media:
-        put("media", media)
+        if content_shape(profile) == "product":
+            put("media", media)
+        else:
+            # a post/custom type stores the gallery as meta: ids only, in order
+            put("media", [m.get("id") for m in media if m.get("id")])
+        first = next((m.get("id") for m in media if m.get("id")), None)
+        if first is not None and content_shape(profile) != "product":
+            out["featured_media"] = first
     avail = availability_map_for(profile).get(package.get("availability") or "available", {})
     for k, v in avail.items():
         if k == "meta":
@@ -132,6 +246,8 @@ def render_payload(package: dict, profile: dict | None) -> dict:
         meta["azkt_disclosures"] = list(package["disclosures"])
     if package.get("specs"):
         meta["azkt_specs"] = list(package["specs"])
+    if content_shape(profile) == "product":
+        out.update(product_taxonomy(package, profile))
     meta["azkt_package_hash"] = package.get("package_hash")
     meta["azkt_vehicle_id"] = package.get("vehicle_id")
     if meta:
@@ -159,6 +275,14 @@ def validate_package(package: dict, profile: dict | None) -> dict:
         errors.append(f"needs at least {media_rules['min']} images")
     if not package.get("media"):
         warnings.append("no images in the package")
+    missing = unuploaded_media(package)
+    if missing:
+        # not an error: validation also runs on a preview, before anything is uploaded
+        warnings.append(f"{len(missing)} photo(s) are not in the site media library yet")
+    if content_shape(profile) == "product" and not ((profile or {}).get("category_ids") or []):
+        known = (profile or {}).get("discovered", {}).get("product_categories") or []
+        if known:
+            warnings.append("no shop category is mapped, so a new product will not appear in any category page")
     return {"ok": not errors, "errors": errors, "warnings": warnings, "payload": payload}
 
 
@@ -175,13 +299,19 @@ class _HttpBase:
     def _auth_params(self) -> dict:
         return {}
 
-    async def request(self, method: str, path: str, *, params: dict | None = None, json: dict | None = None) -> Any:
+    async def request(self, method: str, path: str, *, params: dict | None = None, json: dict | None = None,
+                      content: bytes | None = None, headers: dict | None = None,
+                      timeout: float | None = None) -> Any:
+        """One HTTP call. `content` sends a raw body (media upload) instead of JSON — the two are
+        mutually exclusive, exactly as httpx requires."""
         import httpx
         url = path if path.startswith("http") else f"{self.base_url}{path}"
         try:
-            async with httpx.AsyncClient(timeout=self.timeout, follow_redirects=True) as c:
+            async with httpx.AsyncClient(timeout=timeout or self.timeout, follow_redirects=True) as c:
                 r = await c.request(method, url, params={**(params or {}), **self._auth_params()} or None,
-                                    json=json, headers={"Accept": "application/json", **self._auth_headers()})
+                                    json=json if content is None else None, content=content,
+                                    headers={"Accept": "application/json", **self._auth_headers(),
+                                             **(headers or {})})
         except httpx.TimeoutException as e:
             if method != "GET":
                 # the site may have accepted the write: never retried blindly (F06)
@@ -243,6 +373,39 @@ class WordPressAdapter(_HttpBase):
             return {"read": True, "upload": bool(self.app_user and self.app_password)}
         except ProviderError as e:
             return {"read": False, "upload": False, "error": error_kind(e)}
+
+    async def media_item(self, media_id) -> dict | None:
+        """The media row, or None when it is gone (deleted in wp-admin)."""
+        try:
+            return await self.request("GET", f"/wp-json/{WP_NAMESPACE}/media/{media_id}",
+                                      params={"context": "edit"})
+        except ProviderError as e:
+            if str((e.detail or {}).get("kind")) == "invalid_input":
+                return None
+            raise
+
+    async def upload_media(self, *, filename: str, content_type: str, data: bytes,
+                           alt: str | None = None, title: str | None = None) -> dict:
+        """Upload one image into the site's media library and return the created row.
+
+        WordPress takes the raw bytes with a `Content-Disposition` filename; this is the only place
+        AZKT sends a body that is not JSON. Alt text is set in a second call because the upload
+        endpoint ignores it on multipart-less uploads.
+        """
+        row = await self.request(
+            "POST", f"/wp-json/{WP_NAMESPACE}/media", content=data,
+            headers={"Content-Type": content_type,
+                     "Content-Disposition": f'attachment; filename="{_safe_filename(filename)}"'},
+            timeout=max(self.timeout, 120.0))
+        media_id = row.get("id")
+        if media_id is not None and (alt or title):
+            try:
+                row = await self.request("POST", f"/wp-json/{WP_NAMESPACE}/media/{media_id}",
+                                         json={k: v for k, v in (("alt_text", alt), ("title", title)) if v})
+            except ProviderError:
+                # the image is uploaded and usable; failing to label it is not a failed upload
+                log.warning("media %s uploaded but alt text could not be set", media_id)
+        return row
 
     async def posts(self, post_type: str = "posts", **params) -> list[dict]:
         rows = await self.request("GET", f"/wp-json/{WP_NAMESPACE}/{post_type}", params=params)
@@ -395,17 +558,57 @@ class WebsiteAdapter:
         return {"ok": res["ok"], "payload": res["payload"], "errors": res["errors"], "warnings": res["warnings"],
                 "target": (profile or {}).get("staging_url") or self.base_url, "written": False}
 
+    # ── media ────────────────────────────────────────────────────────────
+    async def ensure_media(self, items: list[dict], known: dict | None = None) -> dict:
+        """Make sure every approved photo exists in the site's media library; return {sha256: entry}.
+
+        `items` are `{sha256, filename, content_type, data, alt, title}`. `known` is the checksum →
+        media id map recorded by earlier publishes: an id that the site still has is reused, an id
+        the site no longer has is re-uploaded. Uploading is content-addressed, so republishing a
+        vehicle, or publishing a second vehicle that shares a photo, never uploads twice.
+        """
+        if self.wp is None:
+            raise Unsupported("WordPress credentials are not configured; photos cannot be uploaded")
+        self._assert_writable("upload_media")
+        out: dict[str, dict] = {}
+        known = dict(known or {})
+        for item in items:
+            sha = item.get("sha256")
+            if not sha:
+                continue
+            if sha in out:
+                continue
+            existing = known.get(sha)
+            if existing:
+                row = await self.wp.media_item(existing)
+                if row and row.get("id") is not None:
+                    out[sha] = _media_entry(row, reused=True)
+                    continue
+            row = await self.wp.upload_media(filename=item.get("filename") or f"{sha[:12]}.jpg",
+                                             content_type=item.get("content_type") or "image/jpeg",
+                                             data=item["data"], alt=item.get("alt"), title=item.get("title"))
+            out[sha] = _media_entry(row, reused=False)
+        return out
+
     # ── writes ───────────────────────────────────────────────────────────
     def _assert_writable(self, op: str) -> None:
         """H08: this adapter really delivers, so outside production it may only write to an
-        allowlisted site. Every write goes through here — listing media travel inside these payloads
-        as URLs, so there is no separate upload path to leave unguarded. `FakeWordPress` never comes
-        here: nothing leaves the process, exactly like the memory email transport."""
+        allowlisted site. Every write goes through here, media uploads included (`ensure_media` calls
+        it before the first byte leaves). `FakeWordPress` never comes here: nothing leaves the
+        process, exactly like the memory email transport."""
         targets = {self.base_url, self.public_base_url} - {""}
         assert_destination_allowed("site", *sorted(targets))
 
+    def _assert_media_uploaded(self, package: dict) -> None:
+        missing = unuploaded_media(package)
+        if missing:
+            raise Unsupported(
+                f"{len(missing)} listing photo(s) are not in the site media library; upload them before "
+                "publishing (the site cannot fetch an AZKT asset URL)", unuploaded_media=missing)
+
     async def upsert_draft(self, package: dict, profile: dict | None, external_id: str | None = None) -> dict:
         self._assert_writable("upsert_draft")
+        self._assert_media_uploaded(package)
         payload = {**render_payload(package, profile), "status": "draft"}
         if content_shape(profile) == "product":
             if self.woo is None:
@@ -423,6 +626,7 @@ class WebsiteAdapter:
 
     async def publish(self, external_id: str, package: dict, profile: dict | None) -> dict:
         self._assert_writable("publish")
+        self._assert_media_uploaded(package)
         payload = {**render_payload(package, profile), "status": "publish"}
         if content_shape(profile) == "product":
             row = await self.woo.upsert_product(payload, external_id)
@@ -491,8 +695,21 @@ class WebsiteAdapter:
         raise Unsupported("payment/tax/shipping settings are read for context only and never changed")
 
 
+def _media_entry(row: dict, *, reused: bool) -> dict:
+    details = (row.get("media_details") or {})
+    sizes = details.get("sizes") or {}
+    return {"id": row.get("id"), "src": row.get("source_url"),
+            "alt": row.get("alt_text"), "reused": reused,
+            "width": details.get("width"), "height": details.get("height"),
+            "thumbnail": ((sizes.get("thumbnail") or {}).get("source_url"))}
+
+
 def _normalize_product(p: dict) -> dict:
     return {"external_id": str(p.get("id")), "kind": "product", "sku": p.get("sku"), "title": p.get("name"),
+            "categories": [{"id": str(c.get("id")), "name": c.get("name")} for c in (p.get("categories") or [])
+                           if isinstance(c, dict)],
+            "attributes": [{"id": a.get("id"), "name": a.get("name"), "options": list(a.get("options") or [])}
+                           for a in (p.get("attributes") or []) if isinstance(a, dict)],
             "status": p.get("status"), "price": p.get("regular_price"), "sale_price": p.get("sale_price"),
             "stock_status": p.get("stock_status"), "visibility": p.get("catalog_visibility"),
             "url": p.get("permalink"), "body": p.get("description"), "short_description": p.get("short_description"),
@@ -531,6 +748,10 @@ class FakeWordPress:
         self.wp_capabilities = {"edit_posts": True, "publish_posts": True, "upload_files": True}
         self.woo_auth_ok = True
         self.media_upload = True
+        self.media: dict[str, dict] = {}          # media id -> row, the site's media library
+        self.uploads: list[dict] = []             # every upload attempt, so tests can count them
+        self.next_media_id = 500
+        self.fail_media_upload = False
         self.fail_after_accept = False           # accept the write then lose the response (F06)
         self.fail_public_fetch = False
         self.public_cache_lag = False            # public page keeps the previous values (F07)
@@ -555,6 +776,10 @@ class FakeWordPress:
     def add_custom_type(self, slug: str, name: str, rest_base: str | None = None) -> None:
         self.custom_types[slug] = {"name": name, "rest_base": rest_base or slug, "slug": slug,
                                    "taxonomies": ["vehicle_make"], "supports": {"title": True, "custom-fields": True}}
+
+    def delete_media(self, media_id) -> None:
+        """Someone emptied the media library in wp-admin; the product keeps a dangling id."""
+        self.media.pop(str(media_id), None)
 
     def manual_edit(self, external_id: str, field: str, value, *, editor: str = "human") -> None:
         """A person edited a managed field in wp-admin (F08)."""
@@ -649,9 +874,21 @@ class FakeWordPress:
                 merged = {m.get("key"): m.get("value") for m in (row.get("meta_data") or []) if isinstance(m, dict)}
                 merged.update(v)
                 row["meta_data"] = [{"key": mk, "value": mv} for mk, mv in merged.items()]
+            elif k == "categories":
+                row["categories"] = [{"id": str(c.get("id")), "name": c.get("name") or f"cat-{c.get('id')}"}
+                                     for c in (v or []) if isinstance(c, dict)]
+            elif k == "attributes":
+                row["attributes"] = [dict(a) for a in (v or []) if isinstance(a, dict)]
             elif k == "images":
-                row["images"] = [{"id": f"m{pid}-{i}", "src": m.get("src"), "alt": m.get("alt"),
-                                  "sha256": m.get("sha256")} for i, m in enumerate(v or [])]
+                # WooCommerce resolves each entry to a media row: an id keeps the library's own URL,
+                # and an entry without an id is what a real site would try (and fail) to side-load.
+                images = []
+                for i, m in enumerate(v or []):
+                    mid = str(m.get("id")) if m.get("id") is not None else None
+                    lib = self.media.get(mid or "", {})
+                    images.append({"id": mid or f"m{pid}-{i}", "src": lib.get("source_url") or m.get("src"),
+                                   "alt": m.get("alt"), "sha256": lib.get("azkt_sha256") or m.get("sha256")})
+                row["images"] = images
             else:
                 row[k] = v
         row["_edited_by"] = "azkt"
@@ -661,8 +898,41 @@ class FakeWordPress:
             self.public[pid] = dict(row)
         return row
 
+    async def ensure_media(self, items: list[dict], known: dict | None = None) -> dict:
+        self._guard("ensure_media")
+        if not self.media_upload:
+            raise Unsupported("this site does not allow media uploads with the configured credentials")
+        known = dict(known or {})
+        out: dict[str, dict] = {}
+        for item in items:
+            sha = item.get("sha256")
+            if not sha or sha in out:
+                continue
+            existing = known.get(sha)
+            if existing and str(existing) in self.media:
+                out[sha] = _media_entry(self.media[str(existing)], reused=True)
+                continue
+            if self.fail_media_upload:
+                raise _fail("transient", "media upload failed")
+            mid = str(self.next_media_id)
+            self.next_media_id += 1
+            row = {"id": mid, "source_url": f"{self.base_url}/wp-content/uploads/{_safe_filename(item.get('filename') or sha)}",
+                   "alt_text": item.get("alt"), "title": item.get("title"),
+                   "media_details": {"width": 1600, "height": 1200, "sizes": {}}, "azkt_sha256": sha}
+            self.media[mid] = row
+            self.uploads.append({"sha256": sha, "media_id": mid, "bytes": len(item.get("data") or b"")})
+            out[sha] = _media_entry(row, reused=False)
+        return out
+
+    def _assert_media_uploaded(self, package: dict) -> None:
+        missing = unuploaded_media(package)
+        if missing:
+            raise Unsupported(f"{len(missing)} listing photo(s) are not in the site media library",
+                              unuploaded_media=missing)
+
     async def upsert_draft(self, package: dict, profile: dict | None, external_id: str | None = None) -> dict:
         self._guard("upsert_draft")
+        self._assert_media_uploaded(package)
         payload = {**render_payload(package, profile), "status": "draft"}
         row = self._write(payload, external_id)
         if self.fail_after_accept:
@@ -674,6 +944,7 @@ class FakeWordPress:
 
     async def publish(self, external_id: str, package: dict, profile: dict | None) -> dict:
         self._guard("publish")
+        self._assert_media_uploaded(package)
         payload = {**render_payload(package, profile), "status": "publish"}
         row = self._write(payload, external_id)
         if self.fail_after_accept:

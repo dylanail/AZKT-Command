@@ -58,6 +58,12 @@ def _iso(dt: datetime | None) -> str | None:
     return dt.isoformat() if dt else None
 
 
+def _host(url: str | None) -> str:
+    """Host only. An activity row says where a callback goes without repeating a path that may carry a token."""
+    from urllib.parse import urlparse
+    return urlparse(url or "").netloc or ""
+
+
 # ── credentials ──────────────────────────────────────────────────────────────
 def mint_token() -> tuple[str, str, str]:
     raw = TOKEN_PREFIX + secrets.token_urlsafe(32)
@@ -79,6 +85,12 @@ def serialize_client(c: ExternalClient, *, include_health: bool = True) -> dict:
          "expires_at": _iso(c.expires_at), "revoked_at": _iso(c.revoked_at),
          "last_used_at": _iso(c.last_used_at), "use_count": int(c.use_count or 0),
          "callback_url": c.callback_url, "callback_configured": bool(c.callback_url),
+         # A destination without a signing key cannot be signed, and AZKT never pushes an unsigned body, so
+         # the owner must see the difference between "address saved" and "callbacks will actually be sent".
+         # Deliberately *named* without the word the secret is stored under: nothing that even looks like a
+         # secret key belongs in a serialized client (the connector tests assert exactly that).
+         "callback_signing_configured": bool(c.callback_secret_enc),
+         "callbacks_enabled": bool(c.callback_url and c.callback_secret_enc),
          "owner_user_id": c.owner_user_id, "notes": c.notes, "version": c.version,
          "created_at": _iso(c.created_at), "rotated_from_id": c.rotated_from_id}
     if include_health:
@@ -231,12 +243,22 @@ async def set_callback(ctx: CommandContext, inp: CallbackIn) -> dict:
     if url and not url.startswith("https://"):
         raise ValidationFailed("callback_url must be an https URL configured by the owner", callback_url=url)
     c = await _load(ctx, inp.client_id, inp.expected_version)
+    secret = (inp.callback_secret or "").strip() or None
+    if url and secret is None and not c.callback_secret_enc:
+        # An unsigned push to the internet is not something AZKT offers: without a shared secret the
+        # receiver cannot tell an AZKT callback from anyone else's POST (spec §10.8 "signed callbacks").
+        raise ValidationFailed("a callback destination needs a signing secret so the receiving agent can "
+                               "verify the body really came from AZKT", callback_url=url)
     c.callback_url = url
-    c.callback_secret_enc = encrypt(inp.callback_secret) if inp.callback_secret else None
+    if url is None:
+        c.callback_secret_enc = None        # clearing the destination clears the secret with it
+    elif secret is not None:
+        c.callback_secret_enc = encrypt(secret)
     ctx.touch(c, "external_client")
     ctx.record(f"External agent callback {'set' if inp.callback_url else 'cleared'}: {c.name}",
                entity_kind="external_client", entity_id=c.id, kind="access", state="updated", visibility="owner",
-               details={"callback_configured": bool(inp.callback_url)})
+               details={"callback_configured": bool(url), "secret_rotated": bool(secret),
+                        "destination_host": _host(url)})
     ctx.emit("external_client.changed", aggregate_type="external_client", aggregate_id=c.id,
              aggregate_version=c.version, payload={"change": "callback"})
     return {"client": serialize_client(c)}
@@ -621,6 +643,7 @@ async def health(db, client_id: str | None = None) -> dict:
     q = select(ExternalClient)
     if client_id:
         q = q.where(ExternalClient.id == client_id)
+    from . import external_callbacks as cb
     rows = (await db.execute(q.order_by(ExternalClient.created_at.desc()))).scalars().all()
     out = []
     for c in rows:
@@ -629,11 +652,43 @@ async def health(db, client_id: str | None = None) -> dict:
         recent = await db.scalar(select(func.count()).select_from(DelegatedRequest).where(
             DelegatedRequest.client_id == c.id))
         out.append({**serialize_client(c), "in_flight_missions": int(in_flight or 0),
-                    "requests_total": int(recent or 0),
+                    "requests_total": int(recent or 0), "callbacks": await cb.health_for_client(db, c.id),
                     "state": "active" if is_active(c) else (c.status if c.status != "active" else "expired")})
     if client_id and not out:
         raise NotFound("external client not found")
     return {"items": out, "count": len(out)}
+
+
+def _callback_contract() -> dict:
+    """The optional push half of the contract, published so a client can implement verification before it is
+    switched on. Polling is still the baseline; a client with no configured destination is never pushed to."""
+    from . import external_callbacks as cb
+    return {
+        "enabled_by": "the owner, in Settings → External agents → Set callback. AZKT never uses a URL supplied "
+                      "in a prompt, a request payload or model output; those keys are reported back as "
+                      "ignored_fields and discarded.",
+        "when": "once per terminal transition of a delegated request: work.completed, work.failed, "
+                "work.needs_input. Cancelled work is not pushed.",
+        "method": "POST application/json to the owner-configured https destination",
+        "body": "the same envelope GET /work/{request_id} returns, plus delivery_id, event, client_id and "
+                "signature_version",
+        "headers": {"signature": cb.SIGNATURE_HEADER, "timestamp": cb.TIMESTAMP_HEADER,
+                    "delivery_id": cb.DELIVERY_HEADER, "attempt": cb.ATTEMPT_HEADER,
+                    "event": cb.EVENT_HEADER, "client": cb.CLIENT_HEADER},
+        "signature": {"algorithm": "HMAC-SHA256", "version": cb.SIGNATURE_VERSION,
+                      "signed_value": "<X-AZKT-Timestamp> + '.' + the raw request body bytes",
+                      "encoding": "lowercase hex, sent as 'v1=<hex>'",
+                      "secret": "the per-client callback secret the owner configured",
+                      "compare_with": "a constant-time comparison (hmac.compare_digest), never =="},
+        "replay": {"reject_if_older_than_seconds": cb.REPLAY_TOLERANCE_SECONDS,
+                   "idempotency_key": cb.DELIVERY_HEADER,
+                   "note": "the body is byte-identical on every attempt of one delivery, so the same "
+                           "delivery id twice is one event AZKT was unsure reached you, never two."},
+        "expected_response": "2xx once you have stored it. A permanent 4xx is not retried; 408/425/429 and 5xx "
+                             "are retried with backoff up to " + str(cb.MAX_ATTEMPTS) + " attempts, after which "
+                             "the delivery is failed and the owner is told.",
+        "fallback": "polling: GET /work/{request_id}?cursor= is always available and always authoritative.",
+    }
 
 
 def openapi_lite() -> dict:
@@ -673,6 +728,7 @@ def openapi_lite() -> dict:
         ],
         "mcp_tools": ["azkt_ask_manager", "azkt_get_work_status", "azkt_reply_to_manager", "azkt_find_records",
                       "azkt_prepare_upload"],
+        "callbacks": _callback_contract(),
         "guarantees": [
             "Effective access is the intersection of the owner's rights, this client's scopes and its record "
             "scope, applied through every internal tool, retrieval and result.",

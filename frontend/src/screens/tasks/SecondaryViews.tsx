@@ -1,13 +1,25 @@
 /* Tasks › Cases and Tasks › Promises — the two secondary views of the Tasks screen.
    Cases:    GET /api/tasks/cases?status=open|all    (backend/app/routers/tasks.py list_cases)
    Promises: GET /api/tasks/promises?status=open|all (backend/app/routers/tasks.py list_promises)
-   Both are read-only lists: every row links to the record it is about, and nothing is invented —
-   a case with no next check says so, and a promise whose person the role cannot see stays unnamed. */
+   Every row links to the record it is about and nothing is invented — a case with no next check says
+   so, and a promise whose person the role cannot see stays unnamed.
+
+   Both rows carry the actions that resolve them (SecondaryActions.tsx). The server decides what is
+   allowed: a case cannot be resolved without a summary and a promise cannot be closed as missed or
+   withdrawn without a note, and a refusal is shown rather than worked around. */
+import { useState, type ReactNode } from "react";
 import { Link } from "react-router-dom";
 import { entityHref } from "../../lib/links";
 import { TZ } from "../../lib/format";
+import { useAuth } from "../../lib/auth";
+import { can, whyNot } from "../../lib/perms";
+import { useCommand } from "../../lib/useCommand";
 import { Button, Chip, EmptyState, ErrorState, GlassPanel, HealthLabel, Loading, When } from "../../ui";
 import type { useNames } from "./useNames";
+import {
+  CancelCaseSheet, CaseActions, CaseCheckSheet, ClosePromiseSheet, PromiseActions, PromiseDateSheet,
+  ResolveCaseSheet, casePath, promisePath,
+} from "./SecondaryActions";
 import {
   CASE_KIND_LABEL, CASE_STATUS_LABEL, PROMISE_STATUS_LABEL, caseHealth, promiseHealth,
   type CaseListResp, type CaseView, type PromiseListResp, type PromiseView,
@@ -30,7 +42,9 @@ function caseRecord(c: CaseView, names: Names): RecordLink | null {
   return null;
 }
 
-function CaseRow({ c, names, tokyo }: { c: CaseView; names: Names; tokyo: boolean }) {
+function CaseRow({ c, names, tokyo, actions }: {
+  c: CaseView; names: Names; tokyo: boolean; actions: ReactNode;
+}) {
   const health = caseHealth(c);
   const record = caseRecord(c, names);
   const overdue = c.overdue_check && c.status !== "resolved" && c.status !== "cancelled";
@@ -60,6 +74,7 @@ function CaseRow({ c, names, tokyo }: { c: CaseView; names: Names; tokyo: boolea
         <span className="fs12 t4">{c.owner_role ? `Owned by ${c.owner_role}` : "No owner recorded"}</span>
         <div className="tk-row__actions">
           {record ? <Button size="xs" variant="soft" to={record.href}>Open</Button> : null}
+          {actions}
         </div>
       </div>
     </div>
@@ -70,6 +85,19 @@ export function CasesView({ data, loading, error, reload, names, tokyo, showClos
   data: CaseListResp | null; loading: boolean; error: unknown; reload: () => void;
   names: Names; tokyo: boolean; showClosed: boolean;
 }) {
+  const { user } = useAuth();
+  const { run } = useCommand();
+  const writable = can(user, "tasks.write");
+  const [resolve, setResolve] = useState<CaseView | null>(null);
+  const [check, setCheck] = useState<CaseView | null>(null);
+  const [cancel, setCancel] = useState<CaseView | null>(null);
+  // Status-only moves need no extra input, so they post straight from the row.
+  const move = async (c: CaseView, action: string) => {
+    const r = await run(`case:${action}:${c.id}`, casePath(c.id, action), { expected_version: c.version },
+      { success: action === "reopen" ? "Case reopened" : "Case updated" });
+    if (r?.status === "ok") reload();
+  };
+  const handlers = { resolve: setResolve, check: setCheck, cancel: setCancel, status: move };
   if (loading && !data) return <GlassPanel clip><Loading label="Loading cases" rows={4} /></GlassPanel>;
   if (error) return <ErrorState error={error} onRetry={reload} title="Couldn't load cases" />;
   if (data === null) {
@@ -89,13 +117,22 @@ export function CasesView({ data, loading, error, reload, names, tokyo, showClos
             title={showClosed ? "No cases at all yet" : "Nothing is waiting on anyone"}
             body={showClosed ? "A case appears when a piece of work has to wait on someone else." : "Closed cases are hidden. Turn on “Include closed” to see them."}
           />
-        ) : rows.map((c) => <CaseRow key={c.id} c={c} names={names} tokyo={tokyo} />)}
+        ) : rows.map((c) => (
+          <CaseRow key={c.id} c={c} names={names} tokyo={tokyo}
+            actions={<CaseActions c={c} can={writable} whyNot={whyNot("tasks.write")} on={handlers} />} />
+        ))}
       </GlassPanel>
+      <ResolveCaseSheet row={resolve} open={!!resolve} onClose={() => setResolve(null)} onDone={reload} />
+      <CaseCheckSheet row={check} open={!!check} onClose={() => setCheck(null)} onDone={reload}
+        userTz={user?.timezone} />
+      <CancelCaseSheet row={cancel} open={!!cancel} onClose={() => setCancel(null)} onDone={reload} />
     </section>
   );
 }
 
-function PromiseRow({ p, names, tokyo }: { p: PromiseView; names: Names; tokyo: boolean }) {
+function PromiseRow({ p, names, tokyo, actions }: {
+  p: PromiseView; names: Names; tokyo: boolean; actions: ReactNode;
+}) {
   const health = promiseHealth(p);
   const overdue = p.overdue && (p.status === "open" || p.status === "proposed");
   // contact_name is null for a role that cannot see contacts: no name, no link to a person.
@@ -131,6 +168,7 @@ function PromiseRow({ p, names, tokyo }: { p: PromiseView; names: Names; tokyo: 
         <span className="fs12 t4">
           {p.made_at ? <>Promised <When iso={p.made_at} tz={TZ.phoenix} relative /></> : "When it was promised isn't recorded"}
         </span>
+        <div className="tk-row__actions">{actions}</div>
       </div>
     </div>
   );
@@ -140,6 +178,23 @@ export function PromisesView({ data, loading, error, reload, names, tokyo, showC
   data: PromiseListResp | null; loading: boolean; error: unknown; reload: () => void;
   names: Names; tokyo: boolean; showClosed: boolean;
 }) {
+  const { user } = useAuth();
+  const { run } = useCommand();
+  const writable = can(user, "tasks.write");
+  const [closing, setClosing] = useState<{ row: PromiseView; action: "missed" | "withdraw" } | null>(null);
+  const [edit, setEdit] = useState<PromiseView | null>(null);
+  // Kept and reopen carry no extra information, so they post straight from the row. Missed and
+  // withdrawn open a sheet because the server requires a note saying what happened.
+  const move = async (p: PromiseView, action: string) => {
+    const r = await run(`promise:${action}:${p.id}`, promisePath(p.id, action), { expected_version: p.version },
+      { success: action === "kept" ? "Recorded as kept" : "Promise reopened" });
+    if (r?.status === "ok") reload();
+  };
+  const handlers = {
+    close: (row: PromiseView, action: "missed" | "withdraw") => setClosing({ row, action }),
+    edit: setEdit,
+    simple: move,
+  };
   if (loading && !data) return <GlassPanel clip><Loading label="Loading promises" rows={4} /></GlassPanel>;
   if (error) return <ErrorState error={error} onRetry={reload} title="Couldn't load promises" />;
   if (data === null) {
@@ -159,8 +214,15 @@ export function PromisesView({ data, loading, error, reload, names, tokyo, showC
             title={showClosed ? "No promises recorded yet" : "Nothing has been promised"}
             body={showClosed ? "A promise is recorded from a confirmed reply or written down by a person." : "Kept and missed promises are hidden. Turn on “Include closed” to see them."}
           />
-        ) : rows.map((p) => <PromiseRow key={p.id} p={p} names={names} tokyo={tokyo} />)}
+        ) : rows.map((p) => (
+          <PromiseRow key={p.id} p={p} names={names} tokyo={tokyo}
+            actions={<PromiseActions p={p} can={writable} whyNot={whyNot("tasks.write")} on={handlers} />} />
+        ))}
       </GlassPanel>
+      <ClosePromiseSheet row={closing?.row || null} action={closing?.action || "missed"} open={!!closing}
+        onClose={() => setClosing(null)} onDone={reload} />
+      <PromiseDateSheet row={edit} open={!!edit} onClose={() => setEdit(null)} onDone={reload}
+        userTz={user?.timezone} />
     </section>
   );
 }

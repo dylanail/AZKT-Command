@@ -63,6 +63,8 @@ def serialize_profile(p: SiteProfile) -> dict:
             "listing_gates": dict(p.listing_gates or {}), "drift": dict(p.drift or {}),
             "writes_paused": bool(p.writes_paused), "pause_reason": p.pause_reason,
             "preview": dict(p.preview or {}), "connection_id": p.connection_id,
+            "sku_strategy": p.sku_strategy or wp_adapter.DEFAULT_SKU_STRATEGY, "sku_prefix": p.sku_prefix,
+            "category_ids": list(p.category_ids or []), "attribute_map": dict(p.attribute_map or {}),
             "validated_at": iso(p.validated_at), "activated_at": iso(p.activated_at), "activated_by": p.activated_by,
             "discovered_at": iso(p.discovered_at), "drift_detected_at": iso(p.drift_detected_at),
             "created_at": iso(p.created_at)}
@@ -115,8 +117,11 @@ class DiscoverIn(BaseModel):
     note: str | None = None
 
 
-def _ownership(discovered: dict) -> dict:
+def _ownership(discovered: dict, *, sku_strategy: str = wp_adapter.DEFAULT_SKU_STRATEGY) -> dict:
     owned = {f: "azkt" for f in wp_adapter.AZKT_FIELDS}
+    if sku_strategy == "preserve":
+        # AZKT never writes the site's SKU column, so an editor changing it is not drift
+        owned["sku"] = "editor"
     for slug in (discovered.get("post_types") or {}):
         owned.setdefault(f"post_type:{slug}", "site")
     owned["categories"] = "site"
@@ -140,9 +145,16 @@ async def site_discover(ctx: CommandContext, inp: DiscoverIn) -> dict:
     prior = await latest_profile(ctx.db)
     content_type = discovered.get("content_type") or "product"
     base_url = inp.base_url or (discovered.get("site") or {}).get("url") or getattr(ad, "base_url", "")
-    validation = {"required_fields": ["headline", "body"], "sku_convention": None}
-    if content_type == "product":
-        validation["sku_convention"] = "stock_no"
+    sku_strategy = (prior.sku_strategy if prior and prior.sku_strategy else wp_adapter.DEFAULT_SKU_STRATEGY)
+    sku_prefix = prior.sku_prefix if prior else None
+    # A new profile version keeps the owner's product mapping, but only for taxonomy the site still
+    # has: a category or attribute that was deleted must be re-chosen rather than written blindly.
+    live_categories = {str(c.get("id")) for c in (discovered.get("product_categories") or [])}
+    live_attributes = {str(a.get("id")) for a in (discovered.get("product_attributes") or [])}
+    category_ids = [c for c in ((prior.category_ids if prior else None) or []) if str(c) in live_categories]
+    attribute_map = {k: v for k, v in ((prior.attribute_map if prior else None) or {}).items()
+                     if not (isinstance(v, dict) and v.get("id")) or str(v["id"]) in live_attributes}
+    validation = {"required_fields": ["headline", "body"], "sku_convention": sku_strategy}
     wp_conn = await conn_svc.get(ctx.db, "wordpress")
     staging = (inp.staging_url or (prior.staging_url if prior else None)
                or ((wp_conn.config or {}).get("staging_url") if wp_conn is not None else None))
@@ -151,7 +163,9 @@ async def site_discover(ctx: CommandContext, inp: DiscoverIn) -> dict:
                     base_url=base_url, staging_url=staging,
                     profile_version=(prior.profile_version + 1) if prior else 1, content_type=content_type,
                     discovered=discovered, field_map=wp_adapter.field_map_for({"content_type": content_type}),
-                    field_ownership=_ownership(discovered),
+                    field_ownership=_ownership(discovered, sku_strategy=sku_strategy),
+                    sku_strategy=sku_strategy, sku_prefix=sku_prefix,
+                    category_ids=category_ids, attribute_map=attribute_map,
                     # the site's own minimum (WooCommerce requires none); the *listing* photo checklist
                     # lives in the class gates, where a missing shot blocks publication.
                     media_rules={"min": 0, "formats": ["image/jpeg", "image/png", "image/webp"],
@@ -433,6 +447,84 @@ async def site_set_listing_gates(ctx: CommandContext, inp: GatesIn) -> dict:
     ctx.record(f"Listing gates configured on profile v{p.profile_version}", entity_kind="site_profile",
                entity_id=p.id, kind="connection", state=p.status, visibility="owner",
                details={"classes": sorted((inp.listing_gates or {}).keys())})
+    return {"profile": serialize_profile(p)}
+
+
+class SkuIn(BaseModel):
+    profile_id: str
+    sku_strategy: str
+    sku_prefix: str | None = None
+
+
+@command("site.set_sku_strategy", input=SkuIn, perm="settings", action_class="owner_only",
+         approval_kind="site_profile",
+         summary=lambda p: f"Set the website SKU strategy to {p.sku_strategy}",
+         description="Choose how the site's SKU column is treated. `preserve` (default) never writes it — the "
+                     "installed catalogue numbers products its own way and AZKT identifies its listings by the "
+                     "azkt_vehicle_id meta. `stock_no` writes the AZKT stock number, `prefix` writes a prefixed "
+                     "stock number. Changing this also moves who owns the field for drift purposes.")
+async def site_set_sku_strategy(ctx: CommandContext, inp: SkuIn) -> dict:
+    p = await ctx.db.get(SiteProfile, inp.profile_id)
+    if p is None:
+        raise NotFound("site profile not found")
+    if inp.sku_strategy not in wp_adapter.SKU_STRATEGIES:
+        raise ValidationFailed(f"sku_strategy must be one of {wp_adapter.SKU_STRATEGIES}")
+    if inp.sku_strategy == "prefix" and not (inp.sku_prefix or "").strip():
+        raise ValidationFailed("the prefix strategy needs a sku_prefix")
+    p.sku_strategy = inp.sku_strategy
+    p.sku_prefix = (inp.sku_prefix or "").strip() or None
+    p.field_ownership = _ownership(dict(p.discovered or {}), sku_strategy=p.sku_strategy)
+    p.validation = {**dict(p.validation or {}), "sku_convention": p.sku_strategy}
+    ctx.touch(p, "site_profile")
+    ctx.record(f"Website SKU strategy set to {p.sku_strategy}", entity_kind="site_profile", entity_id=p.id,
+               kind="connection", state=p.status, visibility="owner",
+               details={"sku_strategy": p.sku_strategy, "sku_prefix": p.sku_prefix})
+    return {"profile": serialize_profile(p)}
+
+
+class ProductMappingIn(BaseModel):
+    profile_id: str
+    category_ids: list | None = None
+    attribute_map: dict | None = None
+
+
+@command("site.set_product_mapping", input=ProductMappingIn, perm="settings", action_class="owner_only",
+         approval_kind="site_profile",
+         summary=lambda p: f"Map listings onto the shop's categories and attributes on profile {p.profile_id[:8]}",
+         description="Choose which shop categories a published vehicle belongs to, and which recorded specs "
+                     "become product attributes. Both are picked from what discovery actually found on the "
+                     "site. Mapping nothing is valid and means AZKT sends neither field, so an editor's own "
+                     "categories and attributes are left exactly as they are.")
+async def site_set_product_mapping(ctx: CommandContext, inp: ProductMappingIn) -> dict:
+    p = await ctx.db.get(SiteProfile, inp.profile_id)
+    if p is None:
+        raise NotFound("site profile not found")
+    discovered = dict(p.discovered or {})
+    if inp.category_ids is not None:
+        known = {str(c.get("id")) for c in (discovered.get("product_categories") or [])}
+        unknown = [c for c in inp.category_ids if str(c) not in known]
+        if unknown:
+            raise ValidationFailed("those categories are not on the site; read the site again first",
+                                   unknown_categories=unknown, known=sorted(known))
+        p.category_ids = list(inp.category_ids)
+    if inp.attribute_map is not None:
+        known = {str(a.get("id")): a for a in (discovered.get("product_attributes") or [])}
+        clean: dict = {}
+        for key, cfg in (inp.attribute_map or {}).items():
+            if not isinstance(cfg, dict):
+                raise ValidationFailed(f"attribute mapping for {key!r} must be an object")
+            if cfg.get("id") is not None and str(cfg["id"]) not in known:
+                raise ValidationFailed(f"attribute {cfg['id']} is not on the site; read the site again first",
+                                       known=sorted(known))
+            if cfg.get("id") is None and not (cfg.get("name") or "").strip():
+                raise ValidationFailed(f"attribute mapping for {key!r} needs a site attribute id or a name")
+            clean[key] = {k: v for k, v in cfg.items() if k in ("id", "name", "visible")}
+        p.attribute_map = clean
+    ctx.touch(p, "site_profile")
+    ctx.record(f"Website product mapping updated on profile v{p.profile_version}", entity_kind="site_profile",
+               entity_id=p.id, kind="connection", state=p.status, visibility="owner",
+               details={"category_ids": list(p.category_ids or []),
+                        "attributes": sorted((p.attribute_map or {}).keys())})
     return {"profile": serialize_profile(p)}
 
 

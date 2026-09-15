@@ -60,3 +60,45 @@ class DelegatedRequest(Base, BusinessRow):
     last_polled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     cancelled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+CALLBACK_STATES = ("pending", "sending", "accepted", "failed", "unknown", "cancelled")
+
+
+class CallbackDelivery(Base, BusinessRow):
+    """One attempt-bounded push of a finished delegated request to the owner-configured destination.
+
+    Polling stays the baseline (spec §10.8); this row exists so the optional signed callback is as
+    auditable as any other delivery AZKT makes. `dedupe_key` is what makes "exactly one callback per
+    terminal transition" a database fact rather than a hope, and `id` travels in the delivery header so
+    a retried POST is recognisable as the same delivery instead of a second event.
+
+    `state` is truthful about what the far side actually did:
+        pending -> sending -> accepted (2xx)
+                           -> failed   (a permanent 4xx, or the retry bound exhausted)
+                           -> unknown  (the connection broke after the request was sent: it may have
+                                        arrived, so it is never called delivered and never re-sent)
+                           -> cancelled (the owner cleared the destination, or the client was revoked)
+    """
+    __tablename__ = "external_callback_deliveries"
+    client_id: Mapped[str] = mapped_column(ForeignKey("external_clients.id"), index=True)
+    delegated_request_id: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
+    mission_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    event: Mapped[str] = mapped_column(String, default="work.completed")  # work.* | callback.test
+    request_state: Mapped[str | None] = mapped_column(String, nullable=True)  # done|failed|needs_input|test
+    dedupe_key: Mapped[str] = mapped_column(String, unique=True, index=True)
+    url: Mapped[str] = mapped_column(Text, default="")        # the destination actually used, for the audit trail
+    payload: Mapped[dict] = mapped_column(JSON, default=dict)  # the exact envelope that was signed and sent
+    state: Mapped[str] = mapped_column(String, default="pending", index=True)
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    max_attempts: Mapped[int] = mapped_column(Integer, default=5)
+    next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    # Every attempt, with what actually happened: [{n, at, outcome, status, error, duration_ms, url}]
+    attempt_log: Mapped[list] = mapped_column(JSON, default=list)
+    response_status: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    lease_token: Mapped[str | None] = mapped_column(String, nullable=True)
+    lease_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    cancel_reason: Mapped[str | None] = mapped_column(String, nullable=True)

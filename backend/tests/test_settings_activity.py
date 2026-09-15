@@ -289,3 +289,37 @@ async def test_gate_rule_edit_cannot_collide_with_another_rule(db, client, owner
             await client.post(f"/api/settings/gate-rules/{rule['id']}/deactivate", json={})
     db.expire_all()  # the app committed through its own session; drop this session's cached rows
     assert not [x for x in await settings_store.effective_gate_rules(db, "finalization") if x["active"]]
+
+
+async def test_health_reports_ephemeral_photo_storage_on_railway(client, owner, monkeypatch):
+    """With local storage and no mounted volume, Railway throws every uploaded photo away on the next
+    deploy. That only surfaces later as a listing whose approved photos have no bytes to publish, so
+    the health page has to say it plainly."""
+    from backend.app.services import health as health_svc
+    login(client, owner)
+
+    r = await client.get("/api/health")
+    assert r.status_code == 200
+    base = r.json()["storage"]
+    assert base["platform"] == "host" and base["durable"] is True and base["writable"] is True
+
+    monkeypatch.setenv("RAILWAY_ENVIRONMENT", "production")
+    monkeypatch.delenv(health_svc.RAILWAY_VOLUME_ENV, raising=False)
+    r = await client.get("/api/health")
+    body = r.json()
+    assert body["storage"]["platform"] == "railway" and body["storage"]["durable"] is False
+    assert "volume" in body["storage"]["reason"] and body["ok"] is False
+
+    # a mounted volume that DATA_DIR actually sits inside is durable again
+    from backend.app.core.config import settings as cfg
+    monkeypatch.setenv(health_svc.RAILWAY_VOLUME_ENV, cfg.DATA_DIR)
+    r = await client.get("/api/health")
+    assert r.json()["storage"]["durable"] is True
+
+    # so is a configured bucket, whatever the platform
+    monkeypatch.setattr(cfg, "STORAGE_BACKEND", "s3")
+    monkeypatch.setattr(cfg, "S3_BUCKET", "azkt-assets")
+    assert health_svc.storage_state() == {"backend": "s3", "durable": True, "writable": None,
+                                          "reason": None, "platform": "railway", "bucket": "azkt-assets"}
+    monkeypatch.setattr(cfg, "S3_BUCKET", "")
+    assert health_svc.storage_state()["durable"] is False

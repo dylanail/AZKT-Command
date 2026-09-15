@@ -1,4 +1,4 @@
-/* Settings › External agents — shared shapes, plain-language labels and the four dialogs.
+/* Settings › External agents — shared shapes, plain-language labels and the five dialogs.
    Contract: backend/app/routers/external_clients.py and backend/app/services/external_clients.py.
    Every write goes through useCommand, so "needs review" and "blocked" are explained by the server. */
 import { useEffect, useMemo, useState } from "react";
@@ -9,7 +9,8 @@ import { useQuery } from "../../../lib/useQuery";
 import { useIsMobile } from "../../../lib/viewport";
 import { humanize } from "../../../lib/links";
 import {
-  Button, Chip, EmptyState, ErrorState, Field, Input, Loading, Notice, ResponsiveDialog, Select, Table, Textarea, Tr, When,
+  Button, Chip, EmptyState, ErrorState, Expander, Field, Input, Loading, Notice, ResponsiveDialog, Select, Table,
+  Textarea, Tr, When,
 } from "../../../ui";
 
 /* ---------- shapes ---------- */
@@ -28,6 +29,9 @@ export interface ExternalClient {
   use_count: number;
   callback_url: string | null;
   callback_configured: boolean;
+  /** An address with no signing key cannot be signed, so nothing is ever pushed to it. */
+  callback_signing_configured: boolean;
+  callbacks_enabled: boolean;
   owner_user_id: string;
   notes: string;
   version: number;
@@ -37,7 +41,68 @@ export interface ExternalClient {
   /** From GET /health only. */
   in_flight_missions?: number;
   requests_total?: number;
+  callbacks?: CallbackHealth;
   state?: string;
+}
+
+export interface CallbackHealth {
+  total: number;
+  pending: number;
+  failed: number;
+  last_state: string | null;
+  last_event: string | null;
+  last_at: string | null;
+  last_error: string | null;
+}
+
+export interface CallbackAttempt {
+  n: number;
+  at: string | null;
+  outcome: string;
+  status: number | null;
+  error: string | null;
+  duration_ms: number | null;
+  /** The destination host, not the full address: a webhook path can itself be a secret. */
+  host: string | null;
+}
+
+export interface CallbackDeliveryRow {
+  id: string;
+  request_id: string | null;
+  mission_id: string | null;
+  event: string;
+  request_state: string | null;
+  state: string;
+  attempts: number;
+  max_attempts: number;
+  response_status: number | null;
+  error: string | null;
+  cancel_reason: string | null;
+  destination_host: string;
+  signed: boolean;
+  signature_version: string;
+  next_attempt_at: string | null;
+  sent_at: string | null;
+  finished_at: string | null;
+  created_at: string | null;
+  attempt_log: CallbackAttempt[];
+  summary: string;
+}
+
+export interface CallbacksResp {
+  items: CallbackDeliveryRow[];
+  count: number;
+  states: Record<string, number>;
+  note: string;
+  polling_only: boolean;
+  client: ExternalClient;
+  verification: {
+    signature: { algorithm: string; version: string; signed_value: string; encoding: string; compare_with: string };
+    headers: Record<string, string>;
+    replay: { reject_if_older_than_seconds: number; idempotency_key: string; note: string };
+    expected_response: string;
+    when: string;
+  };
 }
 
 export interface ClientsResp {
@@ -307,7 +372,12 @@ export function CallbackDialog({ open, client, onClose, onSaved }: { open: boole
     if (r?.status === "ok") { onSaved(); onClose(); }
   };
 
-  const valid = !url.trim() || url.trim().startsWith("https://");
+  const https = !url.trim() || url.trim().startsWith("https://");
+  /* A secret is not optional: without one AZKT cannot sign the body, and it never pushes an unsigned one.
+     Keeping an existing secret is fine, so the field is only required the first time. */
+  const needsSecret = !!url.trim() && !secret.trim() && !client?.callback_signing_configured;
+  const valid = https && !needsSecret;
+  const reason = !https ? "The address must start with https://." : "Set a signing secret so the other agent can verify AZKT sent it.";
 
   return (
     <ResponsiveDialog
@@ -318,23 +388,174 @@ export function CallbackDialog({ open, client, onClose, onSaved }: { open: boole
       size="md"
       footer={
         <>
-          <Button variant="primary" loading={busy("callback")} disabled={!valid} disabledReason="The address must start with https://." onClick={() => void save()}>Save</Button>
+          <Button variant="primary" loading={busy("callback")} disabled={!valid} disabledReason={reason} onClick={() => void save()}>Save</Button>
           <Button variant="ghost" onClick={onClose}>Cancel</Button>
         </>
       }
     >
       <div className="stack">
-        <Notice tone="neutral" lead="Polling today">
-          AZKT records this address, but it does not push to it yet: clients read progress with
-          <code> GET /work/&#123;request_id&#125;?cursor=</code> until that is built. Only you can set this — an address
-          inside a request is ignored.
+        <Notice tone="neutral" lead="What this does">
+          When work for this client finishes — done, failed, or waiting on an answer — AZKT posts the same result it would
+          give <code>GET /work/&#123;request_id&#125;?cursor=</code> to this address, signed with the secret below. Polling
+          still works and is always the fallback. Only you can set this address: one inside a request is ignored.
         </Notice>
-        <Field label="Callback address" error={valid ? undefined : "Must start with https://"} hint="Leave empty to clear it.">
+        <Field label="Callback address" error={https ? undefined : "Must start with https://"} hint="Leave empty to clear it and go back to polling only.">
           <Input type="url" value={url} onChange={(e) => setUrl(e.target.value)} placeholder="https://…" />
         </Field>
-        <Field label="Signing secret" hint="Optional. Stored encrypted and never shown again.">
-          <Input type="password" value={secret} onChange={(e) => setSecret(e.target.value)} placeholder="Leave empty to keep the current one" autoComplete="new-password" />
+        <Field
+          label="Signing secret"
+          error={needsSecret ? "Required — AZKT never sends an unsigned callback." : undefined}
+          hint={client?.callback_signing_configured ? "Stored encrypted. Leave empty to keep the current one; type a new one to replace it." : "Stored encrypted and never shown again. Give the same value to the receiving agent."}
+        >
+          <Input type="password" value={secret} onChange={(e) => setSecret(e.target.value)} placeholder={client?.callback_signing_configured ? "Leave empty to keep the current one" : "A long random string"} autoComplete="new-password" />
         </Field>
+        <Notice tone="neutral" lead="How the other agent checks it">
+          Each request carries <code>X-AZKT-Signature: v1=…</code> and <code>X-AZKT-Timestamp</code>. It signs
+          <code> timestamp + "." + the raw body bytes</code> with HMAC-SHA256 using this secret. Reject anything older
+          than 5 minutes, compare in constant time, and treat <code>X-AZKT-Delivery</code> as the idempotency key. The
+          full recipe is under "Recent callbacks", and in <code>GET /api/integrations/v1/openapi-lite</code>.
+        </Notice>
+      </div>
+    </ResponsiveDialog>
+  );
+}
+
+/* ---------- callback deliveries ---------- */
+export function callbackStateTone(state: string): "ok" | "risk" | "blocked" | "wait" {
+  if (state === "accepted") return "ok";
+  if (state === "failed") return "blocked";
+  if (state === "unknown") return "risk";        // it may have arrived — never shown as delivered
+  return "wait";
+}
+
+export const CALLBACK_STATE_LABELS: Record<string, string> = {
+  accepted: "Accepted",
+  failed: "Not delivered",
+  unknown: "Result unknown",
+  pending: "Waiting to send",
+  sending: "Sending",
+  cancelled: "Not sent",
+};
+
+export const CALLBACK_EVENT_LABELS: Record<string, string> = {
+  "work.completed": "Work finished",
+  "work.failed": "Work failed",
+  "work.needs_input": "Needs an answer",
+  "callback.test": "Test",
+};
+
+export function CallbacksDialog({ open, client, onClose }: { open: boolean; client: ExternalClient | null; onClose: () => void }) {
+  const isMobile = useIsMobile();
+  const { run, busy } = useCommand();
+  const [tick, setTick] = useState(0);
+  const id = client?.id || "";
+  const q = useQuery<CallbacksResp | null>(
+    (signal) => (open && id ? api.get<CallbacksResp>(`${BASE}/${encodeURIComponent(id)}/callbacks?limit=25`, { signal }) : Promise.resolve(null)),
+    [open, id, tick],
+  );
+
+  const sendTest = async () => {
+    if (!client) return;
+    const r = await run<{ accepted?: boolean; message?: string }>("test-callback", `${BASE}/${encodeURIComponent(client.id)}/test-callback`, {});
+    if (r?.status === "ok") setTick((t) => t + 1);
+  };
+
+  const v = q.data?.verification;
+  const canTest = !!client?.callbacks_enabled;
+
+  return (
+    <ResponsiveDialog
+      mobile={isMobile}
+      open={open}
+      onClose={onClose}
+      title={`Callbacks to ${client?.name || "this client"}`}
+      size="xl"
+      align="top"
+      footer={
+        <>
+          <Button
+            variant="soft"
+            loading={busy("test-callback")}
+            disabled={!canTest}
+            disabledReason="Set a callback address and signing secret first."
+            onClick={() => void sendTest()}
+          >
+            Send a test callback
+          </Button>
+          <Button variant="ghost" onClick={onClose}>Close</Button>
+          <span className="fs13 t3">A test carries no business data.</span>
+        </>
+      }
+    >
+      <div className="stack">
+        {q.data?.polling_only ? (
+          <Notice tone="neutral" lead="Polling only">
+            This client has no callback address, or no signing secret, so AZKT never pushes to it. It reads progress with
+            <code> GET /work/&#123;request_id&#125;?cursor=</code>. Set one from "Change callback" if you want a push.
+          </Notice>
+        ) : null}
+
+        {q.loading ? <Loading label="Loading callbacks" rows={3} />
+          : q.error ? <ErrorState error={q.error} onRetry={q.reload} title="Couldn't load callbacks" />
+            : !q.data?.items.length ? (
+              <EmptyState
+                title="Nothing sent yet"
+                body="A callback goes out once each time this client's work finishes, fails or needs an answer from it."
+              />
+            ) : (
+              <Table minWidth={720} caption={`${q.data.count} most recent callback deliveries`}>
+                <thead>
+                  <tr>
+                    <th scope="col">When</th>
+                    <th scope="col">Event</th>
+                    <th scope="col">Result</th>
+                    <th scope="col">Attempts</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {q.data.items.map((d) => (
+                    <Tr key={d.id}>
+                      <td className="fs13 nowrap">{d.created_at ? <When iso={d.created_at} format="datetime" /> : "—"}</td>
+                      <td>
+                        <div className="fs13">{CALLBACK_EVENT_LABELS[d.event] || humanize(d.event)}</div>
+                        <div className="fs12 t4" style={{ overflowWrap: "anywhere" }}>
+                          {d.destination_host || "no destination"}
+                          {d.request_id ? <> · <Link to={`/activity?q=${encodeURIComponent(d.request_id)}`}>find the request</Link></> : null}
+                        </div>
+                      </td>
+                      <td>
+                        <Chip size="sm" tone={callbackStateTone(d.state)}>{CALLBACK_STATE_LABELS[d.state] || humanize(d.state)}</Chip>
+                        {d.response_status ? <span className="fs12 t4 tnum"> · {d.response_status}</span> : null}
+                        {d.error ? <div className="fs12" style={{ color: "var(--blocked)", overflowWrap: "anywhere" }}>{d.error}</div> : null}
+                        {d.cancel_reason ? <div className="fs12 t4">{d.cancel_reason}</div> : null}
+                      </td>
+                      <td className="fs13 nowrap tnum">
+                        {d.attempts} of {d.max_attempts}
+                        {d.next_attempt_at ? <div className="fs12 t4">next <When iso={d.next_attempt_at} relative /></div> : null}
+                        {d.attempt_log.length ? (
+                          <div className="fs12 t4">{d.attempt_log.map((a) => a.outcome).join(" → ")}</div>
+                        ) : null}
+                      </td>
+                    </Tr>
+                  ))}
+                </tbody>
+              </Table>
+            )}
+
+        {q.data ? <div className="fs13 t3">{q.data.note}</div> : null}
+
+        {v ? (
+          <Expander title="How the receiving agent verifies a callback">
+            <div className="fs13 stack-sm">
+              <div>{v.signature.algorithm} over <code>{v.signature.signed_value}</code>, {v.signature.encoding}.</div>
+              <div>Headers: {Object.values(v.headers).map((h) => <code key={h} style={{ marginRight: 6 }}>{h}</code>)}</div>
+              <div>Reject anything older than {v.replay.reject_if_older_than_seconds} seconds, and {v.signature.compare_with}.</div>
+              <div>{v.replay.note}</div>
+              <div>{v.expected_response}</div>
+              <div className="t3">Sent {v.when}</div>
+            </div>
+          </Expander>
+        ) : null}
       </div>
     </ResponsiveDialog>
   );

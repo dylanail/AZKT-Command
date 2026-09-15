@@ -90,6 +90,17 @@ class IntakeSettings(_Strict):
     require_condition_note: bool = True
 
 
+class CalendarSettings(_Strict):
+    """Calendar writes are a separate explicit capability (spec §11.2), so `writes_enabled` starts
+    false and a connected Google account alone never makes AZKT create anything."""
+    writes_enabled: bool = False
+    calendar_id: str = "primary"            # "primary" = the connected account's own calendar
+    conflict_check: bool = True             # look for an overlapping entry and report it on the task
+    call_minutes: int = Field(default=30, ge=5, le=12 * 60)      # length when a task only says when it starts
+    meeting_minutes: int = Field(default=60, ge=5, le=12 * 60)
+    follow_up_minutes: int = Field(default=30, ge=5, le=12 * 60)
+
+
 class ReportingSettings(_Strict):
     """Cost categories that must be recorded before Home labels gross profit "Recorded" (spec §2.4)."""
     required_cost_categories: list[str] = Field(default_factory=lambda: ["purchase", "import", "recon"])
@@ -100,6 +111,7 @@ SETTINGS_SPEC: dict[str, type[BaseModel]] = {
     "automation": AutomationSettings,
     "intake": IntakeSettings,
     "reporting": ReportingSettings,
+    "calendar": CalendarSettings,
 }
 
 
@@ -134,6 +146,12 @@ def _validate(key: str, data: dict) -> dict:
             raise ValidationFailed(f"unknown cost categories {bad}; allowed: {sorted(COST_CATEGORIES)}")
         if not rp.required_cost_categories:
             raise ValidationFailed("at least one required cost category is needed")
+    if key == "calendar":
+        c: CalendarSettings = obj  # type: ignore[assignment]
+        cid = (c.calendar_id or "").strip()
+        if not cid:
+            raise ValidationFailed("calendar_id must be 'primary' or a calendar address")
+        out["calendar_id"] = cid
     if key == "automation":
         a: AutomationSettings = obj  # type: ignore[assignment]
         for label, val in (("parts_cap", a.parts_cap), ("spend_caps.per_action", a.spend_caps.per_action),

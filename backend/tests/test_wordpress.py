@@ -61,7 +61,9 @@ async def test_F04_discovery_identifies_products_versus_a_custom_vehicle_type(db
         assert p["discovered"]["auth"]["woocommerce"] == {"read": True, "write": True}
         assert "publish_posts" in p["discovered"]["auth"]["wordpress"]["capabilities"]
         assert p["field_map"]["price"] == "regular_price" and p["field_map"]["title"] == "name"
-        assert p["validation"]["sku_convention"] == "stock_no"
+        # the installed shop numbers its own products, so AZKT leaves the SKU column alone by default
+        assert p["validation"]["sku_convention"] == "preserve" and p["sku_strategy"] == "preserve"
+        assert p["field_ownership"]["sku"] == "editor"
         assert set(p["supported_ops"]) >= {"discover", "preview", "upsert_draft", "publish",
                                            "update_availability", "read_back", "archive"}
         # field ownership is explicit: AZKT owns the listing fields, the site owns its own
@@ -282,16 +284,24 @@ def test_reserved_trucks_never_become_purchasable():
 def test_render_payload_maps_only_declared_fields_and_carries_media_checksums():
     package = {"headline": "2018 Daihatsu Hijet", "body": "Body copy.", "short_description": "Short.",
                "price": "12500.00", "sku": "STK-0412", "availability": "available",
-               "media": [{"url": "/api/assets/a1/web", "sha256": "abc", "alt": "front"}],
+               "media": [{"url": "/api/assets/a1/web", "sha256": "abc", "alt": "front", "media_id": "77"}],
                "disclosures": [{"text": "Rust on the left rocker"}], "specs": [{"key": "make", "value": "Daihatsu"}],
                "package_hash": "h1", "vehicle_id": "v1"}
     product = wp.render_payload(package, {"content_type": "product"})
     assert product["name"] == "2018 Daihatsu Hijet" and product["regular_price"] == "12500.00"
-    assert product["sku"] == "STK-0412" and product["images"][0]["sha256"] == "abc"
+    # default strategy: the shop's own SKU column is never written
+    assert "sku" not in product
+    assert product["images"][0]["sha256"] == "abc" and product["images"][0]["id"] == 77
     assert product["meta_data"]["azkt_package_hash"] == "h1" and product["meta_data"]["azkt_vehicle_id"] == "v1"
-    post = wp.render_payload(package, {"content_type": "post"})
+    owned = wp.render_payload(package, {"content_type": "product", "sku_strategy": "stock_no"})
+    assert owned["sku"] == "STK-0412"
+    prefixed = wp.render_payload(package, {"content_type": "product", "sku_strategy": "prefix",
+                                           "sku_prefix": "AZKT-"})
+    assert prefixed["sku"] == "AZKT-STK-0412"
+    post = wp.render_payload(package, {"content_type": "post", "sku_strategy": "stock_no"})
     assert post["title"] == "2018 Daihatsu Hijet" and post["meta"]["vehicle_price"] == "12500.00"
-    assert post["meta"]["gallery"][0]["sha256"] == "abc" and post["meta"]["stock_no"] == "STK-0412"
+    assert post["meta"]["gallery"] == [77] and post["featured_media"] == 77
+    assert post["meta"]["stock_no"] == "STK-0412"
 
 
 def test_validate_package_refuses_a_package_without_an_approved_price():

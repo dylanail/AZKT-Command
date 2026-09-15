@@ -32,6 +32,12 @@ COMMANDS = {
     "evidence": "tasks.attach_evidence", "block": "tasks.report_blocker", "verify": "tasks.verify",
     "reject": "tasks.reject_evidence",
 }
+# Case and promise rows used to be read-only lists. These are the actions that resolve one from the
+# Tasks screen; each maps onto the same command an agent or the MCP connector would call.
+CASE_ACTIONS = {"resolve": "resolved", "reopen": "open", "waiting": "waiting", "block": "blocked",
+                "needs_owner": "needs_owner", "cancel": "cancelled", "update": None}
+PROMISE_ACTIONS = {"kept": "met", "missed": "missed", "withdraw": "withdrawn", "reopen": "open",
+                   "update": None}
 
 
 # ── time helpers ─────────────────────────────────────────────────────────────
@@ -312,6 +318,42 @@ async def list_promises(status: str = Query("open"), limit: int = Query(100, ge=
               "overdue": bool(r.due_at and ensure_aware(r.due_at) < now and r.status in ("open", "proposed")),
               "source_kind": r.source_kind, "source_id": r.source_id, "version": r.version} for r in rows]
     return {"items": items, "total": len(items), "as_of": now.isoformat()}
+
+
+@router.post("/cases/{case_id}/{action}")
+async def case_action(case_id: str, action: str, payload: dict = Body(default={}),
+                      ctx: CommandContext = Depends(command_context)):
+    """Resolve, re-date or reassign a case from the Tasks screen.
+
+    Declared before `/{task_id}/{action}`: both are dispatchers onto the command layer, and this one
+    owns the `cases/` prefix.
+    """
+    if action not in CASE_ACTIONS:
+        raise HTTPException(404, f"unknown case action {action}")
+    body = normalize_times(payload or {}, (payload or {}).get("timezone"))
+    body.pop("timezone", None)
+    status = CASE_ACTIONS[action]
+    if status is not None:
+        body["status"] = status
+    res = await dispatch(ctx, "cases.update", {**body, "case_id": case_id})
+    return res.to_dict()
+
+
+@router.post("/promises/{commitment_id}/{action}")
+async def promise_action(commitment_id: str, action: str, payload: dict = Body(default={}),
+                         ctx: CommandContext = Depends(command_context)):
+    """Mark a promise kept, missed or withdrawn, reopen it, or change what was promised / when."""
+    if action not in PROMISE_ACTIONS:
+        raise HTTPException(404, f"unknown promise action {action}")
+    body = dict(payload or {})
+    tz = body.pop("timezone", None)
+    if body.get("due_at") is not None:
+        body["due_at"] = to_utc(body["due_at"], tz or PHOENIX).isoformat()
+    status = PROMISE_ACTIONS[action]
+    if status is not None:
+        body["status"] = status
+    res = await dispatch(ctx, "commitments.update", {**body, "commitment_id": commitment_id})
+    return res.to_dict()
 
 
 @router.get("/{task_id}")

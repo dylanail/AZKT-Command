@@ -44,10 +44,11 @@ from ..domain.commands import CommandContext, command, dispatch
 from ..domain.events import on_event
 from ..domain.jobs import sweep
 from ..models.assets import Asset, AssetLink
-from ..models.listings import ListingPackage, Publication, SiteProfile
+from ..models.listings import ListingPackage, Publication, SiteMedia, SiteProfile
 from ..models.runtime import ExternalAction
 from ..models.vehicles import ReconIssue, Vehicle, VehicleFact, VehicleMilestone
 from . import approvals as approvals_svc
+from . import assets as assets_svc
 from . import site_profile as site_svc
 
 log = logging.getLogger("azkt.listings")
@@ -58,6 +59,10 @@ LISTING_CLASSES = ("en_route", "ready_for_sale")
 EN_ROUTE_STATES = ("candidate", "purchased", "export_pending", "on_vessel", "at_port", "released", "domestic_transit")
 VERIFY_MAX_ATTEMPTS = 3
 VERIFY_SECONDS = 15 * 60
+# Routine availability scan across everything currently live on the site (spec §12.3). The verify job
+# does the reading, so the scan only has to decide which publications are due.
+AVAILABILITY_SCAN_SECONDS = 60 * 60
+LIVE_STATES = ("published", "verified", "mismatch")
 DATE_LIKE = re.compile(r"\b(?:\d{1,2}[/-]\d{1,2}(?:[/-]\d{2,4})?|(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{1,2})\b",
                        re.IGNORECASE)
 STATUS_PHRASES = {
@@ -627,6 +632,77 @@ def _history(pub: Publication, state: str, detail: str = "", **extra) -> None:
     pub.history = list(pub.history or []) + [{"state": state, "at": now().isoformat(), "detail": detail, **extra}]
 
 
+class LinkIn(BaseModel):
+    vehicle_id: str
+    external_id: str | None = None
+    channel: str = WEBSITE
+    confirm_unlink: bool = False
+
+
+@command("listings.link_existing", input=LinkIn, perm="listings.publish", action_class="owner_only",
+         approval_kind="publish", records=lambda p: [("vehicle", p.vehicle_id)],
+         summary=lambda p: (f"Link {p.vehicle_id[:8]} to site listing {p.external_id}" if p.external_id
+                            else f"Unlink {p.vehicle_id[:8]} from its site listing"),
+         description="Bind a vehicle's publication to a listing that already exists on the site, after a person "
+                     "confirmed it is the same truck. Passing no external_id unlinks instead. Linking never "
+                     "writes to the site — the next publish does, against the confirmed listing.")
+async def listings_link_existing(ctx: CommandContext, inp: LinkIn) -> dict:
+    v = await _vehicle(ctx.db, inp.vehicle_id)
+    pub = (await ctx.db.execute(select(Publication).where(Publication.vehicle_id == v.id,
+                                                          Publication.channel == inp.channel))).scalars().first()
+    if pub is None:
+        pub = Publication(vehicle_id=v.id, channel=inp.channel, desired_state="published", state="queued",
+                          created_by=ctx.actor.user_id, updated_by=ctx.actor.user_id)
+        ctx.db.add(pub)
+        await ctx.db.flush()
+    if not inp.external_id:
+        if pub.external_id and not inp.confirm_unlink:
+            raise Blocked("unlinking leaves the site listing in place and unmanaged; pass confirm_unlink to proceed",
+                          external_id=pub.external_id)
+        previous, pub.external_id = pub.external_id, None
+        pub.external_url = None
+        pub.media_map = {}
+        pub.state = "queued"
+        pub.error = None
+        _history(pub, "queued", f"unlinked from site listing {previous}")
+        ctx.touch(pub, "publication")
+        ctx.record(f"Unlinked {v.stock_no or v.id} from site listing {previous}", entity_kind="vehicle",
+                   entity_id=v.id, kind="listing", state="queued", details={"external_id": previous})
+        return {"publication": serialize_publication(pub), "linked": False}
+    profile = await site_svc.active_profile(ctx.db)
+    prof = site_svc.profile_dict(profile)
+    ad = await _adapter(ctx.db)
+    rows = await _search(ad, prof, external_id=inp.external_id)
+    row = next((r for r in rows if str(r.get("external_id")) == str(inp.external_id)), None)
+    if row is None:
+        raise NotFound(f"the site has no listing {inp.external_id}")
+    claimed = (row.get("meta") or {}).get("azkt_vehicle_id")
+    if claimed and claimed != v.id:
+        raise Blocked("that site listing is already bound to a different vehicle in AZKT",
+                      external_id=inp.external_id, azkt_vehicle_id=claimed)
+    other = (await ctx.db.execute(select(Publication).where(Publication.channel == inp.channel,
+                                                            Publication.external_id == str(inp.external_id),
+                                                            Publication.vehicle_id != v.id))).scalars().first()
+    if other is not None:
+        raise Blocked("another vehicle's publication already points at that site listing",
+                      external_id=inp.external_id, vehicle_id=other.vehicle_id)
+    pub.external_id = str(inp.external_id)
+    pub.external_url = row.get("url") or pub.external_url
+    pub.state = "accepted" if pub.package_id else "queued"
+    pub.error = None
+    pub.media_map = {}
+    _history(pub, pub.state, f"linked by {ctx.actor.user_id or 'owner'} to existing site listing {pub.external_id}",
+             title=row.get("title"), sku=row.get("sku"))
+    ctx.touch(pub, "publication")
+    ctx.record(f"Linked {v.stock_no or v.id} to site listing {pub.external_id}", entity_kind="vehicle",
+               entity_id=v.id, kind="listing", state=pub.state,
+               details={"external_id": pub.external_id, "title": row.get("title"), "url": pub.external_url,
+                        "sku": row.get("sku")})
+    return {"publication": serialize_publication(pub), "linked": True,
+            "listing": {"external_id": pub.external_id, "title": row.get("title"), "url": pub.external_url,
+                        "sku": row.get("sku"), "status": row.get("status")}}
+
+
 @command("listings.publish", input=PublishIn, perm="listings.publish", action_class="consequential",
          approval_kind="publish", records=lambda p: [("listing_package", p.package_id)],
          summary=_publish_summary, consequence=_publish_consequence,
@@ -718,32 +794,189 @@ async def _adapter(db: AsyncSession):
     return await site_svc.website_adapter(db)
 
 
-async def _find_existing(ad, package: dict, prof: dict, pkg: ListingPackage) -> tuple[str | None, dict | None]:
-    """Import an existing listing before creating one (F05). A title-only similarity is a proposal that
-    needs review — never an automatic mapping."""
-    sku = package.get("sku")
-    if sku:
-        try:
-            rows = await ad.read_existing(sku=sku, profile=prof)
-        except (ProviderError, Unsupported):
-            rows = []
-        exact = [r for r in rows if (r.get("sku") or "") == sku]
-        if len(exact) == 1:
-            return exact[0]["external_id"], None
-        if len(exact) > 1:
-            return None, {"reason": "several site listings share this SKU", "candidates": exact[:5]}
+def _site_key(profile: SiteProfile | None, ad) -> str:
+    """Which media library the ids belong to. Two AZKT profile versions of the same site share one."""
+    return ((profile.base_url if profile else "") or getattr(ad, "base_url", "") or "site").rstrip("/")
+
+
+async def _known_media(db: AsyncSession, site_key: str, checksums: list[str]) -> dict:
+    if not checksums:
+        return {}
+    rows = (await db.execute(select(SiteMedia).where(SiteMedia.site_key == site_key,
+                                                     SiteMedia.sha256.in_(checksums)))).scalars().all()
+    return {r.sha256: r.media_id for r in rows if not r.missing}
+
+
+async def _record_media(db: AsyncSession, site_key: str, sha: str, entry: dict, item: dict) -> None:
+    row = (await db.execute(select(SiteMedia).where(SiteMedia.site_key == site_key,
+                                                    SiteMedia.sha256 == sha))).scalars().first()
+    if row is None:
+        row = SiteMedia(site_key=site_key, sha256=sha, media_id=str(entry.get("id")),
+                        asset_id=item.get("asset_id"), uploaded_at=now())
+        db.add(row)
+    row.media_id = str(entry.get("id"))
+    row.source_url = entry.get("src")
+    row.filename = item.get("filename")
+    row.alt = item.get("alt")
+    row.bytes_len = len(item.get("data") or b"")
+    row.asset_id = item.get("asset_id") or row.asset_id
+    row.missing = False
+    row.last_seen_at = now()
+
+
+async def upload_package_media(db: AsyncSession, ad, pkg: ListingPackage, prof: dict,
+                               profile: SiteProfile | None, pub: Publication | None = None) -> tuple[dict, dict]:
+    """Put every approved photo in the site's own media library and return (package, report).
+
+    The site can never fetch `/api/assets/...`: the dashboard needs a signed-in session, so a product
+    written with `src` URLs publishes with no images. Each photo is uploaded once, addressed by its
+    checksum, and reused on every later publish of this or any other vehicle.
+    """
+    package = package_payload(pkg)
+    media = list(package.get("media") or [])
+    report = {"uploaded": 0, "reused": 0, "total": len(media), "skipped": []}
+    if not media:
+        return package, report
+    site_key = _site_key(profile, ad)
+    checksums = [m.get("sha256") for m in media if m.get("sha256")]
+    # The per-site map is the general one; this publication's own map wins where they disagree,
+    # because it was proved against this exact listing.
+    known = await _known_media(db, site_key, checksums)
+    if pub is not None:
+        known = {**known, **dict(pub.media_map or {})}
+    items: list[dict] = []
+    for m in media:
+        sha = m.get("sha256")
+        asset_id = m.get("asset_id")
+        if not sha or not asset_id:
+            report["skipped"].append({"asset_id": asset_id, "reason": "no checksum on the asset"})
+            continue
+        asset = await db.get(Asset, asset_id)
+        if asset is None:
+            report["skipped"].append({"asset_id": asset_id, "reason": "asset row is gone"})
+            continue
+        got = _asset_bytes(asset)
+        if not got:
+            report["skipped"].append({"asset_id": asset_id,
+                                      "reason": "no readable image bytes (the web rendition is missing; the "
+                                                "original is never published because its EXIF is not stripped)"})
+            continue
+        data, content_type = got
+        items.append({"sha256": sha, "asset_id": asset_id, "data": data, "content_type": content_type,
+                      "filename": _media_filename(pkg, m, sha, content_type), "alt": m.get("alt") or pkg.headline,
+                      "title": m.get("alt") or pkg.headline})
+    if report["skipped"]:
+        raise Blocked("some approved photos cannot be uploaded to the website: "
+                      + "; ".join(f"{s['asset_id']}: {s['reason']}" for s in report["skipped"]),
+                      skipped=report["skipped"])
+    entries = await ad.ensure_media(items, known)
+    by_item = {i["sha256"]: i for i in items}
+    for sha, entry in entries.items():
+        if entry.get("reused"):
+            report["reused"] += 1
+        else:
+            report["uploaded"] += 1
+        await _record_media(db, site_key, sha, entry, by_item.get(sha, {}))
+    package["media"] = [{**m, "media_id": (entries.get(m.get("sha256")) or {}).get("id"),
+                         "media_src": (entries.get(m.get("sha256")) or {}).get("src")} for m in media]
+    report["map"] = {sha: str(e.get("id")) for sha, e in entries.items() if e.get("id") is not None}
+    return package, report
+
+
+def package_with_known_media(pkg: ListingPackage, pub: Publication | None) -> dict:
+    """The package payload with the media ids this publication already proved, and no upload.
+
+    Verification and reconciliation compare against what AZKT last wrote, so they need the same ids
+    the publish used. They must never upload: reading the site is not a write.
+    """
+    package = package_payload(pkg)
+    known = dict((pub.media_map if pub is not None else None) or {})
+    if not known:
+        return package
+    package["media"] = [{**m, "media_id": known.get(m.get("sha256")) or known.get(m.get("asset_id"))}
+                        for m in (package.get("media") or [])]
+    return package
+
+
+def _asset_bytes(asset: Asset) -> tuple[bytes, str] | None:
+    """The web rendition, and only ever that.
+
+    The rendition is the one copy with its metadata stripped (services/assets.py), so the original is
+    deliberately not a fallback: publishing it would put the camera's EXIF — including the GPS fix of
+    wherever the truck was photographed — on a public product page. A vehicle whose rendition is
+    missing blocks the publish with a reason instead, which is recoverable; a leaked location is not.
+    A file missing from storage is honestly None rather than an exception that would read as a
+    website failure.
+    """
     try:
-        rows = await ad.read_existing(title=package.get("headline"), profile=prof)
+        got = assets_svc.variant_bytes(asset, "web")
+    except Exception:  # noqa: BLE001 - storage object is gone or unreadable
+        return None
+    return got if got and got[0] else None
+
+
+def _media_filename(pkg: ListingPackage, m: dict, sha: str, content_type: str) -> str:
+    ext = {"image/jpeg": "jpg", "image/png": "png", "image/webp": "webp"}.get(content_type, "jpg")
+    stock = (pkg.evidence or {}).get("stock_no") or (pkg.evidence or {}).get("sku") or pkg.vehicle_id[:8]
+    slot = m.get("slot") or f"photo-{(m.get('position') or 0) + 1}"
+    return f"{stock}-{slot}-{sha[:8]}.{ext}"
+
+
+def _candidate(r: dict) -> dict:
+    return {"external_id": r["external_id"], "title": r.get("title"), "sku": r.get("sku"),
+            "url": r.get("url"), "price": r.get("price"), "status": r.get("status"),
+            "azkt_vehicle_id": (r.get("meta") or {}).get("azkt_vehicle_id")}
+
+
+async def _search(ad, prof: dict, **kw) -> list[dict]:
+    try:
+        return await ad.read_existing(profile=prof, **kw)
     except (ProviderError, Unsupported):
-        rows = []
-    hashed = [r for r in rows if (r.get("meta") or {}).get("azkt_package_hash")]
-    mine = [r for r in hashed if (r.get("meta") or {}).get("azkt_vehicle_id") == pkg.vehicle_id]
+        return []
+
+
+async def _find_existing(ad, package: dict, prof: dict, pkg: ListingPackage) -> tuple[str | None, dict | None]:
+    """Import an existing listing before creating one (F05).
+
+    The only evidence that automatically binds a site listing to a vehicle is AZKT's own
+    `azkt_vehicle_id` meta, or a SKU that AZKT itself owns. On the live site the SKU column belongs to
+    the shop (`sku_strategy = preserve`), so a stock number that happens to equal somebody's SKU is
+    *not* a match. Everything weaker is a proposal a person confirms — never an automatic mapping.
+    """
+    stock_no = package.get("sku")
+    strategy = wp_adapter.sku_strategy_for(prof)
+    rows: list[dict] = []
+    if strategy != "preserve":
+        site_sku = wp_adapter.site_sku(package, prof)
+        if site_sku:
+            rows = await _search(ad, prof, sku=site_sku)
+            exact = [r for r in rows if (r.get("sku") or "") == site_sku]
+            if len(exact) == 1:
+                return exact[0]["external_id"], None
+            if len(exact) > 1:
+                return None, {"reason": "several site listings share this SKU",
+                              "candidates": [_candidate(r) for r in exact[:5]]}
+    # AZKT's own marker is the one automatic binding: it was written by a previous publish.
+    seen: dict[str, dict] = {r["external_id"]: r for r in rows}
+    for term in (stock_no, package.get("headline")):
+        if not term:
+            continue
+        for r in await _search(ad, prof, title=term):
+            seen.setdefault(r["external_id"], r)
+    mine = [r for r in seen.values() if (r.get("meta") or {}).get("azkt_vehicle_id") == pkg.vehicle_id]
     if len(mine) == 1:
         return mine[0]["external_id"], None
-    if rows:
-        return None, {"reason": "a site listing matches by title only — confirm the mapping before publishing",
-                      "candidates": [{"external_id": r["external_id"], "title": r.get("title"), "sku": r.get("sku"),
-                                      "url": r.get("url"), "price": r.get("price")} for r in rows[:5]]}
+    if len(mine) > 1:
+        return None, {"reason": "several site listings claim this vehicle — resolve the duplicates on the site",
+                      "candidates": [_candidate(r) for r in mine[:5]]}
+    # A listing AZKT already bound to a *different* vehicle is definitely not this one, so it is not a
+    # candidate. Without this, a second truck of the same make, model and year would stop for a
+    # confirmation against its stablemate's listing every time.
+    unclaimed = [r for r in seen.values() if not (r.get("meta") or {}).get("azkt_vehicle_id")]
+    if unclaimed:
+        reason = ("a site listing looks like this vehicle but carries no AZKT marker — confirm the mapping "
+                  "before publishing, or publish as a new listing")
+        return None, {"reason": reason, "candidates": [_candidate(r) for r in unclaimed[:5]]}
     return None, None
 
 
@@ -777,7 +1010,14 @@ def _verify(expected_payload: dict, readback: dict, profile: SiteProfile | None)
 
 
 async def _apply_verification(db: AsyncSession, pub: Publication, pkg: ListingPackage, profile: SiteProfile | None,
-                              readback: dict, expected_payload: dict) -> str:
+                              readback: dict, expected_payload: dict, *, scan: bool = False) -> str:
+    """Compare the site against what AZKT last wrote and move the publication's state.
+
+    `scan` marks the routine hourly pass over listings that are already live. A real difference in an
+    AZKT-owned field is drift either way, but a public page that merely has not caught up is only
+    meaningful while a publish is still settling: on a scan it leaves a verified listing verified
+    rather than reopening it every hour because a CDN is holding an old copy.
+    """
     verification = _verify(expected_payload, readback, profile)
     pub.verification = verification
     pub.observed_state = (readback.get("api") or {}).get("status")
@@ -810,7 +1050,12 @@ async def _apply_verification(db: AsyncSession, pub: Publication, pkg: ListingPa
         pub.state = "verified"
         pub.cleanup_required = False
         pub.error = None
-        _history(pub, "verified", "API and public page agree")
+        _history(pub, "verified", "API and public page agree" + (" (routine scan)" if scan else ""))
+        return pub.state
+    if scan:
+        # the API agrees with AZKT; only the rendered page is behind or unreadable
+        _history(pub, pub.state, "routine scan: API matches; " +
+                 (verification["public"].get("reason") or "the public page could not be compared"))
         return pub.state
     if (pub.attempts or 0) >= VERIFY_MAX_ATTEMPTS:
         pub.state = "mismatch"
@@ -840,9 +1085,28 @@ async def _exec_publish(db: AsyncSession, act: ExternalAction) -> dict:
         await db.commit()
         raise Blocked(pub.error)
     prof = site_svc.profile_dict(profile)
-    package = package_payload(pkg)
-    expected_payload = wp_adapter.render_payload({**package, "status": "publish"}, prof)
     ad = await _adapter(db)
+    try:
+        package, media_report = await upload_package_media(db, ad, pkg, prof, profile, pub)
+    except (ProviderError, Unsupported, Blocked) as e:
+        # Blocked is the local half of this: an approved photo whose bytes are gone from storage.
+        # Either way the product is never written without its images, and the row says which it was.
+        kind = ("unreadable_media" if isinstance(e, Blocked)
+                else wp_adapter.error_kind(e) if isinstance(e, ProviderError) else "unsupported")
+        pub.state = "failed"
+        pub.error = f"listing photos could not be uploaded to the site media library: {e}"
+        pub.error_kind = kind
+        pub.cleanup_required = True
+        _history(pub, "failed", pub.error)
+        await db.commit()
+        raise
+    if media_report.get("map"):
+        pub.media_map = {**dict(pub.media_map or {}), **media_report["map"]}
+    if media_report["total"]:
+        _history(pub, pub.state, f"media library: {media_report['uploaded']} uploaded, "
+                                 f"{media_report['reused']} reused of {media_report['total']}")
+    await db.commit()
+    expected_payload = wp_adapter.render_payload({**package, "status": "publish"}, prof)
     pub.attempts = (pub.attempts or 0) + 1
     if not pub.external_id:
         found, proposal = await _find_existing(ad, package, prof, pkg)
@@ -896,7 +1160,10 @@ async def _exec_publish(db: AsyncSession, act: ExternalAction) -> dict:
     except (ProviderError, Unsupported) as e:
         readback = {"api": {}, "public": {"fetched": False, "error": str(e)}}
     state = await _apply_verification(db, pub, pkg, profile, readback, expected_payload)
-    pub.media_map = _media_map(pkg, (readback.get("api") or {}).get("images") or [])
+    pub.media_map = {**dict(pub.media_map or {}),
+                     **_media_map(pkg, (readback.get("api") or {}).get("images") or [])}
+    pub.verification = {**dict(pub.verification or {}),
+                        "media": _verify_media(package, (readback.get("api") or {}).get("images") or [])}
     pkg.status = "published"
     pkg.bump(None)
     if state == "verified":
@@ -907,6 +1174,19 @@ async def _exec_publish(db: AsyncSession, act: ExternalAction) -> dict:
     await db.commit()
     return {"sent": True, "state": state, "provider_ref": pub.external_id, "external_url": pub.external_url,
             "verification": pub.verification}
+
+
+def _verify_media(package: dict, images: list) -> dict:
+    """Did the site keep the media ids AZKT sent, in order?
+
+    This is what proves photos actually landed. Comparing checksums would prove nothing: the site
+    does not store ours. The ids do, and they came back from the site's own media library.
+    """
+    sent = [str(m.get("media_id")) for m in (package.get("media") or []) if m.get("media_id")]
+    observed = [str(i.get("id")) for i in images if isinstance(i, dict) and i.get("id") is not None]
+    missing = [m for m in sent if m not in observed]
+    return {"sent": len(sent), "observed": len(observed), "missing": missing,
+            "order_ok": observed[:len(sent)] == sent, "ok": not missing}
 
 
 def _media_map(pkg: ListingPackage, images: list) -> dict:
@@ -1248,15 +1528,18 @@ async def _availability_from_event(db: AsyncSession, vehicle_id: str, *, reason:
 async def _verify_job(jctx: jobs.JobContext, payload: dict) -> dict:
     db = jctx.db
     pub = await db.get(Publication, payload.get("publication_id"))
+    scan = bool(payload.get("scan"))
     if pub is None or not pub.external_id:
         return {"skipped": "no publication"}
-    if pub.state in ("verified", "unsupported"):
+    if pub.state == "unsupported" or (pub.state == "verified" and not scan):
         return {"skipped": pub.state}
     pkg = await db.get(ListingPackage, pub.package_id) if pub.package_id else None
     profile = await db.get(SiteProfile, pub.profile_id) if pub.profile_id else await site_svc.active_profile(db)
     prof = site_svc.profile_dict(profile)
     ad = await _adapter(db)
-    pub.attempts = (pub.attempts or 0) + 1
+    if not scan:
+        # attempts is the retry budget for a publish that is still settling, not a scan counter
+        pub.attempts = (pub.attempts or 0) + 1
     try:
         readback = await ad.read_back(pub.external_id, profile=prof)
     except (ProviderError, Unsupported) as e:
@@ -1285,8 +1568,13 @@ async def _verify_job(jctx: jobs.JobContext, payload: dict) -> dict:
         return {"state": pub.state}
     if pkg is None:
         return {"skipped": "no package"}
-    expected_payload = wp_adapter.render_payload({**package_payload(pkg), "status": "publish"}, prof)
-    state = await _apply_verification(db, pub, pkg, profile, readback, expected_payload)
+    expected = {**package_with_known_media(pkg, pub), "status": "publish"}
+    if pub.desired_state in wp_adapter.availability_map_for(prof):
+        # a later reserve/sell changed the intended availability without rebuilding the package: the
+        # scan compares the site against what AZKT currently intends, not against a stale package
+        expected["availability"] = pub.desired_state
+    expected_payload = wp_adapter.render_payload(expected, prof)
+    state = await _apply_verification(db, pub, pkg, profile, readback, expected_payload, scan=scan)
     if state == "verified":
         await _record_listed_milestone(db, pub, pkg)
     elif state == "pending_verification":
@@ -1335,7 +1623,7 @@ async def reconcile_unknown(db: AsyncSession) -> dict:
             continue
         pub.external_url = (readback.get("api") or {}).get("url") or pub.external_url
         if pkg is not None:
-            expected = wp_adapter.render_payload({**package_payload(pkg), "status": "publish"}, prof)
+            expected = wp_adapter.render_payload({**package_with_known_media(pkg, pub), "status": "publish"}, prof)
             state = await _apply_verification(db, pub, pkg, profile, readback, expected)
             if state == "verified":
                 await _record_listed_milestone(db, pub, pkg)
@@ -1355,6 +1643,31 @@ async def reconcile_unknown(db: AsyncSession) -> dict:
         out["reconciled"] += 1
     await db.commit()
     return out
+
+
+@sweep("listings.availability_scan", AVAILABILITY_SCAN_SECONDS)
+async def listings_availability_scan(session_factory) -> dict:
+    """Routine hourly scan of every listing that is live on the site (spec §12.3).
+
+    Verification after a publish only re-checks publications that have not settled yet, so a price or
+    stock change made later in wp-admin would never be noticed. This re-reads everything that is live
+    and lets the ordinary verify job compare it against what AZKT last wrote; a difference in an
+    AZKT-owned field pauses writes as drift, exactly as it does right after a publish.
+    """
+    async with session_factory() as db:
+        try:
+            await _adapter(db)
+        except Unsupported as e:
+            return {"setup_blocked": str(e)}
+        rows = (await db.execute(select(Publication).where(
+            Publication.channel == WEBSITE, Publication.state.in_(LIVE_STATES),
+            Publication.external_id.is_not(None)))).scalars().all()
+        bucket = now().strftime("%Y%m%d%H")
+        for pub in rows:
+            await jobs.enqueue(db, "listings.verify", {"publication_id": pub.id, "scan": True},
+                               dedupe_key=f"listing:scan:{pub.id}:{bucket}")
+        await db.commit()
+        return {"scanned": len(rows), "bucket": bucket}
 
 
 @sweep("listings.reconcile", VERIFY_SECONDS)

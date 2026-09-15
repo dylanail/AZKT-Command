@@ -19,6 +19,17 @@ Version 4.0 · September 14, 2026 · Companion to AZKT-Full-Build-Spec.md
 | External agent connection | Generic authenticated connector into Manager; MCP plus equivalent HTTP interface. No personal agent-specific implementation or terminology. |
 | Home | Display timeline, profit, costs and related sales/turnaround metrics directly on Home, with source detail and estimate/completeness labels. |
 
+## Confirmed by Dylan, September 15 2026
+
+| Item | Decision |
+|---|---|
+| Business SMS | **Dropped.** Not built and not planned. The dedicated number, shared SMS inbox, consent/opt-out handling and delivery receipts described in spec §5.5 are out of scope until Dylan says otherwise. Customer contact stays email, Telegram (private) and the phone he already answers. |
+| Marketplaces | **Deferred, manual.** Facebook Marketplace and similar have no workable listing API, so no adapter is built. Publishing to any channel other than the website stays the existing path: AZKT generates the copy, photos and checklist and assigns posting **and cleanup** to a person, tracked per channel (spec §7.3). |
+| Calendar | **Google Calendar on `info@azkeitrucks.com`.** Appointments only — calls, meetings and scheduled blocks become events. Operational to-do tasks do not. AZKT stays the authority for reminders; the calendar is a mirror people can see. |
+| Website media | Listing photos are **uploaded into the site's own media library** and referenced by media id. The site cannot fetch an AZKT asset URL, so a product written with URLs publishes with no images. |
+| Website SKU | The live shop numbers its own products, so the AZKT stock number is **not** the site SKU. AZKT leaves that column alone (`sku_strategy = preserve`) and identifies its listings by the `azkt_vehicle_id` meta. A vehicle is bound to an existing product by a person confirming it, never by a guess. |
+| External agent | Dylan's personal agent is the one external client. Callbacks are delivered to the destination **he** configures in Settings; a URL that appears in a request or in model output is never called. |
+
 ## Handoff implementation decisions
 
 These resolve incomplete or conflicting design notes. They are explicit builder defaults, not claims that Dylan supplied each technical value.
@@ -55,7 +66,7 @@ These resolve incomplete or conflicting design notes. They are explicit builder 
 | S12 | Existing auction source, schedules, credentials by secure connection; agent/corpus exports and pending work | Continuity of matcher/watcher and migration ownership | Runtime/domain scaffolding and new intake. |
 | S13 | Approved sending aliases/signature, current policies/style, corpus coverage and sample corrected replies | High-quality reply evaluation and exact outbound account | Draft workflow using scoped fixtures and admitted live context. |
 | S14 | Per-run/day/month model and external-service budget; any future spending caps | Recurring model-work activation and bounded purchase permissions | Manual controls, deterministic timers, ingestion and supervised testing. |
-| S15 | Calendar/SMS account and supported marketplace methods | Additional channel activation | Shared schedule/inbox and manual publication packages. |
+| S15 | Google Calendar consent on `info@azkeitrucks.com` (see the decisions above: SMS dropped, marketplaces stay manual) | Writing appointments onto the business calendar | Tasks, reminders and the manual channel package already work without it. |
 | S16 | Retention and recovery needs beyond proposed 24h RPO / 4h RTO | Production backup/asset retention configuration | Restore tooling and isolated restore drill. |
 | S17 | External client's supported MCP/HTTP authorization, desired record/action scope and owner pairing | Activating that client's access; do not infer it from text claiming owner approval | Build/document generic connector and use a controlled test client. |
 | S18 | Existing recorded acquisition/sale dates, cost allocation basis and cost-completeness rules | Labeling cost/profit/timing coverage accurately | Home layout, deterministic formulas and explicit incomplete/estimated states. |

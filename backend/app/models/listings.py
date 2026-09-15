@@ -38,6 +38,36 @@ class SiteProfile(Base, BusinessRow):
     activated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     activated_by: Mapped[str | None] = mapped_column(String, nullable=True)
     discovered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # How the site's SKU column is treated. The live catalogue numbers its products its own way, so
+    # `preserve` (the default) never writes that column and identifies listings by `azkt_vehicle_id`.
+    sku_strategy: Mapped[str] = mapped_column(String, default="preserve")   # preserve|stock_no|prefix
+    sku_prefix: Mapped[str | None] = mapped_column(String, nullable=True)
+    # Which shop categories a published vehicle belongs to, and which recorded specs become product
+    # attributes. Empty means AZKT sends neither key, so an editor's own values are never wiped.
+    category_ids: Mapped[list] = mapped_column(JSON, default=list)          # WooCommerce category ids
+    attribute_map: Mapped[dict] = mapped_column(JSON, default=dict)         # spec key -> {id|name, visible}
+
+
+class SiteMedia(Base, BusinessRow):
+    """One image AZKT uploaded into the site's media library, addressed by its checksum.
+
+    The map lives per site (`site_key` is the site's base URL), not per publication: republishing a
+    vehicle, rebuilding a package, or publishing a second vehicle that shares a photo all reuse the
+    upload instead of filling the library with duplicates.
+    """
+    __tablename__ = "site_media"
+    __table_args__ = (UniqueConstraint("site_key", "sha256", name="uq_site_media"),)
+    site_key: Mapped[str] = mapped_column(String, index=True)
+    sha256: Mapped[str] = mapped_column(String, index=True)
+    media_id: Mapped[str] = mapped_column(String)
+    asset_id: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
+    source_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    filename: Mapped[str | None] = mapped_column(String, nullable=True)
+    alt: Mapped[str | None] = mapped_column(Text, nullable=True)
+    bytes_len: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    uploaded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    missing: Mapped[bool] = mapped_column(Boolean, default=False)   # the site no longer has this id
 
 
 class ListingPackage(Base, BusinessRow):

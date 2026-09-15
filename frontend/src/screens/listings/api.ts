@@ -22,6 +22,8 @@ export const listingPaths = {
   publish: (packageId: string) => `/api/listings/packages/${enc(packageId)}/publish`,
   /** POST — set the desired availability and queue the channel updates. */
   availability: () => "/api/listings/publish-availability",
+  /** POST — bind this vehicle to a listing that already exists on the site (no external_id unlinks). */
+  link: (vehicleId: string) => `/api/listings/vehicles/${enc(vehicleId)}/link`,
   /** GET — publication history (all vehicles, or one). */
   publications: (vehicleId?: string) =>
     vehicleId ? `/api/listings/publications?vehicle_id=${enc(vehicleId)}` : "/api/listings/publications",

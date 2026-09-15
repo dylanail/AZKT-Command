@@ -114,3 +114,12 @@
   .lst-blocker__actions .btn,
   .lst-pub__head .btn { min-height: 44px; }
 }
+
+/* needs_review: the candidate site listings a person picks from before anything is written. */
+.lst-pub__choice {
+  display: flex; flex-direction: column; gap: 8px;
+  margin-top: 8px; padding: 10px 12px;
+  border: 1px solid var(--line); border-radius: 10px;
+  background: color-mix(in oklab, var(--amber) 8%, transparent);
+}
+.lst-pub__choice a { overflow-wrap: anywhere; }

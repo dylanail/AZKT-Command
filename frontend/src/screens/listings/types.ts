@@ -87,7 +87,31 @@ export interface ListingPackage {
 }
 
 /* ---------- publication ---------- */
-export interface PublicationHistoryEntry { state: string; at: string; detail?: string; [k: string]: unknown }
+/** One candidate site listing offered for confirmation when AZKT will not guess the mapping. */
+export interface ListingCandidate {
+  external_id: string;
+  title?: string | null;
+  sku?: string | null;
+  url?: string | null;
+  price?: string | null;
+  status?: string | null;
+  azkt_vehicle_id?: string | null;
+}
+export interface PublicationHistoryEntry {
+  state: string; at: string; detail?: string;
+  candidates?: ListingCandidate[];
+  [k: string]: unknown;
+}
+
+/** The candidates from the most recent needs_review entry, if that is still where the row sits. */
+export function pendingCandidates(pub: Publication): ListingCandidate[] {
+  if (pub.state !== "needs_review") return [];
+  for (let i = (pub.history || []).length - 1; i >= 0; i -= 1) {
+    const h = pub.history[i];
+    if (h.state === "needs_review" && Array.isArray(h.candidates)) return h.candidates as ListingCandidate[];
+  }
+  return [];
+}
 export interface Publication {
   id: string;
   version: number;

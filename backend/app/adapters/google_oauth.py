@@ -32,7 +32,15 @@ SCOPES = {
     "drive": ["openid", "email", "https://www.googleapis.com/auth/drive.readonly"],
     "sheets": ["openid", "email", "https://www.googleapis.com/auth/spreadsheets.readonly",
                "https://www.googleapis.com/auth/drive.metadata.readonly"],
+    # Calendar is connected read-only first: listing the day and finding an overlapping appointment
+    # needs nothing more. Creating events is a separate explicit capability (spec §11.2), so its
+    # scope is a separate set the owner opts into, exactly like gmail send/modify.
+    "google_calendar": ["openid", "email", "https://www.googleapis.com/auth/calendar.readonly"],
+    "google_calendar_write": ["https://www.googleapis.com/auth/calendar.events"],
 }
+# Providers whose connected Google account must be the business mailbox; anything else is reported as
+# an identity mismatch rather than silently accepted (A07).
+BUSINESS_IDENTITY_PROVIDERS = ("gmail_business", "google_calendar")
 
 _state = URLSafeTimedSerializer(settings.SESSION_SECRET, salt="google-oauth-state")
 
@@ -84,7 +92,8 @@ async def exchange(db: AsyncSession, state: str, code: str) -> Connection:
             info = ui.json()
     conn = await conn_svc.get(db, provider, create=True)
     identity = info.get("email")
-    expected = settings.BUSINESS_EMAIL if provider == "gmail_business" else (conn.config or {}).get("expected_identity")
+    expected = (settings.BUSINESS_EMAIL if provider in BUSINESS_IDENTITY_PROVIDERS
+                else (conn.config or {}).get("expected_identity"))
     if expected and identity and identity.lower() != expected.lower():
         # A07: identity mismatch is surfaced, never silently accepted.
         conn.status = "error"

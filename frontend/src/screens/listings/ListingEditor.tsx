@@ -328,7 +328,7 @@ export default function ListingEditor() {
         </div>
         {pubsQ.loading ? <div style={{ padding: 16 }}><Loading rows={2} label="Loading publications" /></div>
           : pubsQ.error ? <div style={{ padding: 16 }}><ErrorState error={pubsQ.error} onRetry={pubsQ.reload} /></div>
-            : <Publications items={pubs} />}
+            : <Publications items={pubs} onChanged={reloadAll} />}
       </GlassPanel>
 
       <Expander title="Sources and technical details">

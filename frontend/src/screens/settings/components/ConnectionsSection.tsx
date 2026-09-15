@@ -11,7 +11,7 @@ import { can, whyNot } from "../../../lib/perms";
 import { Button, EmptyState, ErrorState, Field, GlassPanel, HealthLabel, Input, Loading, Notice, ResponsiveDialog, When, useToast } from "../../../ui";
 import { freshnessHealth, type Connection, type ConnectionsResp } from "./types";
 
-const GOOGLE = new Set(["gmail_business", "gmail_personal", "drive", "sheets"]);
+const GOOGLE = new Set(["gmail_business", "gmail_personal", "drive", "sheets", "google_calendar"]);
 interface FieldSpec { key: string; label: string; hint?: string; secret?: boolean; list?: boolean; type?: string; placeholder?: string }
 const SECRET_FIELDS: Record<string, FieldSpec[]> = {
   square: [{ key: "access_token", label: "Access token", secret: true, hint: "Square Developer › Credentials. Stored encrypted; never shown again." }],
@@ -34,8 +34,10 @@ const CONFIG_FIELDS: Record<string, FieldSpec[]> = {
 };
 const SERVER_ONLY: Record<string, string> = {
   model: "The AI model key is set on the server (ANTHROPIC_API_KEY).",
-  sms: "Business SMS arrives in a later stage.",
-  calendar: "Calendar writes arrive in a later stage.",
+  // `sms` (dropped) and the old `calendar` placeholder (replaced by the connectable google_calendar)
+  // are no longer listed by the API; these stay only for a row written before those decisions.
+  sms: "Business SMS was dropped and is not planned.",
+  calendar: "Replaced by the business calendar row.",
   legacy_notion: "Legacy Notion mirror is configured on the server.",
   legacy_openclaw: "Legacy agents are configured on the server.",
 };
@@ -43,7 +45,8 @@ const USED_FOR: Record<string, string> = {
   gmail_business: "Inbox, customer replies, promises", gmail_personal: "Exporter and broker mail only", drive: "Vehicle photos and documents",
   sheets: "Ledger import and cost matching", square: "Deposits and payments", telegram: "Reminders and Manager chat",
   wordpress: "Website listings", woocommerce: "Website listings", model: "Drafts, summaries, matching", smtp: "Reminder emails",
-  sms: "Text reminders", calendar: "Calls and meetings", legacy_notion: "Read-only mirror", legacy_openclaw: "Read-only",
+  google_calendar: "Calls and meetings on the calendar",
+  sms: "Dropped", calendar: "Replaced", legacy_notion: "Read-only mirror", legacy_openclaw: "Read-only",
 };
 
 type DialogKind = "google" | "secret" | "config" | "disconnect";

@@ -287,7 +287,11 @@ Customer/vendor messages, web pages, attachments, source documents, and corpus e
 
 Suppress auto-replies to bounces, automated notifications, suspected spam, duplicate messages, opted-out contacts, disputes requiring owner review, and taken-over threads. An email from a customer saying “yes” may answer a question but is not Dylan's authenticated approval. Establish commitments only from confirmed sent messages or an authorized record of a promise already made elsewhere.
 
-Business SMS remains part of the full scope from prior conversations: dedicated AZKT number, shared Inbox, contact/shipment matching, inbound/outbound receipts, delivery states, consent/opt-out handling, takeover, and the same send permissions. Confirm provider/account/registration requirements before activation. Customer/vendor SMS and Dylan's private agent conversation are separate channels.
+**Dropped by Dylan on 15 September 2026.** Business SMS is not built and not planned; see
+docs/handoff/Decisions-and-Setup.md. What follows is the scope that was dropped, kept for the record in
+case it is ever revived: a dedicated AZKT number, shared Inbox, contact/shipment matching,
+inbound/outbound receipts, delivery states, consent/opt-out handling, takeover, and the same send
+permissions. Customer/vendor SMS and Dylan's private agent conversation would be separate channels.
 
 ## 5. Sales, tasks, reminders, and mobile contact
 
