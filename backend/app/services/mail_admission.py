@@ -17,6 +17,7 @@ from datetime import datetime, timezone
 
 from sqlalchemy import select
 
+from ..core.ids import sha256_hex
 from ..models.comms import Connection, Conversation, Message
 from .matching import normalize_email
 
@@ -98,9 +99,24 @@ def admit(conn: Connection | None, meta: dict) -> AdmissionResult:
     return evaluate(rules_for(conn), meta)
 
 
-def count_excluded(conn: Connection, reason: str) -> dict:
-    """Rejected content is counted, never stored (spec §4.1, §4.2 exclusion counts)."""
+SEEN_LIMIT = 500   # bounded ring of already-counted exclusions, so a replay cannot inflate the number
+
+
+def count_excluded(conn: Connection, reason: str, provider_message_id: str | None = None) -> dict:
+    """Rejected content is counted, never stored (spec §4.1, §4.2 exclusion counts).
+
+    The count is what the owner is shown as "excluded from the personal mailbox", so it has to mean
+    *messages*, not *attempts*: a duplicate push, a replayed history page or a bounded resync sees the
+    same rejected message again and must not count it twice (invariant 1). Only a short one-way digest
+    of the provider id is kept — never the sender, subject or any content of a rejected message."""
     counts = dict(conn.excluded_counts or {})
+    seen = [str(x) for x in (counts.get("seen") or [])]
+    if provider_message_id:
+        token = sha256_hex(str(provider_message_id))[:16]
+        if token in seen:
+            return counts
+        seen.append(token)
+        counts["seen"] = seen[-SEEN_LIMIT:]
     counts["total"] = int(counts.get("total", 0)) + 1
     by = dict(counts.get("by_reason") or {})
     by[reason] = int(by.get(reason, 0)) + 1
@@ -146,7 +162,7 @@ async def quarantine_unauthorized(ctx, conn: Connection, *, reason: str = "allow
         m.excluded_reason = res.reason or reason
         m.quarantined_at = ctx.now
         m.bump(ctx.actor.user_id)
-        count_excluded(conn, f"quarantined:{res.reason or reason}")
+        count_excluded(conn, f"quarantined:{res.reason or reason}", f"quarantine:{m.provider_message_id or m.id}")
         quarantined.append(m.id)
     conv_ids = sorted({m.conversation_id for m in rows if m.id in quarantined})
     for cid in conv_ids:

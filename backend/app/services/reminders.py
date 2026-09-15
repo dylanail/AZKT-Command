@@ -194,6 +194,15 @@ def recipient_email(u: User) -> str | None:
     return u.reminder_email or u.email
 
 
+def address_is_verified(u: User) -> bool:
+    """True only when the address a reminder goes to is one the person proved they control.
+    There is no verification flow yet, so a self-set `reminder_email` is reported as unverified rather
+    than described as verified anywhere in the UI or in a delivery state."""
+    if u.reminder_email and u.reminder_email != (u.email or None):
+        return bool(u.reminder_email_verified_at)
+    return bool(u.email)
+
+
 # ── scheduling ──────────────────────────────────────────────────────────────
 def dedupe_key(task_id: str, revision: int, kind: str, recipient: str, channel: str) -> str:
     return f"{task_id}:{revision}:{kind}:{recipient}:{channel}"
@@ -275,7 +284,10 @@ async def schedule_for_task(db: AsyncSession, task: Task) -> dict:
                     deliver_at=apply_quiet_hours(u, fire, "task_reminder"),
                     payload={"title": task.title, "due_at": due.isoformat() if due else None,
                              "reminder_kind": task.reminder_kind, "snoozed": bool(snooze),
-                             "snoozed_until": snooze.isoformat() if snooze else None})
+                             "snoozed_until": snooze.isoformat() if snooze else None,
+                             # the chosen moment had already passed when this row was written, so a
+                             # delivery "after deliver_at" is the first possible one, not a missed one
+                             "scheduled_late": fire <= right_now})
                 if made:
                     created.append(key)
 
@@ -293,7 +305,8 @@ async def schedule_for_task(db: AsyncSession, task: Task) -> dict:
                     db, dedupe=key, kind="overdue", task_id=task.id, task_revision=revision,
                     entity_kind="task", entity_id=task.id, recipient_user_id=u.id, channel=ch,
                     deliver_at=overdue_at,
-                    payload={"title": task.title, "due_at": due.isoformat()})
+                    payload={"title": task.title, "due_at": due.isoformat(),
+                             "scheduled_late": overdue_at <= right_now})
                 if made:
                     created.append(key)
     return {"task_id": task.id, "created": created, "superseded": superseded, "revision": revision}
@@ -527,7 +540,10 @@ async def _deliver_one(db: AsyncSession, delivery_id: str) -> str:
         row.cancel_reason = "older than the obsolete window; collapsed into the next digest"
         row.lease_token = None
         return "collapsed"
-    late = age_minutes > cfg["late_grace_minutes"]
+    # "late" means this reminder waited in the queue past the moment it was owed. A row written for a
+    # moment that had *already* passed (a task entered after it was due) is not late — it is going out
+    # at the first possible moment, and labelling it late would blame an interruption that never happened.
+    late = age_minutes > cfg["late_grace_minutes"] and not bool((row.payload or {}).get("scheduled_late"))
 
     ctx = await build_context(db, row, task, user, late=late)
     if row.channel == "email":
@@ -663,7 +679,7 @@ async def _send_email(db: AsyncSession, row: ScheduledDelivery, user: User, ctx:
     from ..adapters import email as email_adapter
     to = recipient_email(user)
     if not to:
-        return _fail(row, "setup_blocked: no verified reminder email configured for this person")
+        return _fail(row, "setup_blocked: no reminder email configured for this person")
     template = row.kind if row.kind in email_templates.KINDS else "task_reminder"
     if row.kind == "connection_issue":
         subject = ctx.get("subject") or "A connection needs attention"
@@ -696,7 +712,7 @@ async def _send_email(db: AsyncSession, row: ScheduledDelivery, user: User, ctx:
         row.lease_token = None
         return "unknown"
     row.provider_ref = receipt.get("provider_ref")
-    row.receipt = {**receipt, "subject": subject, "to": to}
+    row.receipt = {**receipt, "subject": subject, "to": to, "address_verified": address_is_verified(user)}
     row.sent_at = now()
     row.late = late
     row.lease_token = None
@@ -739,6 +755,10 @@ async def _send_telegram(db: AsyncSession, row: ScheduledDelivery, user: User, c
     except Unsupported as e:
         await _telegram_fallback(db, row, user, str(e), cfg)
         return _fail(row, f"setup_blocked: {e}")
+    except DomainError as e:
+        # e.g. the non-production destination guard (H08): nothing was delivered, so say so and fall back
+        await _telegram_fallback(db, row, user, f"{type(e).__name__}: {e.message}", cfg)
+        return _fail(row, f"{type(e).__name__}: {e.message}")
     row.receipt = {"provider": "telegram", "chat_id": pairing.chat_id,
                    "message_id": (res.get("result") or {}).get("message_id")}
     row.provider_ref = str((res.get("result") or {}).get("message_id") or "")
@@ -924,6 +944,8 @@ async def _on_connection_degraded(db: AsyncSession, ev) -> None:
                                      group_key=f"connection:{provider}", dedupe=dedupe, reopen=is_new,
                                      payload={"provider": provider, "kind": kind, "message": p.get("message"),
                                               "incident": incident})
+        if note is None:
+            continue
         if is_new and not created:
             # the source recovered and broke again: one fresh row, counted from this incident
             note.payload = {**(note.payload or {}), "provider": provider, "kind": kind,
@@ -943,7 +965,15 @@ async def _on_connection_degraded(db: AsyncSession, ev) -> None:
 
 
 # ── read side used by the API ───────────────────────────────────────────────
-def serialize_delivery(r: ScheduledDelivery) -> dict:
+DESTINATION_KEYS = ("to", "chat_id")
+
+
+def serialize_delivery(r: ScheduledDelivery, *, reveal_destination: bool = True) -> dict:
+    receipt = {k: v for k, v in (r.receipt or {}).items() if k not in ("text", "html")}
+    if not reveal_destination:
+        # where a *different* person is reminded is that person's contact detail, not this reader's
+        # record data: the state is shown, the email address and private Telegram chat are not.
+        receipt = {k: v for k, v in receipt.items() if k not in DESTINATION_KEYS}
     return {"id": r.id, "kind": r.kind, "channel": r.channel, "state": r.state, "late": bool(r.late),
             "task_id": r.task_id, "task_revision": r.task_revision, "entity_kind": r.entity_kind,
             "entity_id": r.entity_id, "recipient_user_id": r.recipient_user_id,
@@ -952,7 +982,7 @@ def serialize_delivery(r: ScheduledDelivery) -> dict:
             "delivered_at": r.delivered_at.isoformat() if r.delivered_at else None,
             "attempts": r.attempts, "last_error": r.last_error, "cancel_reason": r.cancel_reason,
             "provider_ref": r.provider_ref, "fallback_of_id": r.fallback_of_id,
-            "receipt": {k: v for k, v in (r.receipt or {}).items() if k not in ("text", "html")},
+            "receipt": receipt, "destination_hidden": not reveal_destination,
             "dedupe_key": r.dedupe_key,
             "state_label": STATE_LABELS.get(r.state, r.state)}
 
@@ -964,7 +994,10 @@ STATE_LABELS = {
 }
 
 
-async def deliveries_for_task(db: AsyncSession, task_id: str) -> list[dict]:
+async def deliveries_for_task(db: AsyncSession, task_id: str, actor=None) -> list[dict]:
     rows = (await db.execute(select(ScheduledDelivery).where(ScheduledDelivery.task_id == task_id)
                              .order_by(ScheduledDelivery.deliver_at))).scalars().all()
-    return [serialize_delivery(r) for r in rows]
+    viewer = getattr(actor, "user_id", None)
+    owner_view = getattr(actor, "kind", None) == "user" and getattr(actor, "role", None) == "owner"
+    return [serialize_delivery(r, reveal_destination=(actor is None or owner_view
+                                                      or r.recipient_user_id == viewer)) for r in rows]

@@ -67,6 +67,9 @@ class Settings(BaseSettings):
     REMINDER_FROM: str = "AZKT <reminders@azkt.app>"
     OWNER_REMINDER_EMAIL: str = ""           # verified destination; empty = email reminders held
     FORBIDDEN_RECIPIENTS: str = "wordpress@azkeitrucks.com"
+    # Outside ENV=production, delivering transports (SMTP/Gmail send, website publish, Telegram) may only reach these
+    # destinations: emails, "@domain" suffixes, chat ids or URL prefixes, comma-separated (H08).
+    NON_PROD_DESTINATION_ALLOWLIST: str = ""
 
     # ── telegram ─────────────────────────────────────────────────────────
     TELEGRAM_BOT_TOKEN: str = ""

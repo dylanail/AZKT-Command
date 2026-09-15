@@ -12,6 +12,7 @@ from email.message import EmailMessage
 from email.utils import make_msgid
 
 from ..core.config import settings
+from ..core.destinations import assert_destination_allowed
 from ..core.errors import ProviderError, Unsupported
 from ..services.forbidden_recipient import assert_allowed
 
@@ -99,4 +100,8 @@ async def send(msg: OutboundEmail) -> dict:
     assert_allowed(*msg.to)
     if not msg.to:
         raise Unsupported("no recipient configured")
-    return await transport().send(msg)
+    t = transport()
+    if not isinstance(t, (MemoryTransport, LogTransport)):
+        # A delivering transport outside production may only reach allowlisted recipients (H08).
+        assert_destination_allowed("email", *msg.to)
+    return await t.send(msg)

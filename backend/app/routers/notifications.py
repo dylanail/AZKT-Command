@@ -45,7 +45,7 @@ async def deliveries(task_id: str | None = Query(default=None), actor: Actor = D
     elif actor.kind in ("user", "agent") and (actor.scope == "assigned" or not actor.perms.get("vehicles.all", False)):
         if t.owner_user_id != actor.user_id:
             raise HTTPException(403, "record not accessible")
-    rows = await reminders.deliveries_for_task(db, task_id)
+    rows = await reminders.deliveries_for_task(db, task_id, actor)
     return {"task_id": task_id, "deliveries": rows,
             "note": "Provider acceptance is not proof the message was seen."}
 

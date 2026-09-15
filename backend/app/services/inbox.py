@@ -38,7 +38,7 @@ from ..models import User
 from ..models.comms import Connection, Conversation, Draft, Message, ProviderEvent
 from ..models.contacts import Contact, ContactIdentity
 from ..models.notify import Notification
-from ..models.runtime import WorkflowControl
+from ..models.runtime import ExternalAction, WorkflowControl
 from ..models.vehicles import Vehicle
 from . import connections as conn_svc
 from . import mail_admission, matching, reply_checks
@@ -309,6 +309,28 @@ def _body_hash(msg: dict) -> str:
     return sha256_hex(f"{(msg.get('subject') or '').strip()}|{(msg.get('new_text') or msg.get('text') or '').strip()}")[:32]
 
 
+def _human_locked(conv: Conversation) -> bool:
+    """True when a person set this thread's classification (mark_spam / classify_override)."""
+    return conv.classification_source == "human" and bool(conv.classification)
+
+
+SUPPRESSION_BY_CLASSIFICATION = {"spam": "spam", "newsletter": "newsletter", "automated": "auto_reply",
+                                 "bounce": "bounce", "payment": "automated_notice"}
+
+
+def _effective_verdict(conv: Conversation, verdict: dict, *, direction: str) -> dict:
+    """The verdict the conversation state machine acts on. A hard per-message suppression (bounce,
+    auto-reply, opt-out, dispute, duplicate) always applies; otherwise a person's classification wins."""
+    if direction != "in" or not _human_locked(conv):
+        return verdict
+    out = dict(verdict)
+    out["classification"] = conv.classification
+    if not out["suppression"]:
+        out["suppression"] = SUPPRESSION_BY_CLASSIFICATION.get(conv.classification)
+    out["reasons"] = [f"classification set by a person: {conv.classification}"] + list(verdict["reasons"])[:3]
+    return out
+
+
 # ── commands ─────────────────────────────────────────────────────────────────
 class IngestIn(BaseModel):
     connection_id: str
@@ -439,23 +461,30 @@ async def inbox_ingest_message(ctx: CommandContext, inp: IngestIn) -> dict:
             conv.contact_id = match.contact_id
         elif match.state == "proposed" and conv.contact_id is None:
             conv.contact_id = match.contact_id
-    conv.classification = verdict["classification"] if direction == "in" else conv.classification
-    conv.classification_reasons = list(verdict["reasons"])[:6]
-    conv.classification_source = verdict["source"]
-    if verdict["sensitivity"] != "normal":
-        conv.sensitivity = verdict["sensitivity"]
-    if verdict["classification"] == "spam":
-        conv.spam_reason = "; ".join(verdict["reasons"])[:300]
+    # A person's correction owns the thread: a later message re-classifies itself, never the human decision
+    # (inbox.mark_spam / inbox.classify_override stay in force until a person reverses them).
+    effective = _effective_verdict(conv, verdict, direction=direction)
+    if direction == "in" and not _human_locked(conv):
+        conv.classification = verdict["classification"]
+        conv.classification_reasons = list(verdict["reasons"])[:6]
+        conv.classification_source = verdict["source"]
+    elif direction == "in":
+        conv.classification_reasons = list(conv.classification_reasons or [])[:5] + [
+            f"new message classified {verdict['classification']} deterministically; the correction by a person stands"]
+    if effective["sensitivity"] != "normal":
+        conv.sensitivity = effective["sensitivity"]
+    if effective["classification"] == "spam" and not conv.spam_reason:
+        conv.spam_reason = "; ".join(effective["reasons"])[:300]
 
     provisional = None
-    if direction == "in" and verdict["classification"] == "customer" and conv.contact_id is None and not verdict["suppression"]:
+    if direction == "in" and effective["classification"] == "customer" and conv.contact_id is None and not effective["suppression"]:
         provisional = await _provisional_contact(ctx, inp, display_name)
         if provisional:
             conv.contact_id = provisional["id"]
             conv.contact_match = "proposed"
             conv.match_reasons = ["provisional contact created from a new sender (no existing identity guessed)"]
 
-    await _apply_state(ctx, conv, verdict, direction=direction, message=m)
+    await _apply_state(ctx, conv, effective, direction=direction, message=m)
     ctx.touch(conv, "conversation")
     ctx.changed.append({"kind": "message", "id": m.id, "version": m.version})
 
@@ -600,15 +629,38 @@ async def _conv(ctx: CommandContext, conversation_id: str, expected_version: int
     return c
 
 
+UNSENT_DRAFT_STATUSES = ("draft", "blocked", "pending_approval", "approved", "sending")
+
+
+async def cancel_draft_intent(db, draft: Draft, reason: str) -> str | None:
+    """Stop a send that is already queued. A persisted intent that has not been executed is cancelled so
+    the single executor skips it; an intent that already ran keeps its receipt and is never rewritten."""
+    if not draft.external_action_id:
+        return None
+    act = await db.get(ExternalAction, draft.external_action_id)
+    if act is None or act.state != "intent":
+        return None
+    act.state = "cancelled"
+    act.error = reason[:500]
+    return act.id
+
+
 async def invalidate_drafts(ctx: CommandContext, conv: Conversation, reason: str, *, only_unsent: bool = True) -> list[str]:
-    """Invalidate unsent drafts and their approvals for a conversation (spec §4.3, B06, F10)."""
+    """Invalidate unsent drafts and their approvals for a conversation (spec §4.3, B06, F10).
+
+    A draft in ``sending`` has a persisted ExternalAction intent behind it: invalidating the draft without
+    cancelling that intent would let the executor deliver a reply the business has already retracted, so
+    both are stopped here (an approval-bound intent is additionally cancelled by approvals.invalidate)."""
     from . import approvals as approvals_svc
     q = select(Draft).where(Draft.conversation_id == conv.id)
     if only_unsent:
-        q = q.where(Draft.status.in_(("draft", "blocked", "pending_approval", "approved")))
+        q = q.where(Draft.status.in_(UNSENT_DRAFT_STATUSES))
     rows = (await ctx.db.execute(q)).scalars().all()
-    ids = []
+    ids, cancelled = [], []
     for d in rows:
+        act_id = await cancel_draft_intent(ctx.db, d, reason)
+        if act_id:
+            cancelled.append(act_id)
         d.status = "invalidated"
         d.invalidated_reason = reason
         d.bump(ctx.actor.user_id)
@@ -616,9 +668,10 @@ async def invalidate_drafts(ctx: CommandContext, conv: Conversation, reason: str
     await approvals_svc.invalidate_for_entity(ctx, "conversation", conv.id, reason)
     if ids:
         ctx.record(f"Invalidated {len(ids)} unsent draft(s): {reason}", entity_kind="conversation", entity_id=conv.id,
-                   kind="automation", state="invalidated", exception=True, details={"drafts": ids, "reason": reason})
+                   kind="automation", state="invalidated", exception=True,
+                   details={"drafts": ids, "reason": reason, "cancelled_sends": cancelled})
         ctx.emit("draft.invalidated", aggregate_type="conversation", aggregate_id=conv.id,
-                 payload={"drafts": ids, "reason": reason})
+                 payload={"drafts": ids, "reason": reason, "cancelled_sends": cancelled})
     return ids
 
 
@@ -1041,7 +1094,7 @@ async def _ingest_one(db, conn: Connection, adapter, message_id: str, *, correla
         verdict = mail_admission.admit(conn, {"from": meta.get("from"), "to": meta.get("to"), "cc": meta.get("cc"),
                                               "thread_id": meta.get("thread_id"), "label_ids": meta.get("label_ids")})
         if not verdict.admitted:
-            mail_admission.count_excluded(conn, verdict.reason or "not allowlisted")
+            mail_admission.count_excluded(conn, verdict.reason or "not allowlisted", message_id)
             await db.commit()
             return {"message_id": message_id, "result": "excluded", "reason": verdict.reason}
     else:
@@ -1431,7 +1484,8 @@ async def coverage(db, actor=None) -> dict:
             "freshness": fr,
             "coverage": {"from": _iso(c.coverage_from) if c else None, "to": _iso(c.coverage_to) if c else None},
             "gaps": gaps, "gap_history": list((c.coverage_gaps if c else None) or []),
-            "excluded": dict((c.excluded_counts if c else None) or {}),
+            # `seen` is the internal replay guard (digests only); the owner sees counts, not a list
+            "excluded": {k: v for k, v in ((c.excluded_counts if c else None) or {}).items() if k != "seen"},
             "watch_expires_at": _iso(c.watch_expires_at) if c else None,
             "catch_up": dict((c.catch_up_state if c else None) or {}),
             "capabilities": dict((c.capabilities if c else None) or {}),

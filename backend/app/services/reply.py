@@ -237,9 +237,13 @@ def answer_for(item: dict, facts: dict) -> tuple[str | None, dict | None]:
             return (f"{_vehicle_label(v)} is still available.",
                     {"kind": "vehicle", "id": v["id"], "field": "commercial_state", "value": v["commercial_state"],
                      "as_of": facts["as_of"]})
-        return (f"{_vehicle_label(v)} is {v['commercial_state'] if v['commercial_state'] != 'not_listed' else v['allocation']} "
-                f"now, so I cannot hold it for you.",
-                {"kind": "vehicle", "id": v["id"], "field": "commercial_state", "value": v["commercial_state"]})
+        reason = reply_checks.unavailable_reason(v) or "not available"
+        field = ("commercial_state" if v.get("commercial_state") in ("reserved", "sold", "delivered")
+                 else "allocation" if v.get("allocation") in ("reserved", "sold") else "sale.status")
+        value = (v.get("commercial_state") if field == "commercial_state"
+                 else v.get("allocation") if field == "allocation" else (v.get("sale") or {}).get("status"))
+        return (f"{_vehicle_label(v)} is {reason} now, so I cannot hold it for you.",
+                {"kind": "vehicle", "id": v["id"], "field": field, "value": value})
     if "price" in topics and v and v.get("asking_price"):
         return (f"The asking price for {_vehicle_label(v)} is {v['asking_price']} {v.get('asking_currency') or 'USD'}.",
                 {"kind": "vehicle", "id": v["id"], "field": "asking_price", "value": v["asking_price"]})
@@ -370,7 +374,10 @@ async def prepare_reply(ctx: CommandContext, *, conversation_id: str, reason: st
     prior = (await ctx.db.execute(select(Draft).where(Draft.conversation_id == conv.id)
                                   .order_by(Draft.draft_version.desc()).limit(1))).scalars().first()
     version = (prior.draft_version + 1) if prior else 1
-    if prior is not None and prior.status in ("draft", "blocked", "pending_approval", "approved"):
+    if prior is not None and prior.status in inbox_svc.UNSENT_DRAFT_STATUSES:
+        # a prior version that is already queued (`sending`) carries a persisted intent: cancel it here or
+        # the executor would deliver the superseded text alongside the new version.
+        await inbox_svc.cancel_draft_intent(ctx.db, prior, f"superseded by draft version {version}")
         prior.status = "superseded"
         prior.invalidated_reason = f"superseded by version {version} ({reason})"
         prior.bump(ctx.actor.user_id)
@@ -482,6 +489,7 @@ async def reply_edit(ctx: CommandContext, inp: EditIn) -> dict:
                 created_by_role=old.created_by_role, account_connection_id=old.account_connection_id,
                 facts=facts, generator="human", based_on_inbound_id=old.based_on_inbound_id,
                 send_decision_version=conv.send_decision_version or 0, supersedes_id=old.id,
+                our_message_id=gmail_adapter.make_message_id(_domain_of(facts) or "azkeitrucks.com"),
                 edit_history=list(old.edit_history or []) + [
                     {"from_version": old.draft_version, "by": ctx.actor.user_id, "at": ctx.now.isoformat(),
                      "note": inp.note, "fields": sorted([f for f in ("body", "subject", "to", "cc", "attachments")
@@ -785,7 +793,12 @@ async def _record_sent(db, d: Draft, conv: Conversation, receipt: dict, payload:
     conv.no_reply_reason = None
     # commitments are established only from a confirmed sent message (spec §4.5)
     made = []
+    already = {(t or "")[:2000] for t in (await db.execute(
+        select(Commitment.text).where(Commitment.source_kind == "message",
+                                      Commitment.source_id == existing.id))).scalars().all()}
     for promise in (d.commitments or []):
+        if promise.get("text", "")[:2000] in already:
+            continue  # the same confirmed send is never a second commitment (reconciliation replay)
         c = Commitment(text=promise.get("text", "")[:2000], contact_id=conv.contact_id,
                        vehicle_id=next((l["id"] for l in (conv.links or []) if l.get("kind") == "vehicle"), None),
                        made_by="azkt", made_at=now, status="open", source_kind="message", source_id=existing.id)
@@ -818,6 +831,9 @@ async def reply_reconcile_unknown(ctx: CommandContext, inp: ReconcileIn) -> dict
         raise NotFound("no external action to reconcile")
     if act.state not in ("unknown", "executing"):
         return {"state": act.state, "reconciled": False, "reason": "not in an unknown state"}
+    if act.state == "executing" and act.lease_until and act.lease_until > datetime.now(timezone.utc):
+        # the single executor still holds the lease: reconciling now could record the same send twice
+        return {"state": act.state, "reconciled": False, "reason": "the executor still holds the lease"}
     p = dict(act.payload or {})
     conn = await ctx.db.get(Connection, p.get("connection_id")) if p.get("connection_id") else None
     d = await ctx.db.get(Draft, p.get("draft_id"))
@@ -826,6 +842,8 @@ async def reply_reconcile_unknown(ctx: CommandContext, inp: ReconcileIn) -> dict
         adapter = gmail_adapter.build(ctx.db, conn)
     except Unsupported as e:
         return {"state": act.state, "reconciled": False, "reason": str(e), "setup_blocked": True}
+    if d is None or conv is None:
+        return {"state": act.state, "reconciled": False, "reason": "the draft or conversation no longer exists"}
     found = await adapter.find_sent_by_message_id(p.get("our_message_id") or "")
     if not found:
         ctx.record("Send result still unknown; no matching Sent message — no retry", entity_kind="conversation",

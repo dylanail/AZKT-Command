@@ -51,8 +51,23 @@ ETA_CONTEXT_RE = re.compile(r"\b(eta|arriv\w*|deliver\w*|lands?|docks?|port|vess
 CURRENCY_ALIASES = {"$": "USD", "us$": "USD", "usd": "USD", "dollars": "USD", "¥": "JPY", "￥": "JPY",
                     "jpy": "JPY", "yen": "JPY", "€": "EUR", "eur": "EUR"}
 SCAFFOLD_MARK = "[needs fact:"
+# Classifications the suppression rules (spec §4.5) keep out of the automated reply path entirely.
+SUPPRESSED_CLASSES = ("bounce", "automated", "newsletter", "spam", "payment")
 MONTHS = {m: i for i, m in enumerate(
     ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"], start=1)}
+
+
+def unavailable_reason(vehicle: dict) -> str | None:
+    """Why a linked truck cannot be offered, in the words of the record that says so. `available` is
+    resolved in services.reply.gather_facts and already folds in an active reservation/sale."""
+    if vehicle.get("commercial_state") in ("reserved", "sold", "delivered"):
+        return str(vehicle["commercial_state"])
+    if vehicle.get("allocation") in ("reserved", "sold"):
+        return str(vehicle["allocation"])
+    sale_status = (vehicle.get("sale") or {}).get("status")
+    if vehicle.get("available") is False:
+        return f"under an active sale ({sale_status})" if sale_status else "not available"
+    return None
 
 
 def split_sentences(text: str) -> list[str]:
@@ -189,11 +204,15 @@ def run(draft, conversation, facts: dict) -> list[dict]:
     checks.append(_check("forbidden_recipient", not bad, "No forbidden recipient" if not bad else f"Forbidden recipient: {', '.join(bad)}",
                          remediation="Remove the forbidden address.", forbidden=bad))
 
-    # 3. sending account
-    checks.append(_check("account", bool(account.get("connection_id")) and bool(account.get("identity")),
-                         f"Sends from {account.get('identity') or 'no account'}",
+    # 3. sending account — a customer reply leaves from the business mailbox, never the personal one (§4.1, §11.1)
+    provider = account.get("provider")
+    account_ok = bool(account.get("connection_id")) and bool(account.get("identity")) and provider != "gmail_personal"
+    checks.append(_check("account", account_ok,
+                         f"Sends from {account.get('identity') or 'no account'}" if account_ok else
+                         ("The personal mailbox cannot send a business reply" if provider == "gmail_personal"
+                          else "No connected business mailbox for this thread"),
                          remediation="Connect the business mailbox; business replies never route through a personal account.",
-                         account=account.get("identity"), connection_id=account.get("connection_id")))
+                         account=account.get("identity"), connection_id=account.get("connection_id"), provider=provider))
 
     # 4. attachments referenced exist
     available = {str(a.get("id")) for a in (facts.get("attachments_available") or [])}
@@ -223,17 +242,16 @@ def run(draft, conversation, facts: dict) -> list[dict]:
     # 7. factual claims backed by current facts (B08): availability
     claims_available = bool(AVAILABLE_RE.search(body))
     acknowledges = bool(RESERVED_ACK_RE.search(body))
-    unavailable = [v for v in vehicles if (v.get("commercial_state") in ("reserved", "sold", "delivered")
-                                           or v.get("allocation") in ("reserved", "sold"))]
+    unavailable = [v for v in vehicles if unavailable_reason(v)]
     avail_ok = not (claims_available and unavailable and not acknowledges)
     checks.append(_check("availability_current", avail_ok,
                          "Availability matches the current record" if avail_ok
                          else f"Draft says available; {', '.join(v.get('stock_no') or v.get('id', '')[:8] for v in unavailable)} is "
-                              f"{unavailable[0].get('commercial_state') or unavailable[0].get('allocation')} now",
+                              f"{unavailable_reason(unavailable[0])} now",
                          remediation="Use the current state (reserved/sold) and offer an alternative; a historical example never "
                                      "overrides the record.",
-                         vehicles=[{"id": v.get("id"), "state": v.get("commercial_state"), "allocation": v.get("allocation")}
-                                   for v in unavailable]))
+                         vehicles=[{"id": v.get("id"), "state": v.get("commercial_state"), "allocation": v.get("allocation"),
+                                    "reason": unavailable_reason(v)} for v in unavailable]))
 
     # 8. money / currency consistent with recorded prices
     mentions = money_mentions(body)
@@ -281,18 +299,27 @@ def run(draft, conversation, facts: dict) -> list[dict]:
                          "Contact has not opted out" if not opted_out else "Contact opted out of email",
                          remediation="Do not email this contact; handle it as an exception."))
 
-    # 12. dispute / sensitivity requires owner handling
+    # 12. suppressed traffic is never auto-answered (spec §4.5): bounces, automated notices, lists, spam
+    cls = (conversation.classification if conversation is not None else None) or ""
+    suppressed = cls in SUPPRESSED_CLASSES
+    checks.append(_check("no_auto_reply_class", not suppressed,
+                         "Thread is ordinary correspondence" if not suppressed
+                         else f"{cls} traffic is never auto-answered",
+                         remediation="If a person really is waiting for an answer here, correct the classification first.",
+                         classification=cls))
+
+    # 13. dispute / sensitivity requires owner handling
     sensitive = (conversation.sensitivity if conversation is not None else "normal") in ("dispute",)
     checks.append(_check("sensitivity", not sensitive,
                          "Routine correspondence" if not sensitive else "Dispute — owner must handle this thread",
                          remediation="Owner review required before any reply goes out."))
 
-    # 13. thread not taken over by a person (spec §4.3)
+    # 14. thread not taken over by a person (spec §4.3)
     taken = (conversation.state == "taken_over") if conversation is not None else False
     checks.append(_check("takeover", not taken, "Automation is active for this thread" if not taken else "Thread is taken over by a person",
                          remediation="Resume the thread before sending from AZKT."))
 
-    # 14. source freshness (F5 / H11 / spec §12.4)
+    # 15. source freshness (F5 / H11 / spec §12.4)
     fr = (account.get("freshness") or {}).get("state", "disconnected")
     fresh_ok = fr == "ok"
     checks.append(_check("source_freshness", fresh_ok,
@@ -300,14 +327,14 @@ def run(draft, conversation, facts: dict) -> list[dict]:
                          remediation="Wait for catch-up to finish (or reconnect) so the thread can be refreshed before sending.",
                          freshness=account.get("freshness")))
 
-    # 15. no unresolved coverage gap over this thread
+    # 16. no unresolved coverage gap over this thread
     gaps = list(facts.get("coverage_gaps") or [])
     checks.append(_check("coverage_gap", not gaps,
                          "No coverage gap on this account" if not gaps else f"{len(gaps)} unresolved coverage gap(s)",
                          remediation="Finish the catch-up resync so no inbound message is missing before replying.",
                          gaps=gaps))
 
-    # 16. identity certainty: a proposed/ambiguous contact match blocks sending (spec §11.3, B04)
+    # 17. identity certainty: a proposed/ambiguous contact match blocks sending (spec §11.3, B04)
     match_state = (conversation.contact_match if conversation is not None else "unmatched")
     id_ok = match_state == "matched"
     checks.append(_check("identity_certainty", id_ok,
@@ -315,20 +342,20 @@ def run(draft, conversation, facts: dict) -> list[dict]:
                          remediation="Confirm which contact this is (or link the right one) before replying.",
                          contact_match=match_state))
 
-    # 17. record links that are only proposed need review before a customer send (B04/B06)
+    # 18. record links that are only proposed need review before a customer send (B04/B06)
     proposed = [l for l in (facts.get("links") or []) if l.get("match") != "matched"]
     checks.append(_check("record_links", not proposed,
                          "Linked records are confirmed" if not proposed else f"{len(proposed)} proposed link(s) need review",
                          remediation="Confirm or correct the vehicle/record link before sending.",
                          proposed=[{"kind": l.get("kind"), "id": l.get("id")} for l in proposed]))
 
-    # 18. promises are recorded as commitments, not blocked
+    # 19. promises are recorded as commitments, not blocked
     promises = detect_promises(body)
     checks.append(_check("promises_recorded", True,
                          "No promise detected" if not promises else f"{len(promises)} promise(s) will be recorded as commitments",
                          blocking=False, promises=promises))
 
-    # 19. permission: a customer send always needs exact approval on day one (spec §11.2)
+    # 20. permission: a customer send always needs exact approval on day one (spec §11.2)
     checks.append(_check("permission", True, "Customer sends require exact approval", blocking=False,
                          action_class="consequential"))
     return checks

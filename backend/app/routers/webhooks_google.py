@@ -8,11 +8,12 @@ without repeating a business effect (spec §12.1 event envelope, invariant 1).
 from __future__ import annotations
 
 import base64
+import hmac
 import json
 import logging
 
 from fastapi import APIRouter, Header, Query, Request, Response
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from fastapi import Depends
 
@@ -29,13 +30,15 @@ GMAIL_PROVIDERS = inbox_svc.GMAIL_PROVIDERS
 
 
 def _token_ok(token: str | None, authorization: str | None) -> bool:
+    """Constant-time comparison: the verification token is the only thing standing between an
+    anonymous POST and a stored, trusted provider event, so it is never compared byte-by-byte."""
     expected = settings.GOOGLE_PUBSUB_VERIFICATION_TOKEN
     if not expected:
         return False
     bearer = ""
     if authorization and authorization.lower().startswith("bearer "):
         bearer = authorization.split(" ", 1)[1].strip()
-    return token == expected or bearer == expected
+    return hmac.compare_digest(token or "", expected) or hmac.compare_digest(bearer, expected)
 
 
 @router.post("/api/webhooks/gmail", status_code=204)
@@ -63,9 +66,12 @@ async def gmail_push(request: Request, response: Response, token: str | None = Q
     history_id = str(decoded.get("historyId") or "")
     if not email_address or not history_id:
         return Response(status_code=400)
+    # exact, case-insensitive equality: `ilike` would read the delivered address as a LIKE pattern, so a
+    # mailbox with `_` or `%` in it could be steered onto another account's connection.
     conn = (await db.execute(select(Connection).where(
         Connection.provider.in_(GMAIL_PROVIDERS),
-        Connection.account_identity.ilike(email_address)))).scalars().first()
+        func.lower(Connection.account_identity) == email_address.lower()).order_by(
+        Connection.created_at))).scalars().first()
     if conn is None:
         # an unknown mailbox is acknowledged (Pub/Sub would retry forever otherwise) but never processed
         log.warning("Gmail push for an unconnected mailbox")
