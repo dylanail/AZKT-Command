@@ -33,9 +33,10 @@ export interface DualTime {
   utc: string | null;
   tokyo: string;
   phoenix: string;
-  tokyo_iso: string | null;
-  phoenix_iso: string | null;
-  source: string | null;
+  /** services/shipping._dual returns the short form (utc + both zones) with no iso/source. */
+  tokyo_iso?: string | null;
+  phoenix_iso?: string | null;
+  source?: string | null;
 }
 
 /* ---------- requirements & gates ---------- */

@@ -3,7 +3,7 @@
    next action, Add update (intake in existing mode), Ask about this, and a More menu.
    Tabs: Overview · Work · Files · Sale · Money. Money appears only with costs.read and tolerates 403/404.
    Facts carry a Source button that opens the single inspector in source-details mode with the provenance. */
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { api } from "../../lib/api";
 import { useAuth } from "../../lib/auth";
@@ -13,8 +13,8 @@ import { useIsMobile } from "../../lib/viewport";
 import { useInspector } from "../../app/Inspector";
 import {
   Button, Chip, EmptyState, ErrorState, Expander, Field, GlassPanel, HealthLabel, Input, KeyValues, Loading,
-  Menu, Money, MoveStageButton, Notice, NotRecorded, PageHeader, ResponsiveDialog, SegmentedControl, TabPanel,
-  Tabs, Textarea, When, useToast, type MenuItem,
+  Menu, Money, MoveStageButton, Notice, NotRecorded, PageHeader, ResponsiveDialog, SegmentedControl, Select,
+  TabPanel, Tabs, Textarea, When, useToast, type MenuItem,
 } from "../../ui";
 import { TaskRow } from "../tasks/TaskRow";
 import { NewTaskDialog, ReasonDialog, RescheduleSheet, AssignSheet, useTaskDialogs } from "../tasks/TaskSheets";
@@ -30,8 +30,8 @@ import {
   fetchGates, issuePath, movePath, partsPath, useVehicle, useVehicleCommand, useVehicleMoney, vehiclePath, workOrderPath,
 } from "./components/useVehicle";
 import {
-  CLASSIFICATION_LABELS, CONDITION_SOURCE_LABELS, ISSUE_STATUS_LABELS, RECON_STATES, SEVERITY_LABELS, SHOP_STAGES,
-  allocationLabel, situationOf, stateLabel, vehicleHealth,
+  CLASSIFICATION_LABELS, CONDITION_SOURCE_LABELS, ISSUE_STATUS_LABELS, MILESTONE_LABELS, MILESTONE_ORDER,
+  RECON_STATES, SEVERITY_LABELS, SHOP_STAGES, allocationLabel, situationOf, stateLabel, vehicleHealth,
   type ConditionBullet, type GateItem, type GateTaskRef, type IssueData, type MoveResult, type VehicleDetailResp,
 } from "./types";
 import "./vehicles.css";
@@ -149,7 +149,7 @@ export default function VehicleDetail() {
 
   const moreItems: MenuItem[] = [
     { label: "Open the shop board", to: "/vehicles?view=shop&layout=board" },
-    { label: "Record a milestone", onSelect: () => setTab("overview"), meta: "Overview", disabled: !canWrite, disabledReason: whyNot("vehicles.write") },
+    { label: "Full activity", to: `/activity?entity_kind=vehicle&entity_id=${encodeURIComponent(v.id)}` },
     { label: v.archived_at ? "Restore vehicle" : "Archive vehicle", sepBefore: true, disabled: !canWrite, disabledReason: whyNot("vehicles.write"),
       onSelect: () => { void archive(); } },
   ];
@@ -170,7 +170,11 @@ export default function VehicleDetail() {
 
   return (
     <div className="page page-wide">
-      <PageHeader crumbs={crumbs} title={<span className="sr-only">{v.title}</span>} className="sr-only-head" />
+      <nav className="crumbs" aria-label="Breadcrumb">
+        <Link to="/vehicles">{employee ? "Vehicles you work on" : "Vehicles"}</Link>
+        <span aria-hidden="true">›</span>
+        <span className="truncate" style={{ color: "var(--t2)" }}>{v.stock_no || v.title}</span>
+      </nav>
 
       <header className="vh-header">
         <VehicleThumb assetId={v.hero_asset_id} size={mobile ? "lg" : "xl"} />
@@ -308,6 +312,7 @@ function OverviewTab({ d, activity, activityDenied, reload, cmd, canWrite, isOwn
   const o = d.tabs.overview;
   const [editing, setEditing] = useState<ConditionBullet | null>(null);
   const [adding, setAdding] = useState(false);
+  const [milestone, setMilestone] = useState(false);
 
   const links: Array<{ label: string; to: string; meta: string }> = [];
   for (const s of d.tabs.work.shipments || []) {
@@ -439,8 +444,12 @@ function OverviewTab({ d, activity, activityDenied, reload, cmd, canWrite, isOwn
       </section>
 
       <section className="vh-sect">
-        <div className="vh-sect__head"><h2>Milestones</h2></div>
+        <div className="vh-sect__head">
+          <h2>Milestones</h2>
+          <Button size="sm" variant="soft" onClick={() => setMilestone(true)} disabled={!canWrite} disabledReason={whyNot("vehicles.write")}>Record milestone</Button>
+        </div>
         <MilestoneList milestones={o.milestones} showMissing />
+        <span className="fs12 t4">Planned, estimated and completed are different things. A milestone with no date reads "Not recorded" — nothing is guessed.</span>
       </section>
 
       <Expander title="Sources and technical details">
@@ -465,7 +474,69 @@ function OverviewTab({ d, activity, activityDenied, reload, cmd, canWrite, isOwn
           return ok;
         }}
       />
+      <MilestoneDialog
+        open={milestone}
+        onClose={() => setMilestone(false)}
+        onSave={async (kind, status, at, note) => {
+          const body: Record<string, unknown> = { kind, status, source_kind: "owner_reported", expected_version: v.version };
+          if (at) body.at = at;
+          if (note) body.note = note;
+          const out = await cmd.run("milestone", vehiclePath(v.id, "milestone"), body, { okMessage: "Milestone recorded with its source" });
+          if (out.ok) { reload(); return true; }
+          return false;
+        }}
+      />
     </div>
+  );
+}
+
+function MilestoneDialog({ open, onClose, onSave }: {
+  open: boolean; onClose: () => void;
+  onSave: (kind: string, status: string, at: string | null, note: string) => Promise<boolean>;
+}) {
+  const mobile = useIsMobile();
+  const [kind, setKind] = useState("received");
+  const [status, setStatus] = useState("completed");
+  const [date, setDate] = useState("");
+  const [note, setNote] = useState("");
+  const [busy, setBusy] = useState(false);
+  useEffect(() => { if (open) { setKind("received"); setStatus("completed"); setDate(""); setNote(""); } }, [open]);
+  const at = date ? new Date(`${date}T12:00:00`).toISOString() : null;
+  const future = !!at && new Date(at).getTime() > Date.now();
+  const invalid = status === "completed" && future;
+  return (
+    <ResponsiveDialog
+      mobile={mobile} open={open} onClose={onClose} title="Record milestone" size="sm"
+      description="Recorded as owner-reported with your name. It does not imply inspection, payment or readiness."
+      footer={
+        <>
+          <Button variant="primary" loading={busy} disabled={invalid} disabledReason="A completed milestone can't be in the future — record it as planned or estimated."
+            onClick={async () => { setBusy(true); const ok = await onSave(kind, status, at, note.trim()); setBusy(false); if (ok) onClose(); }}>Save</Button>
+          <Button variant="ghost" onClick={onClose}>Cancel</Button>
+        </>
+      }
+    >
+      <div className="stack">
+        <Field label="Milestone" required>
+          <Select value={kind} onChange={(e) => setKind(e.target.value)}>
+            {MILESTONE_ORDER.map((k) => <option key={k} value={k}>{MILESTONE_LABELS[k] || k}</option>)}
+          </Select>
+        </Field>
+        <div className="tk-grid2">
+          <Field label="Status">
+            <Select value={status} onChange={(e) => setStatus(e.target.value)}>
+              <option value="completed">Completed</option>
+              <option value="estimated">Estimated</option>
+              <option value="planned">Planned</option>
+            </Select>
+          </Field>
+          <Field label="Date" hint="Leave empty for “Not recorded”.">
+            <Input type="date" value={date} onChange={(e) => setDate(e.target.value)} />
+          </Field>
+        </div>
+        <Field label="Note"><Input value={note} onChange={(e) => setNote(e.target.value)} placeholder="Optional, e.g. arrived at the shop" /></Field>
+      </div>
+    </ResponsiveDialog>
   );
 }
 
@@ -473,7 +544,7 @@ function BulletDialog({ open, bullet, onClose, onSave }: { open: boolean; bullet
   const mobile = useIsMobile();
   const [text, setText] = useState("");
   const [busy, setBusy] = useState(false);
-  useMemo(() => { if (open) setText(bullet?.text || ""); }, [open, bullet]);
+  useEffect(() => { if (open) setText(bullet?.text || ""); }, [open, bullet]);
   return (
     <ResponsiveDialog
       mobile={mobile}
@@ -701,7 +772,7 @@ function SimpleFormDialog({ open, onClose, title, label, placeholder, extraLabel
   const [main, setMain] = useState("");
   const [extra, setExtra] = useState("");
   const [busy, setBusy] = useState(false);
-  useMemo(() => { if (open) { setMain(""); setExtra(""); } }, [open]);
+  useEffect(() => { if (open) { setMain(""); setExtra(""); } }, [open]);
   return (
     <ResponsiveDialog
       mobile={mobile} open={open} onClose={onClose} title={title} size="sm"
@@ -925,7 +996,7 @@ function PriceDialog({ open, onClose, current, currency, onSave }: {
   const [amount, setAmount] = useState("");
   const [cur, setCur] = useState(currency);
   const [busy, setBusy] = useState(false);
-  useMemo(() => { if (open) { setAmount(current || ""); setCur(currency); } }, [open, current, currency]);
+  useEffect(() => { if (open) { setAmount(current || ""); setCur(currency); } }, [open, current, currency]);
   const valid = /^\d+(\.\d{1,2})?$/.test(amount.trim());
   return (
     <ResponsiveDialog
