@@ -1,5 +1,7 @@
 # Railway topology (spec §13.1)
 
+**Setting it up from nothing: [SETUP.md](SETUP.md).** This file is the topology reference.
+
 | Service | Source | Start command | Notes |
 |---|---|---|---|
 | `web` | this repo, Dockerfile | `python -m backend.app.main` | `railway.json` at repo root. Pre-deploy runs `scripts/migrate.sh`. Health `/readyz`. Serves the built PWA from `frontend/dist` and the API. |

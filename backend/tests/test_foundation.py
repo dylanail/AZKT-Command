@@ -224,3 +224,16 @@ async def test_a_handed_off_action_is_not_labelled_confirmed(db, owner):
     assert act.state == "handed_off" and act.receipt["sent"] is False
     assert a.status == "handed_off", "work a person still has to finish is never shown as confirmed"
     assert a.receipt["state"] == "manual_send_required"
+
+
+def test_managed_postgres_urls_get_the_async_driver():
+    """Railway and Heroku-style add-ons hand out a driverless URL that SQLAlchemy reads as
+    synchronous, and `create_async_engine` then refuses it. Pasting the provider's own variable is
+    the obvious thing to do, so the scheme is normalised rather than left as a note to read."""
+    from backend.app.core.config import Settings
+    assert Settings(DATABASE_URL="postgresql://u:p@h:5432/d").DATABASE_URL == "postgresql+asyncpg://u:p@h:5432/d"
+    assert Settings(DATABASE_URL="postgres://u:p@h:5432/d").DATABASE_URL == "postgresql+asyncpg://u:p@h:5432/d"
+    # an explicit driver is somebody's deliberate choice and is left alone
+    assert Settings(DATABASE_URL="postgresql+asyncpg://u:p@h/d").DATABASE_URL == "postgresql+asyncpg://u:p@h/d"
+    assert Settings(DATABASE_URL="postgresql+psycopg://u:p@h/d").DATABASE_URL == "postgresql+psycopg://u:p@h/d"
+    assert Settings(TEST_DATABASE_URL="postgres://u@h/t").TEST_DATABASE_URL == "postgresql+asyncpg://u@h/t"
