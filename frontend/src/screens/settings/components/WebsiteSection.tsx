@@ -166,7 +166,7 @@ export function WebsiteSection() {
                   />
                   <div className="row-wrap">
                     <Button variant="primary" loading={busy("discover")} disabled={!!discoverReason} disabledReason={discoverReason}
-                      onClick={() => act("discover", { base_url: baseUrl.trim() || null, staging_url: stagingUrl.trim() || null }, "Reading the site…")}>
+                      onClick={() => act("discover", { base_url: baseUrl.trim() || null, staging_url: stagingUrl.trim() || null }, "Read the site and stored a new profile version.")}>
                       Read the site
                     </Button>
                   </div>
@@ -223,11 +223,11 @@ export function WebsiteSection() {
 
                   <div className="row-wrap">
                     <Button variant="soft" loading={busy("discover")} disabled={!!discoverReason} disabledReason={discoverReason}
-                      onClick={() => act("discover", { base_url: baseUrl.trim() || null, staging_url: stagingUrl.trim() || null }, "Reading the site again…")}>
+                      onClick={() => act("discover", { base_url: baseUrl.trim() || null, staging_url: stagingUrl.trim() || null }, "Read the site again and stored a new profile version.")}>
                       Read the site again
                     </Button>
                     <Button variant="soft" loading={busy("validate")} disabled={!!validateReason} disabledReason={validateReason}
-                      onClick={() => act("validate", { profile_id: profile.id, staging_url: stagingUrl.trim() || null }, "Previewed on staging")}>
+                      onClick={() => act("validate", { profile_id: profile.id, staging_url: stagingUrl.trim() || null }, "Previewed on staging. Nothing was written to the live site.")}>
                       Preview on staging
                     </Button>
                     <Button variant="primary" loading={busy("activate")} disabled={!!activateReason} disabledReason={activateReason}

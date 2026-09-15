@@ -234,7 +234,7 @@ export function DriveSection() {
                           : !folders.data?.candidates?.length ? (
                             <EmptyState align="left" title="No folder matched" body="Try a different name. AZKT only sees folders this Google account can read." />
                           ) : (
-                            <div className="opts">
+                            <div className="opts" role="radiogroup" aria-label="Importer folder">
                               {folders.data.candidates.map((c) => (
                                 <button key={c.id} type="button" className="opt" role="radio"
                                   aria-checked={c.id === (folders.data?.selected || root?.folder_id)}
@@ -330,7 +330,7 @@ export function DriveSection() {
                           {vehicles.loading ? <Loading rows={2} label="Searching vehicles" />
                             : !vehicles.data?.items?.length ? <span className="not-recorded">No vehicle matched that search.</span>
                               : (
-                                <div className="opts">
+                                <div className="opts" role="radiogroup" aria-label="Which truck this folder belongs to">
                                   {vehicles.data.items.map((vh) => (
                                     <button key={vh.id} type="button" className="opt" role="radio" aria-checked={false}
                                       disabled={matchBusy} onClick={() => doDecide(m.file_id, "correct", vh.id)}>
