@@ -174,11 +174,13 @@ export function EvidenceReviewDialog({
                   ))}
                 </div>
               </Field>
-            ) : costItemId ? (
-              <Notice tone="wait" lead="Links to">Cost item {costItemId.slice(0, 8)}{evidence.cost_item_id === costItemId ? " (already linked)" : ""}</Notice>
+            ) : defaultItem ? (
+              <Notice tone="wait" lead="Links to">Cost item {(costItemId || defaultItem).slice(0, 8)}{evidence.cost_item_id === costItemId ? " (already linked)" : ""}</Notice>
             ) : (
               <>
-                <Notice tone="risk" lead="No cost item">Nothing proposed for this evidence. Pick one below, or use Correct.</Notice>
+                {costItemId
+                  ? <Notice tone="wait" lead="Links to">Cost item {costItemId.slice(0, 8)}</Notice>
+                  : <Notice tone="risk" lead="No cost item">Nothing proposed for this evidence. Pick one below, or use Correct.</Notice>}
                 <CostItemPicker value={costItemId} onChange={setCostItemId} enabled />
               </>
             )}

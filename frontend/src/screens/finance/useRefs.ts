@@ -81,16 +81,17 @@ export function useCostItems(enabled: boolean) {
   const [error, setError] = useState<unknown>(null);
   const [loading, setLoading] = useState(false);
 
+  // deps are [enabled] only: putting the state it sets in the deps would abort its own request.
   useEffect(() => {
-    if (!enabled || items || loading) return;
+    if (!enabled) return;
     const ctrl = new AbortController();
     setLoading(true);
+    setError(null);
     api.get<{ items: CostItem[] }>("/api/finance/costs?limit=500", { signal: ctrl.signal })
-      .then((r) => { setItems(r?.items || []); setLoading(false); })
-      // Set items on failure too, so the effect's guard stops it retrying on every render.
+      .then((r) => { if (!ctrl.signal.aborted) { setItems(r?.items || []); setLoading(false); } })
       .catch((e) => { if (!ctrl.signal.aborted) { setError(e); setItems([]); setLoading(false); } });
     return () => ctrl.abort();
-  }, [enabled, items, loading]);
+  }, [enabled]);
 
   return { items, error, loading };
 }
@@ -99,14 +100,20 @@ export function useCostItems(enabled: boolean) {
 export function useOpenInvoices(enabled: boolean) {
   const [items, setItems] = useState<Invoice[] | null>(null);
   const [loading, setLoading] = useState(false);
+
   useEffect(() => {
-    if (!enabled || items || loading) return;
+    if (!enabled) return;
     const ctrl = new AbortController();
     setLoading(true);
     api.get<{ items: Invoice[] }>("/api/finance/invoices", { signal: ctrl.signal })
-      .then((r) => { setItems((r?.items || []).filter((i) => i.status === "open" || i.status === "partially_paid")); setLoading(false); })
+      .then((r) => {
+        if (ctrl.signal.aborted) return;
+        setItems((r?.items || []).filter((i) => i.status === "open" || i.status === "partially_paid"));
+        setLoading(false);
+      })
       .catch(() => { if (!ctrl.signal.aborted) { setItems([]); setLoading(false); } });
     return () => ctrl.abort();
-  }, [enabled, items, loading]);
+  }, [enabled]);
+
   return { items, loading };
 }

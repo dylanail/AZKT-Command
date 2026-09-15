@@ -34,6 +34,7 @@ export default function CandidateDetail() {
   const { run, busy } = useCommand();
   const [prepare, setPrepare] = useState(false);
   const [result, setResult] = useState<Bid | null>(null);
+  const [submitted, setSubmitted] = useState<Bid | null>(null);
   const [reject, setReject] = useState<CandidateMatch | null>(null);
   const [markSent, setMarkSent] = useState<string | null>(null);
 
@@ -58,7 +59,7 @@ export default function CandidateDetail() {
     return m;
   }, [d?.bid_approvals]);
 
-  const reload = () => { q.reload(); setPrepare(false); setResult(null); setReject(null); setMarkSent(null); };
+  const reload = () => { q.reload(); setPrepare(false); setResult(null); setSubmitted(null); setReject(null); setMarkSent(null); };
 
   if (q.loading) return <PageLoading />;
   if (q.error) return <div className="page"><GlassPanel clip><DeniedOrError error={q.error} onRetry={q.reload} what="this candidate" backTo="/requests" backLabel="Back to import requests" /></GlassPanel></div>;
@@ -201,6 +202,7 @@ export default function CandidateDetail() {
                 onPrepare={() => setPrepare(true)}
                 onSubmit={doSubmit}
                 onResult={(b) => setResult(b)}
+                onSubmitted={(b) => setSubmitted(b)}
                 onDraft={() => void doDraft(selected.id)}
                 onMarkSent={() => setMarkSent(selected.id)}
                 onReject={() => setReject(selected)}
@@ -234,6 +236,7 @@ export default function CandidateDetail() {
         existing={bidsForRequest.find((b) => b.status === "draft" || b.status === "pending_approval") || null}
         onDone={reload}
       />
+      <RecordSubmittedDialog open={!!submitted} bid={submitted} onClose={() => setSubmitted(null)} onDone={reload} />
       <RecordResultDialog open={!!result} bid={result} onClose={() => setResult(null)} onDone={reload} />
       <RejectCandidateDialog open={!!reject} matchId={reject?.id || null} candidateTitle={candidateTitle(c)} onClose={() => setReject(null)} onDone={reload} />
       <MarkSentDialog open={!!markSent} matchId={markSent} onClose={() => setMarkSent(null)} onDone={reload} />
@@ -244,7 +247,7 @@ export default function CandidateDetail() {
 /* ---------- one request's view of this candidate ---------- */
 function RequestPanel({
   m, bids, approvals, costs, write, writeReason, busy, deadlinePassed,
-  onPrepare, onSubmit, onResult, onDraft, onMarkSent, onReject,
+  onPrepare, onSubmit, onResult, onSubmitted, onDraft, onMarkSent, onReject,
 }: {
   m: CandidateMatch;
   bids: Bid[];
@@ -257,6 +260,7 @@ function RequestPanel({
   onPrepare: () => void;
   onSubmit: (b: Bid) => void;
   onResult: (b: Bid) => void;
+  onSubmitted: (b: Bid) => void;
   onDraft: () => void;
   onMarkSent: () => void;
   onReject: () => void;
@@ -343,6 +347,7 @@ function RequestPanel({
               busy={busy}
               onSubmit={() => onSubmit(b)}
               onResult={() => onResult(b)}
+              onSubmitted={() => onSubmitted(b)}
             />
           ))
         )}
@@ -360,9 +365,9 @@ function RequestPanel({
 }
 
 /* ---------- exact bid packet ---------- */
-function BidPacketPanel({ b, approval, costs, write, writeReason, busy, onSubmit, onResult }: {
+function BidPacketPanel({ b, approval, costs, write, writeReason, busy, onSubmit, onResult, onSubmitted }: {
   b: Bid; approval: ApprovalRef | null; costs: boolean; write: boolean; writeReason?: string;
-  busy: (k: string) => boolean; onSubmit: () => void; onResult: () => void;
+  busy: (k: string) => boolean; onSubmit: () => void; onResult: () => void; onSubmitted: () => void;
 }) {
   const p = b.packet || {};
   const fx = (p.fx_estimate || {}) as Record<string, string | undefined>;
@@ -382,6 +387,11 @@ function BidPacketPanel({ b, approval, costs, write, writeReason, busy, onSubmit
             disabled={!write || b.status !== "draft" || !!b.gate?.reasons?.length}
             disabledReason={writeReason || (b.gate?.reasons?.length ? b.gate.reasons.join(" · ") : b.status === "pending_approval" ? "Already with the owner." : `This packet is ${(BID_LABEL[b.status] || b.status).toLowerCase()}.`)}>
             Submit for approval
+          </Button>
+          <Button size="xs" variant="soft" onClick={onSubmitted}
+            disabled={!write || b.status !== "approved"}
+            disabledReason={writeReason || (b.status === "submitted" ? "The submission is already recorded." : "The owner has to approve the packet first.")}>
+            Record submission…
           </Button>
           <Button size="xs" variant="soft" onClick={onResult}
             disabled={!write || !["submitted", "approved"].includes(b.status)}
@@ -561,6 +571,49 @@ function PrepareBidDialog({ open, onClose, candidateId, match, existing, onDone 
         <Field label="Disclosures" hint="One per line. These travel with the approval.">
           <Textarea value={disclosures} onChange={(e) => setDisclosures(e.target.value)} rows={3} placeholder={"Grade 3.5 sheet, underbody rust unknown\nTranslation revision r2"} />
         </Field>
+        <Field label="Note"><Input value={note} onChange={(e) => setNote(e.target.value)} /></Field>
+      </form>
+    </ResponsiveDialog>
+  );
+}
+
+/* ---------- record that the bid was actually submitted ---------- */
+function RecordSubmittedDialog({ open, bid, onClose, onDone }: { open: boolean; bid: Bid | null; onClose: () => void; onDone: () => void }) {
+  const mobile = useIsMobile();
+  const { run, busy } = useCommand();
+  const [sourceRef, setSourceRef] = useState("");
+  const [at, setAt] = useState("");
+  const [note, setNote] = useState("");
+
+  useEffect(() => { if (open) { setSourceRef(""); setAt(""); setNote(""); } }, [open, bid]);
+  if (!open || !bid) return null;
+  const blocked = !sourceRef.trim();
+  const submit = async (e: FormEvent) => {
+    e.preventDefault();
+    if (blocked) return;
+    const res = await run("bid-submitted", bidAction(bid.id, "record-submitted"), {
+      evidence: { source_ref: sourceRef.trim(), submitted_at: at ? new Date(at).toISOString() : null, note: note.trim() || null },
+      expected_version: bid.version,
+    }, { success: "Submission recorded" });
+    if (res?.status === "ok") onDone();
+  };
+  return (
+    <ResponsiveDialog
+      mobile={mobile} open onClose={onClose} size="sm"
+      title="Record the bid submission"
+      description="AZKT records a submission that actually happened, with its evidence. It never claims to have bid on its own."
+      footer={
+        <>
+          <Button variant="primary" onClick={submit} loading={busy("bid-submitted")} disabled={blocked} disabledReason="The submission needs its evidence.">Record</Button>
+          <Button variant="ghost" onClick={onClose}>Cancel</Button>
+        </>
+      }
+    >
+      <form onSubmit={submit} className="stack">
+        <Field label="Evidence" required error={blocked ? "Required." : undefined} hint="Exporter confirmation, auction portal receipt or message id.">
+          <Input value={sourceRef} onChange={(e) => setSourceRef(e.target.value)} placeholder="msg:… or receipt:…" />
+        </Field>
+        <Field label="Submitted at"><Input type="datetime-local" value={at} onChange={(e) => setAt(e.target.value)} /></Field>
         <Field label="Note"><Input value={note} onChange={(e) => setNote(e.target.value)} /></Field>
       </form>
     </ResponsiveDialog>
