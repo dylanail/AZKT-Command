@@ -435,6 +435,19 @@ def test_the_four_templates_follow_the_design_rules():
     with pytest.raises(ValueError):
         email_templates.render("not_a_template", {})
 
+    # money is Decimal and quantized for the real currency: yen has no minor units
+    assert email_templates.money("900000", "JPY") == "900,000 JPY"
+    assert email_templates.money("1234.5", "USD") == "1,234.50 USD"
+    assert email_templates.money(None, "USD") == "Not recorded"
+    # the subject rule is enforced at runtime, not with an assert (python -O strips asserts)
+    original = email_templates.RENDERERS["digest"]
+    email_templates.RENDERERS["digest"] = lambda ctx: ("Reminder: something", "t", "<p>h</p>")
+    try:
+        with pytest.raises(ValueError, match="never 'Reminder:'"):
+            email_templates.render("digest", {})
+    finally:
+        email_templates.RENDERERS["digest"] = original
+
 
 # ── unknown provider results are never blindly retried ──────────────────────
 async def test_an_unknown_email_result_stays_unknown_and_is_not_resent(client, db, owner, monkeypatch):
@@ -658,3 +671,41 @@ async def test_H11_a_source_that_recovered_and_broke_again_is_a_new_incident(cli
             await db.delete(n)
         await db.delete(conn)
         await db.commit()
+
+
+# ── truthful "late": a task entered after its own deadline was never delayed by anything ──
+async def test_an_overdue_notice_for_a_task_entered_late_is_not_labelled_late(client, db, owner):
+    """C04's late label means "we owed you this and the worker was down". A task typed in after it was
+    already due produces a notice at the first possible moment, so it must not claim an interruption."""
+    login(client, owner)
+    tag = _u()
+    t = (await client.post("/api/tasks", json={"title": f"Typed in after due {tag}", "due_at": _iso(timedelta(hours=-5)),
+                                               "owner_user_id": owner.id, "dedupe": False})).json()["data"]["task"]
+    for _ in range(2):
+        await run_worker_once()
+    row = [x for x in await _deliveries(db, t["id"]) if x.kind == "overdue"][0]
+    assert row.state == "accepted" and row.payload.get("scheduled_late") is True
+    assert row.late is False, "nothing was delayed; the notice went out as soon as the task existed"
+    mail = [m for m in _mails(tag) if m["subject"].startswith("Overdue:")][-1]
+    assert "(late reminder)" not in mail["subject"].lower()
+    assert "this reminder is late" not in mail["text"].lower()
+    assert "interruption" not in mail["text"].lower(), "no fabricated cause"
+
+
+async def test_a_genuinely_late_reminder_states_the_fact_without_inventing_a_cause(client, db, owner):
+    login(client, owner)
+    tag = _u()
+    t = (await client.post("/api/tasks", json={"title": f"Truly late {tag}", "type": "call",
+                                               "due_at": _iso(timedelta(hours=2)), "reminder_kind": "1h",
+                                               "owner_user_id": owner.id, "dedupe": False})).json()["data"]["task"]
+    await run_worker_once()
+    row = [x for x in await _deliveries(db, t["id"]) if x.kind == "task_reminder"][0]
+    assert row.payload.get("scheduled_late") is False
+    row.deliver_at = datetime.now(timezone.utc) - timedelta(minutes=45)
+    await db.commit()
+    await run_worker_once()
+    await _fresh(db)
+    await db.refresh(row)
+    assert row.late is True
+    mail = _mails(tag)[-1]
+    assert "late" in mail["text"].lower() and "service interruption" not in mail["text"].lower()

@@ -255,16 +255,18 @@ def run(draft, conversation, facts: dict) -> list[dict]:
 
     # 8. money / currency consistent with recorded prices
     mentions = money_mentions(body)
-    recorded = {(str(p.get("amount")), (p.get("currency") or "USD").upper()) for p in (facts.get("prices") or [])}
-    rec_amounts = {a for a, _ in recorded}
+    # amount AND currency must both match a recorded price: "¥8,500" is not the same fact as "8,500 USD"
+    recorded = {(_norm_amount(p.get("amount")), (p.get("currency") or "USD").upper()) for p in (facts.get("prices") or [])}
     currencies = {m["currency"] for m in mentions}
-    unbacked = [m["raw"] for m in mentions if _norm_amount(m["amount"]) not in {_norm_amount(a) for a in rec_amounts}]
+    unbacked = [m["raw"] for m in mentions if (_norm_amount(m["amount"]), m["currency"]) not in recorded]
     money_ok = (not mentions) or (not unbacked and len(currencies) <= 1)
     checks.append(_check("money_consistent", money_ok,
                          "Money figures match recorded values" if money_ok
-                         else ("Mixed currencies in one reply" if len(currencies) > 1 else "Amount is not a recorded value"),
+                         else ("Mixed currencies in one reply" if len(currencies) > 1 else
+                               "Amount or currency is not a recorded value"),
                          remediation="Quote only recorded amounts in one currency, or remove the figure.",
-                         mentioned=[m["raw"] for m in mentions], unbacked=unbacked, currencies=sorted(currencies)))
+                         mentioned=[m["raw"] for m in mentions], unbacked=unbacked, currencies=sorted(currencies),
+                         recorded=sorted(f"{a} {c}" for a, c in recorded)))
 
     # 9. warranty / guarantee claims need an approved policy (B09)
     warranty_claimed = bool(WARRANTY_RE.search(body))

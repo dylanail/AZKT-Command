@@ -25,6 +25,8 @@ export interface Delivery {
   provider_ref: string | null;
   fallback_of_id: string | null;
   receipt: Record<string, unknown>;
+  /** True when the reminder went to someone else: the state is shown, the address/chat is not. */
+  destination_hidden?: boolean;
   dedupe_key: string | null;
   /** The server's own plain-language name for `state`. Render this, never a guess. */
   state_label: string;

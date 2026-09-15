@@ -67,6 +67,7 @@ BUYER_ROLES = {"buyer", "customer"}
 INQUIRY_HINT = re.compile(r"\b(available|price|cost|ship|shipping|deposit|inquiry|enquiry|interested|"
                           r"looking for|quote|buy|purchase|truck|kei)\b", re.I)
 
+MAX_HISTORY_PAGES = 50           # one sync pass is bounded; the cursor carries the rest to the next job
 MAX_RESYNC_PAGES = 5
 MAX_RESYNC_MESSAGES = 200
 RESYNC_WINDOW_DAYS = 14
@@ -266,20 +267,22 @@ async def _link_items(ctx: CommandContext, conv: Conversation, msg_text: str, me
     already = {l.get("id") for l in (conv.links or []) if l.get("match") == "matched"}
     refs = [it for it in items if it["kind"] in ("stock_no", "frame_no") and it["norm"]]
     resolved: list[tuple[dict, object]] = []
-    hits: dict[str, int] = {}
+    # corroboration means two *different* references agreeing (a stock number and a frame number, say).
+    # The same reference repeated in one email is one piece of evidence, not two, and never auto-links.
+    hits: dict[str, set] = {}
     for it in refs:
         res = await matching.resolve_vehicle(ctx.db, text=it["value"])
         resolved.append((it, res))
         top = (res.candidates[0]["vehicle_id"] if res.candidates else None) or res.vehicle_id
         if top:
-            hits[top] = hits.get(top, 0) + 1
+            hits.setdefault(top, set()).add((it["kind"], it["norm"]))
     links = list(conv.links or [])
     added: list[dict] = []
     for it, res in resolved:
         vid = res.vehicle_id or (res.candidates[0]["vehicle_id"] if res.candidates else None)
         if not vid:
             continue
-        corroborated = hits.get(vid, 0) >= 2 or vid in already
+        corroborated = len(hits.get(vid) or ()) >= 2 or vid in already
         state = "matched" if (res.state == "matched" or corroborated) else ("proposed" if res.state in ("proposed", "matched") else res.state)
         entry = {"kind": "vehicle", "id": vid, "match": state,
                  "evidence": {"item": it["kind"], "value": it["value"], "span": it["span"], "message_id": message_id,
@@ -1115,12 +1118,16 @@ async def _ingest_one(db, conn: Connection, adapter, message_id: str, *, correla
 
 
 def _ids_from_history(records: list[dict]) -> list[str]:
+    """Message ids a history page brings into scope. `labelsAdded` counts too: a message moved out of
+    Spam (or into a watched label) never appears as `messagesAdded`, and would otherwise stay invisible
+    until the next bounded resync. Re-seeing a known id is free — uq_message_provider dedupes it."""
     ids: list[str] = []
     for rec in records:
-        for added in (rec.get("messagesAdded") or []):
-            mid = ((added or {}).get("message") or {}).get("id")
-            if mid and mid not in ids:
-                ids.append(mid)
+        for key in ("messagesAdded", "labelsAdded"):
+            for entry in (rec.get(key) or []):
+                mid = ((entry or {}).get("message") or {}).get("id")
+                if mid and mid not in ids:
+                    ids.append(mid)
     return ids
 
 
@@ -1228,6 +1235,15 @@ async def gmail_sync(jctx: jobs.JobContext, payload: dict) -> dict:
                                            "page_token": token})
                 await db.commit()
                 if not token:
+                    break
+                if out["pages"] >= MAX_HISTORY_PAGES:
+                    # never spin on a provider that keeps handing back a page token: the cursor already
+                    # points at the next page, so a continuation job resumes exactly here.
+                    out["continued"] = True
+                    await jobs.enqueue(db, "gmail.sync", {**payload, "reason": "continue"},
+                                       dedupe_key=f"gmail.sync:{conn.id}:continue:{token}",
+                                       correlation_id=correlation)
+                    await db.commit()
                     break
     except ProviderError as e:
         kind = gmail_adapter.error_kind(e)

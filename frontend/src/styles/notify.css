@@ -35,14 +35,14 @@
 .nf-item__acts { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 2px; }
 
 /* ---------- deliveries ---------- */
-.nf-del {
+.nf-del, .nf-row {
   display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 10px;
   padding: 10px 0; border-bottom: 1px solid var(--line2);
 }
-.nf-del:last-child { border-bottom: 0; }
-.nf-del__task { font-weight: 500; min-width: 0; overflow-wrap: anywhere; }
-.nf-del__meta { font-size: 13px; color: var(--t3); font-variant-numeric: tabular-nums; }
-.nf-del__why { flex-basis: 100%; font-size: 12px; color: var(--risk); overflow-wrap: anywhere; }
+.nf-del:last-child, .nf-row:last-child { border-bottom: 0; }
+.nf-del__task, .nf-row__name { font-weight: 500; min-width: 0; overflow-wrap: anywhere; }
+.nf-del__meta, .nf-row__meta { font-size: 13px; color: var(--t3); font-variant-numeric: tabular-nums; }
+.nf-del__why, .nf-row__why { flex-basis: 100%; font-size: 12px; color: var(--risk); overflow-wrap: anywhere; }
 
 /* ---------- telegram pairing ---------- */
 .tg-token {
@@ -64,7 +64,12 @@
 .nf-action__foot { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
 .nf-action__picks { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
 
+/* Inside the mobile sheet the container already supplies the side padding. */
+.sheet__body .nf-status,
+.sheet__body .nf-group,
+.sheet__body .nf-item { padding-left: 0; padding-right: 0; }
+
 @media (max-width: 767px) {
-  .nf-item__acts .btn, .nf-action__foot .btn, .tg-token .btn { min-height: 44px; }
+  .nf-item__acts .btn, .nf-action__foot .btn, .tg-token .btn, .nf-btnrow .btn { min-height: 44px; }
   .nf-open { min-height: 24px; }
 }

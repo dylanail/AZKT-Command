@@ -8,7 +8,7 @@
    The copy itself is generated from recorded facts; there is no edit endpoint, so it is read-only here
    and the screen says so. Nothing claims a publication the publication record doesn't show. */
 import { useState } from "react";
-import { Link, useParams, useSearchParams } from "react-router-dom";
+import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { api } from "../../lib/api";
 import { useAuth } from "../../lib/auth";
 import { can, whyNot } from "../../lib/perms";
@@ -31,10 +31,10 @@ import {
 import "../../styles/listings.css";
 
 interface VehicleBrief { vehicle: { id: string; version: number; title: string; stock_no?: string | null } }
-const AVAILABILITIES = ["available", "reserved", "sold"] as const;
 
 export default function ListingEditor() {
   const { id = "" } = useParams();
+  const nav = useNavigate();
   const { user } = useAuth();
   const mobile = useIsMobile();
   const { toast } = useToast();
@@ -137,7 +137,13 @@ export default function ListingEditor() {
     if (listingClass) body.listing_class = listingClass;
     if (note.trim()) body.note = note.trim();
     const res = await run<BuildResult>("build", listingPaths.build(vehicleId), body, { success: label });
-    if (res?.status === "ok") { setNote(""); reloadAll(); }
+    if (res?.status === "ok") {
+      setNote("");
+      const built = res.data?.package;
+      /* A rebuild makes a new version; follow it so the screen never shows a stale one silently. */
+      if (built && built.id !== pkg.id) nav(`/listings/${encodeURIComponent(built.id)}`);
+      else reloadAll();
+    }
   };
 
   const doSubmit = async () => {
@@ -175,7 +181,12 @@ export default function ListingEditor() {
     if (res) reloadAll();
   };
 
-  const desired = pubs.find((p) => p.channel === channel)?.desired_state || pkg.availability || "available";
+  /* An en-route truck's listing says "on its way"; a ready one says "available". Both can go reserved or sold. */
+  const availabilities = pkg.listing_class === "en_route"
+    ? ["en_route", "reserved", "sold"]
+    : ["available", "reserved", "sold"];
+  const recorded = pubs.find((p) => p.channel === channel)?.desired_state || pkg.availability || availabilities[0];
+  const desired = availabilities.includes(recorded) ? recorded : availabilities[0];
   const availabilityReason = !draft
     ? "Your role can't change what the listing shows."
     : !pubs.length
@@ -290,14 +301,16 @@ export default function ListingEditor() {
         <div className="lst-sect">
           <div className="lst-sect__head">
             <h2>What the website should show</h2>
-            <span className="lst-sect__note">now: {availabilityLabel(desired)}</span>
+            <span className="lst-sect__note">
+              now: {availabilityLabel(recorded)}{recorded !== desired ? " (not one of the choices below)" : ""}
+            </span>
           </div>
           <SegmentedControl
             label="Listing availability"
             block={mobile}
-            value={AVAILABILITIES.includes(desired as typeof AVAILABILITIES[number]) ? desired : "available"}
+            value={desired}
             onChange={(v) => void doAvailability(v)}
-            options={AVAILABILITIES.map((a) => ({
+            options={availabilities.map((a) => ({
               value: a, label: availabilityLabel(a), disabled: !!availabilityReason || busy("availability"),
               disabledReason: availabilityReason || "Sending the change…",
             }))}
@@ -353,9 +366,9 @@ export default function ListingEditor() {
           { label: vehicleName, to: vehicleId ? `/vehicles/${encodeURIComponent(vehicleId)}?tab=sale` : undefined },
           { label: `Listing v${pkg.package_version}` },
         ]}
-        subtitle={<>
-          {status.blurb}{vehicle?.stock_no ? <> · stock {vehicle.stock_no}</> : null}
-        </>}
+        subtitle={status.blurb || vehicle?.stock_no
+          ? <>{status.blurb}{vehicle?.stock_no ? <> · stock {vehicle.stock_no}</> : null}</>
+          : undefined}
         actions={
           <>
             <Button variant="soft" loading={busy("submit")} disabled={!!submitReason} disabledReason={submitReason} onClick={doSubmit}>
@@ -371,7 +384,7 @@ export default function ListingEditor() {
           <Chip tone={status.tone}>{status.label}</Chip>
           <Chip tone="soft">{classLabel(pkg.listing_class)}</Chip>
           <Chip tone="soft">Version {pkg.package_version}</Chip>
-          <LivePublicationSummary items={pubs} />
+          <LivePublicationSummary items={pubs.filter((p) => p.channel === channel)} />
         </div>
         {supported.length > 1 ? (
           <SegmentedControl
@@ -394,7 +407,19 @@ export default function ListingEditor() {
         ) : null}
       </PageHeader>
 
-      {!isCurrent && current ? (
+      {channel !== pkg.channel ? (
+        <Notice tone="wait" lead={`${channelLabel(channel)} listing`}
+          action={current
+            ? <Button size="sm" variant="soft" to={`/listings/${encodeURIComponent(current.id)}`}>Open it</Button>
+            : <Button size="sm" variant="primary" loading={busy("build")} disabled={!draft}
+                disabledReason="Your role can't build listing drafts."
+                onClick={() => doBuild(`Package built for ${channelLabel(channel)}`)}>Build one</Button>}>
+          {current
+            ? `This page is showing the ${channelLabel(pkg.channel)} package. There is a separate one for ${channelLabel(channel)}.`
+            : `Nothing has been built for ${channelLabel(channel)} yet. The page below is the ${channelLabel(pkg.channel)} package.`}
+        </Notice>
+      ) : null}
+      {channel === pkg.channel && !isCurrent && current ? (
         <Notice tone="risk" lead="Not the latest version"
           action={<Button size="sm" variant="soft" to={`/listings/${encodeURIComponent(current.id)}`}>Open v{current.package_version}</Button>}>
           You're looking at version {pkg.package_version}. Version {current.package_version} was built after it.

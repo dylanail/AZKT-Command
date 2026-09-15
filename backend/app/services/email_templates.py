@@ -197,13 +197,15 @@ def _footer(note: str) -> str:
 
 # ── money ───────────────────────────────────────────────────────────────────
 def money(amount: Any, currency: str | None) -> str:
+    """Decimal, quantized for the actual currency: ¥900,000 is not "900,000.00 JPY" (core/money.py)."""
     if amount in (None, ""):
         return "Not recorded"
+    from ..core.money import Money, parse_amount
     try:
-        from decimal import Decimal
-        a = Decimal(str(amount))
-        return f"{a:,.2f} {currency or ''}".strip()
-    except Exception:  # noqa: BLE001
+        if currency:
+            return str(Money(amount, currency))
+        return f"{parse_amount(amount):,}"   # an amount with no recorded currency is shown without one
+    except (ValueError, ArithmeticError):
         return f"{amount} {currency or ''}".strip()
 
 
@@ -226,7 +228,7 @@ def _task_reminder(ctx: dict) -> tuple[str, str, str]:
     if lead:
         sub += f" · {_esc(lead)}"
     if late:
-        sub += f' · <span style="color:{RED};font-weight:600">late — sent after a service interruption</span>'
+        sub += f' · <span style="color:{RED};font-weight:600">late — sent after its scheduled time</span>'
     elif snoozed:
         sub += ' · you snoozed this reminder; the meeting time has not changed'
     pairs = _detail_pairs(ctx)
@@ -240,7 +242,7 @@ def _task_reminder(ctx: dict) -> tuple[str, str, str]:
     html = _shell(status_word, RED if late else MUTED, inner, _footer(note))
     text = _text_block(subject, title, [
         f"{day_phrase(due, tz, now)} · {clock(due, tz)}" + (f" · {lead}" if lead else ""),
-        "This reminder is late — it was delayed by a service interruption." if late else "",
+        "This reminder is late — it is arriving after the time it was scheduled for." if late else "",
         "You snoozed this reminder; the meeting time has not changed." if snoozed and not late else "",
     ], pairs, ctx.get("link") or deep_link("task", ctx.get("task_id")),
         [("Mark done", review_link(ctx["task_id"], "done")), ("Snooze 1 hour", review_link(ctx["task_id"], "snooze"))]
@@ -401,5 +403,7 @@ def render(kind: str, ctx: dict) -> tuple[str, str, str]:
     if fn is None:
         raise ValueError(f"unknown email template {kind!r}; expected one of {KINDS}")
     subject, text, html = fn(dict(ctx or {}))
-    assert not subject.lower().startswith("reminder:"), "subject rule: action + person + time, never 'Reminder:'"
+    if subject.lower().startswith("reminder:"):
+        # a real check, not an assert: `python -O` strips asserts and the design rule would go with them
+        raise ValueError("subject rule: action + person + time, never 'Reminder:'")
     return subject, text, html

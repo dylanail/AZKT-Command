@@ -83,6 +83,7 @@ export function RecentDeliveries() {
                     {when ? <When iso={when} format="long" /> : "Time not recorded"}
                     {d.late ? " · late" : ""}
                     {d.attempts > 1 ? ` · ${d.attempts} attempts` : ""}
+                    {d.destination_hidden ? " · sent to someone else; the address stays private" : ""}
                   </span>
                   {why ? <span className="nf-del__why">{why}</span> : null}
                   {d.last_error ? <span className="nf-del__why">{d.last_error}</span> : null}

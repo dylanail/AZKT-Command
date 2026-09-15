@@ -226,11 +226,24 @@ def _vehicle_label(v: dict) -> str:
     return v.get("stock_no") or v.get("title") or (v.get("id") or "")[:8]
 
 
+def vehicle_for_question(item: dict, vehicles: list[dict]) -> dict | None:
+    """Which linked truck a question is about. With several linked trucks the question has to name one;
+    guessing "the first link" is how a reply ends up confidently describing the wrong vehicle."""
+    if not vehicles:
+        return None
+    if len(vehicles) == 1:
+        return vehicles[0]
+    q = (item.get("question") or "").lower()
+    named = [v for v in vehicles if (v.get("stock_no") or "").lower() and str(v["stock_no"]).lower() in q]
+    return named[0] if len(named) == 1 else None
+
+
 def answer_for(item: dict, facts: dict) -> tuple[str | None, dict | None]:
-    """Deterministic answers from current structured facts. None = the fact is not recorded."""
+    """Deterministic answers from current structured facts. None = the fact is not recorded (or the
+    question does not identify which linked record it is about)."""
     topics = set(item.get("topics") or [])
     vehicles = facts.get("vehicles") or []
-    v = vehicles[0] if vehicles else None
+    v = vehicle_for_question(item, vehicles)
     if "availability" in topics and v:
         if v["available"]:
             # the as-of instant belongs in the source record, not in a sentence a checker would read as a date claim

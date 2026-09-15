@@ -421,6 +421,57 @@ async def test_B05_supplier_message_links_three_vehicles_and_two_invoices_separa
     assert conv.contact_match == "matched" and conv.classification == "supplier"
 
 
+async def test_excluded_personal_mail_is_counted_once_even_when_a_page_is_replayed(db, owner):
+    """The excluded number the owner sees means messages, not attempts (A05 + invariant 1)."""
+    conn = await make_conn(db, "gmail_personal", fx.PERSONAL, config=dict(fx.PERSONAL_ALLOWLIST))
+    FAKES.clear()
+    FAKES["gmail_personal"] = FakeGmail(fx.personal_fixture(), connection=conn)
+    await conn_svc.cursor_set(db, conn, "history", {"history_id": "200"})
+    await db.commit()
+    await sync(db, conn)
+    assert conn.excluded_counts["total"] == 2
+
+    # the same history window is delivered again (duplicate push, replayed page, bounded resync)
+    await conn_svc.cursor_set(db, conn, "history", {"history_id": "200"})
+    await db.commit()
+    await sync(db, conn)
+    await db.refresh(conn)
+    assert conn.excluded_counts["total"] == 2, "a replay must not inflate the exclusion count"
+    assert sum(conn.excluded_counts["by_reason"].values()) == 2
+    # the replay guard is internal: the coverage view shows counts, never a list of rejected ids
+    account = await _coverage_for(db, "gmail_personal")
+    assert account["excluded"]["total"] == 2 and "seen" not in account["excluded"]
+    # and still nothing of the rejected mail was stored
+    stored = (await db.execute(select(Message).where(Message.connection_id == conn.id))).scalars().all()
+    assert sorted(m.provider_message_id for m in stored) == ["p-port", "p-seb"]
+
+
+async def test_a_persons_spam_decision_is_not_undone_by_the_next_message(db, owner):
+    """A classification a person set is reversed by a person, never by the sender (§4.5, B03)."""
+    conn = await make_conn(db, "gmail_business", "sticky@azkeitrucks.com")
+    FAKES.clear()
+    FAKES["gmail_business"] = FakeGmail(fx.business_fixture(), connection=conn)
+    raw = raw_from("sticky-1", "sticky-t", from_addr="Deals <deals@marketing.example>",
+                   to="sticky@azkeitrucks.com", subject="Is the truck available?",
+                   text="Hi, is the kei truck still available and what is the price?")
+    res = await dispatch(ctx_for(db, owner), "inbox.ingest_message", ingest_payload(conn, raw))
+    conv_id = res.data["conversation"]["id"]
+    await dispatch(ctx_for(db, owner), "inbox.mark_spam", {"conversation_id": conv_id, "reason": "known spammer"})
+
+    raw2 = raw_from("sticky-2", "sticky-t", from_addr="Deals <deals@marketing.example>",
+                    to="sticky@azkeitrucks.com", subject="Re: Is the truck available?",
+                    text="Following up - can you confirm the price today?")
+    await dispatch(ctx_for(db, owner), "inbox.ingest_message", ingest_payload(conn, raw2))
+    conv = await db.get(Conversation, conv_id)
+    await db.refresh(conv)
+    assert conv.classification == "spam" and conv.classification_source == "human"
+    assert conv.state == "no_reply_needed", "a follow-up must not walk the thread back into the reply queue"
+    assert await db.scalar(select(func.count(Message.id)).where(Message.conversation_id == conv.id)) == 2
+    # still fully reversible by a person, and nothing was deleted
+    reversed_ = await dispatch(ctx_for(db, owner), "inbox.not_spam", {"conversation_id": conv_id, "reason": "real inquiry"})
+    assert reversed_.data["conversation"]["classification"] != "spam"
+
+
 # ── F5 / H11 ─────────────────────────────────────────────────────────────────
 async def test_F5_H11_stale_source_blocks_the_all_clear(db, owner, client):
     conn = await make_conn(db, "gmail_business", "stale@azkeitrucks.com", fresh_minutes=120)

@@ -22,6 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..adapters.telegram import TelegramClient, deep_link
 from ..core.config import settings
+from ..core.destinations import assert_destination_allowed
 from ..core.errors import Blocked, Denied, DomainError, NotFound, ProviderError, Unsupported, ValidationFailed
 from ..core.ids import new_id, sha256_hex, token as new_token
 from ..core.time import PHOENIX, ensure_aware, fmt_local
@@ -182,10 +183,19 @@ def bound(text: str, limit: int = MAX_OUT) -> str:
     return text[: limit - 1].rstrip() + "…"
 
 
+def check_destination(tok: str | None, chat_id: int | None) -> None:
+    """A recording or unconfigured client delivers nothing, so it is exempt. A real bot token outside
+    production may only reach an allowlisted chat, so a staging deploy never messages the real owner (H08)."""
+    if not tok or tok == "test":
+        return
+    assert_destination_allowed("telegram", str(chat_id))
+
+
 async def send(db: AsyncSession, pairing: TelegramPairing, text: str, *, reply_markup: dict | None = None) -> dict:
     tok = await bot_token(db)
     if not tok:
         raise Unsupported("TELEGRAM_BOT_TOKEN not configured")
+    check_destination(tok, pairing.chat_id)
     res = await client(tok).send_message(pairing.chat_id, bound(text), reply_markup=reply_markup,
                                          disable_preview=True)
     pairing.last_outbound_at = datetime.now(timezone.utc)
@@ -295,8 +305,11 @@ async def start_pairing(ctx: CommandContext, inp: StartPairingIn) -> dict:
     ctx.emit("telegram.pairing_changed", aggregate_type="telegram_pairing", aggregate_id=p.id,
              payload={"status": "pending", "user_id": p.user_id})
     link = deep_link(raw)
+    # The raw token is the whole secret. A command result carrying a request_id is stored in
+    # `command_log`, so it is returned only when there is no deep link to carry it and the owner has to
+    # type `/start <token>` by hand.
     return {"pairing_id": p.id, "status": "pending", "expires_at": p.token_expires_at.isoformat(),
-            "deep_link": link or None, "start_token": raw,
+            "deep_link": link or None, **({} if link else {"start_token": raw}),
             "setup_blocked": None if link else "TELEGRAM_BOT_USERNAME is not configured; the deep link cannot be built"}
 
 
@@ -377,16 +390,21 @@ async def _pairing_changed(db: AsyncSession, ev) -> None:
     if not tok:
         return
     try:
+        check_destination(tok, int(p["chat_id"]))
         await client(tok).send_message(int(p["chat_id"]),
                                        "This chat is no longer linked to AZKT. Buttons from earlier messages "
                                        "will not work. Pair again from Settings if you need it back.")
-    except (ProviderError, Unsupported) as e:  # a revoked chat that blocks us is not an error worth retrying
+    except DomainError as e:  # a revoked chat that blocks us is not an error worth retrying
         log.info("could not send the final Telegram message: %s", e)
 
 
 # ── webhook registration (owner-only, executed as a fenced external action) ──
 class SetWebhookIn(BaseModel):
     url: str | None = None
+    force: bool = False   # re-register although a previous attempt's result was never confirmed
+
+
+IN_FLIGHT = ("intent", "claimed", "executing")
 
 
 @command("telegram.set_webhook", input=SetWebhookIn, perm="connections", action_class="owner_only",
@@ -397,18 +415,36 @@ async def set_webhook(ctx: CommandContext, inp: SetWebhookIn) -> dict:
     url = inp.url or f"{(settings.api_base or '').rstrip('/')}/api/telegram/webhook"
     if not url.startswith("https://"):
         raise ValidationFailed("the Telegram webhook URL must be https")
+    # Rotation has to actually re-register: a finished intent for the same url+secret must not silently
+    # swallow the next request and still report "queued". An unfinished one is reused (never a second
+    # concurrent send), and an `unknown` result is not blindly repeated without an explicit decision.
+    from ..models.runtime import ExternalAction
+    base = f"telegram:setwebhook:{sha256_hex(url + settings.TELEGRAM_WEBHOOK_SECRET)[:16]}"
+    prior = (await ctx.db.execute(select(ExternalAction).where(ExternalAction.dedupe_key.like(f"{base}%"))
+                                  .order_by(ExternalAction.created_at.desc()).limit(1))).scalars().first()
+    if prior is not None and prior.state == "unknown" and not inp.force:
+        return {"queued": False, "state": "unknown", "external_action_id": prior.id, "url": url,
+                "note": "the previous registration's result was never confirmed; it is not repeated blindly — "
+                        "check the bot's webhook in Telegram, then send force=true to register again"}
+    in_flight = prior is not None and prior.state in IN_FLIGHT
+    # a per-registration counter, not a clock: two clicks in the same second still mean one registration,
+    # and a rotation after a finished one still gets its own intent
+    done = int(await ctx.db.scalar(select(func.count()).select_from(ExternalAction)
+                                   .where(ExternalAction.dedupe_key.like(f"{base}%"))) or 0)
     act = await approvals_svc.intend_external_action(
         ctx, command_name="telegram.set_webhook", payload={"url": url}, provider="telegram",
-        dedupe_key=f"telegram:setwebhook:{sha256_hex(url + settings.TELEGRAM_WEBHOOK_SECRET)[:16]}",
+        dedupe_key=prior.dedupe_key if in_flight else f"{base}:{done + 1}",
         entity_kind="connection", entity_id=None)
-    return {"queued": True, "external_action_id": act.id, "url": url}
+    return {"queued": act.state in IN_FLIGHT, "state": act.state, "already_in_flight": in_flight,
+            "external_action_id": act.id, "url": url}
 
 
 @approvals_svc.executor("telegram.set_webhook")
 async def _exec_set_webhook(db: AsyncSession, action) -> dict:
     tok = await bot_token(db)
     if not tok:
-        return {"sent": False, "handed_off": True, "error": "setup_blocked: no bot token configured"}
+        # nothing was registered and no person can finish this by hand: a failed state, not "handed off"
+        raise Unsupported("setup_blocked: no Telegram bot token configured; the webhook was not registered")
     res = await client(tok).set_webhook(action.payload["url"], settings.TELEGRAM_WEBHOOK_SECRET)
     conn = await connections.get(db, "telegram", create=True)
     await connections.mark_success(db, conn)
@@ -424,13 +460,25 @@ async def process_update(jctx: jobs.JobContext, payload: dict) -> dict:
         return {"skipped": "provider event missing"}
     if ev.processed_at is not None:
         return {"skipped": "already processed"}          # duplicate update -> one intended effect (D03)
+    update_payload = dict(ev.payload or {})
+    event_id = ev.id
     replies: list[tuple] = []          # (chat_id, text, reply_markup[, chat_turn_id])
     answers: list[tuple[str, str]] = []
     try:
-        note = await _handle_update(db, dict(ev.payload or {}), replies, answers)
+        note = await _handle_update(db, update_payload, replies, answers)
         ev.error = None
     except DomainError as e:
+        # Nothing half-applied survives a refusal, and no queued reply describes a change that was rolled
+        # back. The chat is still told, so a refused instruction is never a silent disappearance.
+        await db.rollback()
+        replies, answers = [], []
         note = f"refused: {e.message}"
+        chat_id = await _refusal_chat(db, update_payload)
+        if chat_id is not None:
+            replies.append((chat_id, f"I couldn't do that: {e.message} Nothing was changed.", None))
+        ev = await db.get(ProviderEvent, event_id)
+        if ev is None:
+            return {"skipped": "provider event vanished"}
         ev.error = e.message[:2000]
     ev.processed_at = datetime.now(timezone.utc)
     await db.commit()
@@ -443,6 +491,7 @@ async def process_update(jctx: jobs.JobContext, payload: dict) -> dict:
         if not tok:
             break
         try:
+            check_destination(tok, chat_id)
             res = await client(tok).send_message(chat_id, bound(text), reply_markup=markup, disable_preview=True)
             sent += 1
             mid = ((res or {}).get("result") or {}).get("message_id")
@@ -463,6 +512,17 @@ async def process_update(jctx: jobs.JobContext, payload: dict) -> dict:
             await db.execute(update(ChatTurn).where(ChatTurn.id == turn_id).values(telegram_message_id=mid))
         await db.commit()
     return {"note": note, "replies": sent}
+
+
+async def _refusal_chat(db: AsyncSession, update: dict) -> int | None:
+    """Where a refusal may be reported: only the one active pairing this update actually came from, so a
+    refusal never tells an unpaired chat that AZKT exists (D02)."""
+    cq = update.get("callback_query") or {}
+    msg = (cq.get("message") or {}) if cq else (update.get("message") or update.get("edited_message") or {})
+    frm = (cq.get("from") or {}) if cq else (msg.get("from") or {})
+    chat = msg.get("chat") or {}
+    p = await pairing_for_update(db, frm.get("id"), chat.get("id"))
+    return p.chat_id if p is not None else None
 
 
 async def _actor_for(db: AsyncSession, user_id: str) -> Actor | None:
@@ -520,6 +580,16 @@ async def _handle_update(db: AsyncSession, update: dict, replies: list, answers:
     return await _handle_text(db, pairing, actor, text, msg, replies)
 
 
+def _pairing_audit(db: AsyncSession, what: str, *, pairing_id: str | None, state: str,
+                   details: dict, exception: bool = False) -> None:
+    """Binding a Telegram identity is an access change. It happens in the update job, where there is no
+    signed-in actor to dispatch a command as, so the audit row is written here rather than not at all."""
+    from ..models.runtime import ActivityEntry
+    db.add(ActivityEntry(at=datetime.now(timezone.utc), actor={"kind": "system", "channel": "telegram"},
+                         what=what, entity_kind="telegram_pairing", entity_id=pairing_id, kind="access",
+                         state=state, visibility="owner", exception=exception, details=details))
+
+
 async def _handle_start(db: AsyncSession, arg: str, tg_user_id: int | None, chat_id: int | None,
                         username: str | None, replies: list) -> str:
     reject = ("That link is not valid any more. Open AZKT Settings › Telegram and generate a new one.")
@@ -532,9 +602,18 @@ async def _handle_start(db: AsyncSession, arg: str, tg_user_id: int | None, chat
     now = datetime.now(timezone.utc)
     if p is None or p.status != "pending" or (p.token_expires_at and ensure_aware(p.token_expires_at) < now):
         # replay of a used token, an expired token, or another Telegram account trying it (D01)
+        if p is not None:
+            _pairing_audit(db, f"Telegram pairing link refused ({p.status})", pairing_id=p.id, state="refused",
+                           exception=True, details={"telegram_user_id": tg_user_id, "chat_id": chat_id,
+                                                    "reason": "token expired or already used"})
         replies.append((chat_id, reject, None))
         return "start token rejected"
     if p.telegram_user_id and int(p.telegram_user_id) != int(tg_user_id):
+        _pairing_audit(db, "Telegram pairing link refused (another Telegram account)", pairing_id=p.id,
+                       state="refused", exception=True,
+                       details={"telegram_user_id": tg_user_id, "chat_id": chat_id,
+                                "bound_telegram_user_id": p.telegram_user_id,
+                                "reason": "the link is already bound to a different Telegram account"})
         replies.append((chat_id, reject, None))
         return "start token already bound to another telegram account"
     p.telegram_user_id = int(tg_user_id)
@@ -544,6 +623,9 @@ async def _handle_start(db: AsyncSession, arg: str, tg_user_id: int | None, chat
     p.token_used_at = now
     p.start_token_hash = None                      # one use only
     p.bump(p.user_id)
+    _pairing_audit(db, f"Telegram account {username or tg_user_id} used the pairing link", pairing_id=p.id,
+                   state="pending", details={"telegram_user_id": tg_user_id, "chat_id": chat_id,
+                                             "username": username, "user_id": p.user_id})
     replies.append((chat_id, "Thanks — this chat is linked to your AZKT account. Open AZKT Settings › Telegram and "
                              "confirm this account to finish. Until you confirm, I won't send or show anything.", None))
     return "start token bound; awaiting in-app confirmation"

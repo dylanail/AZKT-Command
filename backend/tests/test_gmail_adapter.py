@@ -94,6 +94,17 @@ async def test_metadata_format_never_returns_a_body():
     assert fake.fetched_metadata == ["m-mixed"] and fake.fetched_full == []
 
 
+async def test_attachment_bytes_are_fetched_on_demand_and_a_miss_is_a_typed_error():
+    fake = FakeGmail(fx.business_fixture())
+    norm = await fake.get_message("m-supplier", format="full")
+    att = norm["attachments"][0]
+    assert att["filename"] == "INV-7781.pdf" and att["mime"] == "application/pdf"
+    assert await fake.get_attachment("m-supplier", att["attachment_id"]) == b"%PDF-1.4 fake invoice"
+    with pytest.raises(ProviderError) as e:
+        await fake.get_attachment("m-supplier", "att-does-not-exist")
+    assert error_kind(e.value) == "invalid_input"
+
+
 async def test_unsupported_capabilities_are_reported_not_faked():
     fake = FakeGmail(fx.business_fixture(), capabilities={"read": True, "send": False, "drafts": False, "labels": False})
     with pytest.raises(Unsupported) as e:

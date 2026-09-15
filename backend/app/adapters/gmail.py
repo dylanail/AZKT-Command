@@ -132,9 +132,16 @@ def normalize_message(raw: dict, *, format: str = "full") -> dict:
     headers: dict[str, str] = {}
     for h in payload.get("headers") or []:
         name = (h.get("name") or "").lower()
-        if name in HEADER_KEYS or name in ("from", "to", "cc", "bcc", "subject", "date"):
-            # repeated headers (References, Received) keep the first occurrence plus a joined value
-            headers[name] = f"{headers[name]}, {h.get('value', '')}" if name in headers and name == "references" else h.get("value", "")
+        if name not in HEADER_KEYS and name not in ("from", "to", "cc", "bcc", "subject", "date"):
+            continue
+        if name in headers:
+            # A repeated header is either threading history (References, joined) or a spoofing attempt
+            # (a second From: or Message-ID:). The FIRST occurrence is the one every downstream check,
+            # and find_sent_by_message_id, must agree on — a later copy never replaces it.
+            if name == "references":
+                headers[name] = f"{headers[name]}, {h.get('value', '')}"
+            continue
+        headers[name] = h.get("value", "")
     text_parts: list[str] = []
     html_parts: list[str] = []
     attachments: list[dict] = []

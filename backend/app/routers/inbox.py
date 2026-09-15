@@ -86,8 +86,14 @@ async def thread_action(conversation_id: str, action: str, body: dict = Body(def
     if key:
         payload[key] = conversation_id
     elif name in ("reply.edit", "reply.submit_for_approval", "reply.reconcile_unknown"):
+        # the path names the thread: a draft id from another thread is a mistake, not a shortcut
         if not payload.get("draft_id"):
             raise ValidationFailed("draft_id is required for this action")
+        d = await ctx.db.get(Draft, payload["draft_id"])
+        if d is None:
+            raise NotFound("draft not found")
+        if d.conversation_id != conversation_id:
+            raise ValidationFailed("this draft belongs to a different thread")
     res = await dispatch(ctx, name, payload)
     return res.to_dict()
 

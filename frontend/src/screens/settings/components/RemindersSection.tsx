@@ -1,7 +1,11 @@
 /* Settings › Reminders. Your own preferences: PATCH /api/me/prefs (channel per reminder kind, quiet hours,
    digest time, reminder email — "unverified" until a verification flow confirms it — and timezone).
-   Owner defaults for everyone: GET/POST /api/settings/reminders (versioned). */
+   Those four are the only preference keys the server accepts (team.NotificationPrefsIn); anything else
+   on this page is shown read-only with where it is actually set.
+   Owner defaults for everyone: GET/POST /api/settings/reminders (versioned).
+   Business-wide reminder timing: GET /api/notifications/prefs → business_defaults. */
 import { useEffect, useMemo, useState } from "react";
+import { Link } from "react-router-dom";
 import { ApiError, api, describeError, type CommandResult } from "../../../lib/api";
 import { useAuth } from "../../../lib/auth";
 import { useQuery } from "../../../lib/useQuery";
@@ -9,14 +13,86 @@ import { useCommand } from "../../../lib/useCommand";
 import { can } from "../../../lib/perms";
 import { Badge, Button, ErrorState, Field, GlassPanel, Input, Loading, Notice, Select, Switch, When, useToast } from "../../../ui";
 import { CHANNEL_MODES, REMINDER_KINDS, type MeResp, type RemindersSettings, type SettingEntry } from "./types";
+import { RecentDeliveries } from "./RecentDeliveries";
+import type { NotificationPrefsResp } from "./notifyTypes";
+import "../../../styles/notify.css";
 
 const TZS = ["America/Phoenix", "America/Los_Angeles", "America/Denver", "America/Chicago", "America/New_York", "Asia/Tokyo", "UTC"];
 const OFFSETS = [{ value: "at", label: "At the time" }, { value: "15m", label: "15 minutes before" }, { value: "1h", label: "1 hour before" }, { value: "1d", label: "1 day before" }, { value: "custom", label: "Custom per task" }];
 
+/* The four settings below are not per-person preferences — team.NotificationPrefsIn accepts only
+   channels, quiet hours and the digest time — so they are shown read-only with where they are set. */
+function BusinessTiming({ biz }: { biz: NotificationPrefsResp["business_defaults"] | null }) {
+  return (
+    <GlassPanel clip>
+      <div className="set-row" style={{ borderBottom: "1px solid var(--line2)" }}>
+        <div className="set-row__main">
+          <span className="eyebrow">Set in configuration, not here</span>
+          <span className="set-row__meta">These apply to everyone. Ask the owner to change them.</span>
+        </div>
+      </div>
+      <div className="set-row">
+        <div className="set-row__main">
+          <span className="set-row__title">In-app bell</span>
+          <span className="set-row__meta">The bell, Home and the mobile sheet read one list. There is no per-person switch for it yet, so it stays on.</span>
+        </div>
+        <div className="set-row__right"><Badge tone="ok">Always on</Badge></div>
+      </div>
+      <div className="set-row">
+        <div className="set-row__main">
+          <span className="set-row__title">How early a task reminder arrives</span>
+          <span className="set-row__meta">Chosen on each task: at the time, 15 minutes, 1 hour, 1 day, or a custom number of minutes. The owner sets which one new tasks start with.</span>
+        </div>
+        <div className="set-row__right"><Link to="/tasks" className="fs13">Open tasks</Link></div>
+      </div>
+      {biz ? (
+        <>
+          <div className="set-row">
+            <div className="set-row__main">
+              <span className="set-row__title">Overdue reminder</span>
+              <span className="set-row__meta">Sent once, {biz.overdue_delay_minutes} minutes after a task&apos;s time passes, if it is still open.</span>
+            </div>
+            <div className="set-row__right"><span className="tnum t3 fs13">{biz.overdue_delay_minutes} min</span></div>
+          </div>
+          <div className="set-row">
+            <div className="set-row__main">
+              <span className="set-row__title">Counted as late</span>
+              <span className="set-row__meta">A reminder sent more than {biz.late_grace_minutes} minutes after its time is marked late instead of quietly passing.</span>
+            </div>
+            <div className="set-row__right"><span className="tnum t3 fs13">{biz.late_grace_minutes} min</span></div>
+          </div>
+          <div className="set-row">
+            <div className="set-row__main">
+              <span className="set-row__title">Too old to send</span>
+              <span className="set-row__meta">After {biz.obsolete_after_hours} hours a missed reminder is collapsed into the morning digest rather than arriving out of time.</span>
+            </div>
+            <div className="set-row__right"><span className="tnum t3 fs13">{biz.obsolete_after_hours} h</span></div>
+          </div>
+          <div className="set-row">
+            <div className="set-row__main">
+              <span className="set-row__title">Business digest time</span>
+              <span className="set-row__meta">Your own digest time above overrides this for you.</span>
+            </div>
+            <div className="set-row__right"><span className="tnum t3 fs13">{biz.digest_local_time}</span></div>
+          </div>
+        </>
+      ) : (
+        <div className="set-row">
+          <div className="set-row__main">
+            <span className="set-row__title">Reminder timing</span>
+            <span className="set-row__meta">The server didn&apos;t return the business timing settings, so AZKT won&apos;t guess them here.</span>
+          </div>
+        </div>
+      )}
+    </GlassPanel>
+  );
+}
+
 function MyPrefs() {
-  const { refresh } = useAuth();
+  const { user, refresh } = useAuth();
   const { toast } = useToast();
   const me = useQuery<MeResp>((signal) => api.get<MeResp>("/api/me", { signal }), []);
+  const prefsQ = useQuery<NotificationPrefsResp | null>((signal) => api.get<NotificationPrefsResp | null>("/api/notifications/prefs", { signal, tolerate: [403, 404, 501] }), []);
   const [channels, setChannels] = useState<Record<string, string>>({});
   const [quiet, setQuiet] = useState(false);
   const [qStart, setQStart] = useState("21:00");
@@ -87,7 +163,15 @@ function MyPrefs() {
 
   return (
     <div className="stack">
-      {!paired ? <Notice tone="wait" lead="Telegram not paired">{telegram?.note || "Telegram choices fall back to email until your Telegram is paired through the bot."}</Notice> : telegram?.delivery_failures ? <Notice tone="risk" lead="Telegram delivery failing">{telegram.delivery_failures} recent {telegram.delivery_failures === 1 ? "failure" : "failures"}; email is used meanwhile.</Notice> : null}
+      {!paired ? (
+        <Notice tone="wait" lead="Telegram not paired" action={<Button size="sm" variant="soft" to="/settings/telegram">Open Telegram</Button>}>
+          {telegram?.note || "Telegram choices fall back to email until your Telegram is paired through the bot."}
+        </Notice>
+      ) : telegram?.delivery_failures ? (
+        <Notice tone="risk" lead="Telegram delivery failing" action={<Button size="sm" variant="soft" to="/settings/telegram">Open Telegram</Button>}>
+          {telegram.delivery_failures} recent {telegram.delivery_failures === 1 ? "failure" : "failures"}; email is used meanwhile.
+        </Notice>
+      ) : null}
       <GlassPanel clip>
         <div className="set-row" style={{ borderBottom: "1px solid var(--line2)" }}><div className="set-row__main"><span className="eyebrow">Where each reminder reaches you</span></div></div>
         {REMINDER_KINDS.map((k) => (
@@ -116,7 +200,12 @@ function MyPrefs() {
         <div className="set-row">
           <div className="set-row__main">
             <span className="set-row__title">Reminder email {p.reminder_email && !p.reminder_email_verified ? <Badge tone="risk">unverified</Badge> : p.reminder_email_verified_at ? <Badge tone="ok">verified</Badge> : null}</span>
-            <span className="set-row__meta">{p.reminder_email_verified_at ? <>Verified <When iso={p.reminder_email_verified_at} format="date" /></> : p.reminder_email ? "Reminders go here once it's verified; until then, your sign-in email is used." : "Leave blank to use your sign-in email."}</span>
+            <span className="set-row__meta">
+              {p.reminder_email_verified_at ? <>Verified <When iso={p.reminder_email_verified_at} format="date" /></> : p.reminder_email ? "Reminders go here once it's verified; until then, your sign-in email is used." : "Leave blank to use your sign-in email."}
+              {!p.reminder_email && !me.data?.email && user?.role === "owner"
+                ? " Your account has no email either, so reminders go to the owner address configured on the server — AZKT can't show that address here."
+                : ""}
+            </span>
           </div>
           <div className="set-row__right"><Input type="email" aria-label="Reminder email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder={me.data?.email || "name@…"} style={{ minWidth: 220 }} /></div>
         </div>
@@ -132,6 +221,7 @@ function MyPrefs() {
         <Button variant="primary" loading={saving} disabled={!dirty} disabledReason="Nothing changed yet." onClick={save}>Save my preferences</Button>
         {dirty ? <span className="fs13 t3">Unsaved changes.</span> : null}
       </div>
+      <BusinessTiming biz={prefsQ.data?.business_defaults || null} />
     </div>
   );
 }
@@ -208,6 +298,7 @@ export function RemindersSection() {
   return (
     <div className="stack-lg">
       <MyPrefs />
+      <RecentDeliveries />
       {can(user, "settings") ? <OwnerDefaults /> : null}
     </div>
   );

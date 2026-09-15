@@ -114,6 +114,8 @@ SUPPLIER_LIST = raw_message(
         "Invoice INV-7782 covers unit 3 for ¥310,000.\n"
     ), at=NOW - timedelta(hours=9), history_id="108",
     attachments=[{"filename": "INV-7781.pdf", "mime": "application/pdf", "size": 2048}])
+# attachment bytes are fetched on demand, never during admission (spec §4.1)
+SUPPLIER_LIST["_attachment_data"] = {"att-INV-7781.pdf": b"%PDF-1.4 fake invoice"}
 
 OPT_OUT = raw_message(
     "m-optout", "t-optout", from_addr="Maria Chen <maria.chen@example.com>", to=BUSINESS,

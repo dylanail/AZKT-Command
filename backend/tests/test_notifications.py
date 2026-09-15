@@ -201,3 +201,43 @@ async def test_expected_version_is_enforced_on_a_notification_write(client, db, 
                           json={"minutes": 30, "expected_version": note.version})
     assert r.status_code == 200 and r.json()["data"]["notification"]["state"] == "snoozed"
     await client.post(f"/api/notifications/{note.id}/dismiss", json={})
+
+
+async def test_another_persons_delivery_destination_is_not_in_the_feed_api(client, db, owner, mechanic):
+    """A sales task reminds the assignee *and* Dylan. The assignee may see that Dylan was reminded and
+    whether it worked; Dylan's email address and private Telegram chat are not their record data."""
+    login(client, owner)
+    tag = _u()
+    t = (await client.post("/api/tasks", json={"title": f"Sales call {tag}", "type": "call",
+                                               "due_at": _iso(timedelta(hours=-3)),
+                                               "owner_user_id": mechanic.id, "dedupe": False})).json()["data"]["task"]
+    for _ in range(2):
+        await run_worker_once()
+    login(client, mechanic)
+    rows = (await client.get("/api/notifications/deliveries", params={"task_id": t["id"]})).json()["deliveries"]
+    mine = [d for d in rows if d["recipient_user_id"] == mechanic.id]
+    theirs = [d for d in rows if d["recipient_user_id"] != mechanic.id]
+    assert mine and theirs, "both people are reminded about a sales task"
+    assert all(d["receipt"].get("to") for d in mine) and all(d["destination_hidden"] is False for d in mine)
+    for d in theirs:
+        assert d["destination_hidden"] is True
+        assert "to" not in d["receipt"] and "chat_id" not in d["receipt"]
+        assert d["state"] and d["state_label"], "the state itself is still visible"
+    login(client, owner)
+    rows = (await client.get("/api/notifications/deliveries", params={"task_id": t["id"]})).json()["deliveries"]
+    assert all(d["receipt"].get("to") for d in rows), "Dylan set these addresses up and still sees them"
+
+
+async def test_H11_an_unchecked_source_is_not_reported_as_all_clear(client, db, owner, monkeypatch):
+    """Failing to *evaluate* freshness is itself a reason not to claim all-clear (spec §2.2, H11)."""
+    from backend.app.services import connections
+
+    async def boom(_db):
+        raise RuntimeError("connection overview unavailable")
+    monkeypatch.setattr(connections, "overview", boom)
+    status = await notifications_feed.feed_status(db, 0)
+    assert status["all_clear"] is False and status["sources_checked"] is False
+    assert "not an all-clear" in status["message"] and "could not be checked" in status["message"]
+    login(client, owner)
+    feed = (await client.get("/api/notifications")).json()
+    assert feed["status"]["all_clear"] is False

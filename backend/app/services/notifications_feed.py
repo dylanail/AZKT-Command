@@ -10,6 +10,7 @@ all-clear (H11). Money is hidden from anyone without `costs.read`.
 """
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timedelta, timezone
 
 from pydantic import BaseModel, Field
@@ -29,6 +30,7 @@ from ..models.tasks import Task
 from . import email_templates
 from .reminders import ACTIONABLE, inapp_enabled
 
+log = logging.getLogger("azkt.notifications")
 URGENCIES = ("high", "today", "later")
 
 
@@ -151,23 +153,29 @@ async def build(db: AsyncSession, actor: Actor) -> dict:
 
 
 async def feed_status(db: AsyncSession, high_count: int) -> dict:
-    """Never claim all-clear while a required source is behind (spec §2.2, H11)."""
+    """Never claim all-clear while a required source is behind (spec §2.2, H11).
+
+    A failure to *evaluate* freshness is itself a reason not to claim all-clear: an unchecked source is
+    an unknown source, so the status says the check did not run instead of reporting a clean sweep."""
+    checked = True
     try:
         from . import connections
         conns = await connections.overview(db)
         clear, stale = connections.all_clear_possible(conns)
     except Exception:  # noqa: BLE001
-        clear, stale = True, []
-    if high_count:
-        message = f"{high_count} item{'s' if high_count != 1 else ''} need attention."
-        if stale:
-            message += f" {', '.join(stale)} needs attention — this list only covers synced data."
+        log.exception("connection freshness could not be evaluated for the notification feed")
+        clear, stale, checked = False, [], False
+    head = f"{high_count} item{'s' if high_count != 1 else ''} need attention." if high_count else ""
+    if not checked:
+        message = (head + " Connection status could not be checked, so this is not an all-clear.").strip()
+    elif high_count:
+        message = head + (f" {', '.join(stale)} needs attention — this list only covers synced data." if stale else "")
     elif stale:
         message = f"No urgent items found in synced data; {', '.join(stale)} needs attention."
     else:
         message = "No urgent items found."
     return {"all_clear": bool(clear and not high_count), "stale_connections": stale, "message": message,
-            "sources_complete": bool(clear)}
+            "sources_complete": bool(clear), "sources_checked": checked}
 
 
 # ── commands ────────────────────────────────────────────────────────────────

@@ -60,7 +60,7 @@ export function TelegramSection() {
   if (!s) {
     return (
       <GlassPanel clip padded>
-        <Notice tone="wait" lead="Telegram isn&apos;t available yet">
+        <Notice tone="wait" lead="Telegram isn't available yet">
           The server doesn&apos;t serve Telegram pairing on this build. Email reminders are unaffected.
         </Notice>
       </GlassPanel>
@@ -187,7 +187,7 @@ export function TelegramSection() {
                 The link works once and expires after 10 minutes. Open it in Telegram, then confirm here which account used it —
                 AZKT never trusts a username or a forwarded message.
               </span>
-              <div className="row-wrap">
+              <div className="row-wrap nf-btnrow">
                 <Button variant="primary" loading={busy("tg-pair")} onClick={startPairing}>
                   {pending || started ? "Create a new link" : "Pair my Telegram"}
                 </Button>
@@ -201,7 +201,7 @@ export function TelegramSection() {
               {started ? (
                 <div className="stack-sm">
                   {started.deep_link ? (
-                    <div className="row-wrap">
+                    <div className="row-wrap nf-btnrow">
                       <a className="btn btn--soft" href={started.deep_link} target="_blank" rel="noopener noreferrer">Open Telegram and start</a>
                       <span className="fs12 t4">Opens t.me in a new tab.</span>
                     </div>
@@ -224,7 +224,7 @@ export function TelegramSection() {
                     {pending.token_expires_at ? <span>Expires <When iso={pending.token_expires_at} format="long" /></span> : null}
                     {pending.confirmed_in_chat_at ? <span>Used in Telegram <When iso={pending.confirmed_in_chat_at} format="long" /></span> : null}
                   </div>
-                  <div className="row-wrap">
+                  <div className="row-wrap nf-btnrow">
                     <Button variant="primary" loading={busy("tg-confirm")} onClick={confirmPairing}
                       disabled={!pending.telegram_user_id || !pending.chat_id}
                       disabledReason="Open the link in Telegram first — AZKT has to see which account used it.">
@@ -244,7 +244,7 @@ export function TelegramSection() {
                 Tells Telegram where to send messages, with the secret header. It runs as a checked external action, so the
                 result appears in Connections rather than instantly here.
               </span>
-              <div className="row-wrap">
+              <div className="row-wrap nf-btnrow">
                 <Button variant="soft" loading={busy("tg-webhook")} onClick={setWebhookNow}
                   disabled={!s.webhook_secret_configured}
                   disabledReason="The webhook secret isn't configured on the server; unauthenticated updates would be refused.">
@@ -259,14 +259,14 @@ export function TelegramSection() {
             <Expander title={`Pairing history · ${s.history.length}`}>
               <div style={{ paddingTop: 6 }}>
                 {s.history.map((p) => (
-                  <div key={p.id} className="nf-del">
-                    <span className="nf-del__task">{pairingWho(p)}</span>
-                    <span className="nf-del__meta">
+                  <div key={p.id} className="nf-row">
+                    <span className="nf-row__name">{pairingWho(p)}</span>
+                    <span className="nf-row__meta">
                       {statusLabel(p.status)}
                       {p.confirmed_in_app_at ? <> · confirmed <When iso={p.confirmed_in_app_at} format="long" /></> : null}
                       {p.revoked_at ? <> · revoked <When iso={p.revoked_at} format="long" /></> : null}
                     </span>
-                    {p.revoke_reason ? <span className="nf-del__why">{p.revoke_reason}</span> : null}
+                    {p.revoke_reason ? <span className="nf-row__why">{p.revoke_reason}</span> : null}
                     {p.status === "active" ? (
                       <Button size="sm" variant="ghost" onClick={() => setRevoking(p)}>Revoke</Button>
                     ) : null}

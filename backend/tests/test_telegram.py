@@ -74,10 +74,16 @@ def message(chat_id: int, tg_user_id: int, text: str, *, chat_type: str = "priva
     return {"update_id": _uid(), "message": msg}
 
 
+def start_token(res: dict) -> str:
+    """The raw token is only returned when there is no deep link to carry it (it would otherwise be
+    stored in command_log); normally the owner's link carries it."""
+    return res.get("start_token") or res["deep_link"].split("start=")[-1]
+
+
 async def pair_owner(client, db, owner, tg_user_id: int, chat_id: int) -> str:
     login(client, owner)
     res = (await client.post("/api/telegram/pair", json={})).json()["data"]
-    await post_update(client, message(chat_id, tg_user_id, f"/start {res['start_token']}"))
+    await post_update(client, message(chat_id, tg_user_id, f"/start {start_token(res)}"))
     await run_worker_once()
     r = await client.post(f"/api/telegram/pairings/{res['pairing_id']}/confirm", json={})
     assert r.json()["data"]["pairing"]["status"] == "active"
@@ -93,13 +99,15 @@ async def _pairing(db, pairing_id: str) -> TelegramPairing:
 async def test_D01_pairing_binds_the_intended_chat_and_rejects_replay_or_another_account(client, db, owner):
     login(client, owner)
     res = (await client.post("/api/telegram/pair", json={})).json()["data"]
-    assert res["deep_link"].endswith(res["start_token"]) and "t.me/azkt_test_bot?start=" in res["deep_link"]
+    assert "t.me/azkt_test_bot?start=" in res["deep_link"]
+    assert "start_token" not in res, "the one-use secret is not echoed into a stored command result"
+    token = start_token(res)
     tg_user_id, chat_id = _uid(), _uid()
     # the link is not usable until the owner confirms the identity in the web app
     r = await client.post(f"/api/telegram/pairings/{res['pairing_id']}/confirm", json={})
     assert r.status_code == 409 and "no Telegram account" in r.json()["message"]
 
-    await post_update(client, message(chat_id, tg_user_id, f"/start {res['start_token']}"))
+    await post_update(client, message(chat_id, tg_user_id, f"/start {token}"))
     await run_worker_once()
     p = await _pairing(db, res["pairing_id"])
     assert p.telegram_user_id == tg_user_id and p.chat_id == chat_id and p.status == "pending"
@@ -109,7 +117,7 @@ async def test_D01_pairing_binds_the_intended_chat_and_rejects_replay_or_another
     # another Telegram account replays the same token
     before = len(sent())
     other_chat = _uid()
-    await post_update(client, message(other_chat, _uid(), f"/start {res['start_token']}"))
+    await post_update(client, message(other_chat, _uid(), f"/start {token}"))
     await run_worker_once()
     assert "not valid any more" in sent()[-1]["text"] and len(sent()) == before + 1
     p = await _pairing(db, res["pairing_id"])
@@ -488,3 +496,96 @@ async def test_a_rate_limited_telegram_delivery_is_bounded_and_then_falls_back(c
     finally:
         await client.patch("/api/me/prefs",
                            json={"notification_prefs": {"channels": {"task_reminder": "email_only"}}})
+
+
+# ── D01: binding a Telegram identity is an access change, so it is auditable ──
+async def test_D01_binding_and_refusing_a_pairing_link_leave_an_audit_trail(client, db, owner):
+    login(client, owner)
+    res = (await client.post("/api/telegram/pair", json={})).json()["data"]
+    token, pid = start_token(res), res["pairing_id"]
+    tg_user_id, chat_id = _uid(), _uid()
+    await post_update(client, message(chat_id, tg_user_id, f"/start {token}"))
+    await run_worker_once()
+    rows = (await db.execute(select(ActivityEntry).where(ActivityEntry.entity_id == pid)
+                             .execution_options(populate_existing=True))).scalars().all()
+    bind = [a for a in rows if a.state == "pending" and a.kind == "access"]
+    assert bind, "the chat-side binding is recorded, not only the in-app confirmation"
+    assert bind[-1].details["telegram_user_id"] == tg_user_id and bind[-1].details["chat_id"] == chat_id
+    assert bind[-1].visibility == "owner"
+
+    # an expired link that someone still tries is a refusal the owner can see
+    login(client, owner)
+    res2 = (await client.post("/api/telegram/pair", json={})).json()["data"]
+    stale = await _pairing(db, res2["pairing_id"])
+    stale.token_expires_at = datetime.now(timezone.utc) - timedelta(minutes=1)
+    await db.commit()
+    await post_update(client, message(_uid(), _uid(), f"/start {start_token(res2)}"))
+    await run_worker_once()
+    rows = (await db.execute(select(ActivityEntry).where(ActivityEntry.entity_id == res2["pairing_id"])
+                             .execution_options(populate_existing=True))).scalars().all()
+    refused = [a for a in rows if a.state == "refused"]
+    assert refused and refused[-1].exception is True, "a refused pairing attempt is visible to the owner"
+    assert refused[-1].details["reason"]
+
+
+# ── a refused instruction changes nothing and is never a silent disappearance ──
+async def test_a_refused_instruction_rolls_back_and_the_chat_is_told(client, db, owner, monkeypatch):
+    from backend.app.core.errors import Conflict
+    tg_user_id, chat_id = _uid(), _uid()
+    await pair_owner(client, db, owner, tg_user_id, chat_id)
+    before_turns = await db.scalar(select(func.count()).select_from(ChatTurn)
+                                   .where(ChatTurn.thread_key == f"{owner.id}:manager"))
+    before = len(sent())
+
+    async def blow(db_, actor, scope):
+        raise Conflict("the task changed since you loaded it")
+    monkeypatch.setattr(telegram_bot, "_tasks_text", blow)
+    await post_update(client, message(chat_id, tg_user_id, "/tasks"))
+    await run_worker_once()
+    assert len(sent()) == before + 1, "a refusal is reported, never swallowed"
+    assert "Nothing was changed" in sent()[-1]["text"] and "changed since" in sent()[-1]["text"]
+    after_turns = await db.scalar(select(func.count()).select_from(ChatTurn)
+                                  .where(ChatTurn.thread_key == f"{owner.id}:manager"))
+    assert after_turns == before_turns, "the half-applied transaction is rolled back, not committed"
+    ev = (await db.execute(select(ProviderEvent).order_by(ProviderEvent.received_at.desc()).limit(1)
+                           .execution_options(populate_existing=True))).scalar_one()
+    assert ev.processed_at is not None and "changed since" in (ev.error or ""), "the update is not retried forever"
+
+
+# ── rotation has to actually re-register ────────────────────────────────────
+async def test_set_webhook_rotation_actually_re_registers(client, db, owner):
+    login(client, owner)
+    url = "https://rotate.example.com/api/telegram/webhook"
+    first = (await client.post("/api/telegram/set-webhook", json={"url": url})).json()["data"]
+    assert first["queued"] is True and first["already_in_flight"] is False
+    second = (await client.post("/api/telegram/set-webhook", json={"url": url})).json()["data"]
+    assert second["external_action_id"] == first["external_action_id"], "one in-flight registration, not two"
+    assert second["already_in_flight"] is True
+    await run_worker_once()
+    calls = len([m for m in telegram_bot.recorded() if m["method"] == "setWebhook" and m["url"] == url])
+    assert calls == 1
+    third = (await client.post("/api/telegram/set-webhook", json={"url": url})).json()["data"]
+    assert third["external_action_id"] != first["external_action_id"] and third["queued"] is True
+    await run_worker_once()
+    calls = len([m for m in telegram_bot.recorded() if m["method"] == "setWebhook" and m["url"] == url])
+    assert calls == 2, "rotating after a finished registration must really re-register, not report a false queue"
+
+
+async def test_H08_a_delivering_bot_token_never_reaches_an_unallowlisted_chat(client, db, owner):
+    """A staging deploy with a real token must not message the owner's real chat (spec §13/§14, H08)."""
+    from backend.app.core.errors import Blocked
+    tg_user_id, chat_id = _uid(), _uid()
+    pid = await pair_owner(client, db, owner, tg_user_id, chat_id)
+    pairing = await _pairing(db, pid)
+    old = (settings.TELEGRAM_BOT_TOKEN, settings.NON_PROD_DESTINATION_ALLOWLIST)
+    settings.TELEGRAM_BOT_TOKEN = "111:not-a-real-token"     # a delivering client, never called
+    settings.NON_PROD_DESTINATION_ALLOWLIST = ""
+    telegram_bot.reset_client()
+    try:
+        with pytest.raises(Blocked):
+            await telegram_bot.send(db, pairing, "hello")
+        settings.NON_PROD_DESTINATION_ALLOWLIST = str(chat_id)
+        telegram_bot.check_destination(settings.TELEGRAM_BOT_TOKEN, chat_id)   # allowlisted: no refusal
+    finally:
+        settings.TELEGRAM_BOT_TOKEN, settings.NON_PROD_DESTINATION_ALLOWLIST = old
+        telegram_bot.reset_client()

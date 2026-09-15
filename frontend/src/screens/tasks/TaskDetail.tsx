@@ -11,6 +11,7 @@ import { TZ } from "../../lib/format";
 import { useIsMobile } from "../../lib/viewport";
 import { Button, Chip, EmptyState, ErrorState, Expander, Field, GlassPanel, HealthLabel, Input, KeyValues, Loading, Notice, PageHeader, ResponsiveDialog, Textarea, When, useToast } from "../../ui";
 import { ReasonDialog, RescheduleSheet, AssignSheet, taskPath, useTaskCommand, useTaskDialogs } from "./TaskSheets";
+import { ActionLinkCard } from "./ActionLinkCard";
 import { taskHealth } from "./TaskRow";
 import { usePeople } from "./usePeople";
 import { evidenceHave, evidenceRequirements, isActive, isClosed, isOverdue, missingEvidence, reminderLabel, showsTokyo, typeLabel, STATUS_LABEL, type TaskRelated, type TaskView } from "./types";
@@ -204,6 +205,9 @@ export default function TaskDetail() {
           </div>
         }
       />
+
+      {/* ?action=… from a reminder email: ask first, POST on Confirm (spec §5.4) */}
+      <ActionLinkCard task={task} onDone={reload} />
 
       {/* status notices */}
       {task.status === "awaiting_verification" ? (

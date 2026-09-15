@@ -1,5 +1,5 @@
-/* Settings, routed by /settings/:section — connections (default) · team · reminders · automation · external-agents ·
-   procedures · knowledge · recovery · usage. Owner edits; other roles see what their permissions allow, with reasons.
+/* Settings, routed by /settings/:section — connections (default) · team · reminders · telegram · automation · external-agents ·
+   website · drive · procedures · knowledge · recovery · usage. Owner edits; other roles see what their permissions allow, with reasons.
    Appearance (dark / reduced transparency / reduced motion) is per device and lives at the top. */
 import { useNavigate, useParams } from "react-router-dom";
 import { useAuth } from "../../lib/auth";
@@ -9,7 +9,10 @@ import { Button, GlassPanel, PageHeader, Switch, Tabs } from "../../ui";
 import { ConnectionsSection } from "./components/ConnectionsSection";
 import { TeamSection } from "./components/TeamSection";
 import { RemindersSection } from "./components/RemindersSection";
+import { TelegramSection } from "./components/TelegramSection";
 import { AutomationSection } from "./components/AutomationSection";
+import { WebsiteSection } from "./components/WebsiteSection";
+import { DriveSection } from "./components/DriveSection";
 import { ExternalAgentsSection } from "./components/ExternalAgentsSection";
 import { ProceduresSection } from "./components/ProceduresSection";
 import { KnowledgeSection } from "./components/KnowledgeSection";
@@ -20,7 +23,10 @@ const SECTIONS = [
   { id: "connections", label: "Connections", blurb: "Every source AZKT reads or writes, with freshness. A stale source is said out loud." },
   { id: "team", label: "Team", blurb: "" },
   { id: "reminders", label: "Reminders", blurb: "Where each reminder reaches you, quiet hours and the digest." },
+  { id: "telegram", label: "Telegram", blurb: "The private chat AZKT uses for reminders and questions." },
   { id: "automation", label: "Automation", blurb: "Pause switches, spending caps and the shop's stage gates." },
+  { id: "website", label: "Website", blurb: "What AZKT is allowed to write to your WordPress site, and every listing that still needs a person." },
+  { id: "drive", label: "Drive importer", blurb: "The importer's shared folder: what's in it, which truck each folder belongs to, and what has been copied in." },
   { id: "external-agents", label: "External agents", blurb: "Scoped clients that talk to the Manager." },
   { id: "procedures", label: "Procedures", blurb: "Teach AZKT how you do things." },
   { id: "knowledge", label: "Knowledge", blurb: "What AZKT knows and where it came from." },
@@ -71,7 +77,10 @@ export default function Settings() {
         {current === "connections" ? <ConnectionsSection /> : null}
         {current === "team" ? <TeamSection level={2} /> : null}
         {current === "reminders" ? <RemindersSection /> : null}
+        {current === "telegram" ? <TelegramSection /> : null}
         {current === "automation" ? <AutomationSection /> : null}
+        {current === "website" ? <WebsiteSection /> : null}
+        {current === "drive" ? <DriveSection /> : null}
         {current === "external-agents" ? <ExternalAgentsSection /> : null}
         {current === "procedures" ? <ProceduresSection /> : null}
         {current === "knowledge" ? <KnowledgeSection /> : null}

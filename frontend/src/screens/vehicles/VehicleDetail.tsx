@@ -868,12 +868,24 @@ function FilesTab({ d, reload, canWrite }: { d: VehicleDetailResp; reload: () =>
 }
 
 /* ================= Sale ================= */
+/* Subset of GET /api/listings/vehicles/{id}/package (backend/app/services/listings.py package_view).
+   The full shapes live in screens/listings/types.ts; only what this block shows is repeated here. */
+interface ListingPackageView {
+  package: { id: string; package_version: number; status: string; ready: boolean } | null;
+  ready: boolean;
+  blocked_reasons: string[];
+  publications: Array<{ id: string; channel: string; state: string; external_url: string | null }>;
+}
+
 function SaleTab({ d, reload, cmd, isOwner, costsRead, onMoveReady, moving, canWrite }: {
   d: VehicleDetailResp; reload: () => void; cmd: ReturnType<typeof useVehicleCommand>;
   isOwner: boolean; costsRead: boolean; onMoveReady: () => void; moving: boolean; canWrite: boolean;
 }) {
   const v = d.vehicle;
   const s = d.tabs.sale;
+  const nav = useNavigate();
+  const { user } = useAuth();
+  const canDraftListing = can(user, "listings.draft");
   const [priceOpen, setPriceOpen] = useState(false);
   const [showGates, setShowGates] = useState(true);
 
@@ -882,12 +894,22 @@ function SaleTab({ d, reload, cmd, isOwner, costsRead, onMoveReady, moving, canW
     (signal) => (ready ? Promise.resolve(null) : fetchGates(v.id, "ready_for_sale", signal)),
     [v.id, v.version, ready],
   );
-  const listing = useQuery<{ items?: Array<{ id: string; state?: string; status?: string }> } | null>(
-    (signal) => api.get<{ items?: Array<{ id: string; state?: string; status?: string }> } | null>(
-      `/api/listings?vehicle_id=${encodeURIComponent(v.id)}`, { signal, tolerate: [403, 404, 501] }),
-    [v.id],
+  /* Listing package for the website channel (backend/app/routers/listings.py). 403/404 → null, so a role
+     without listings.read or a vehicle without a package gets an honest line, never an error. */
+  const listing = useQuery<ListingPackageView | null>(
+    (signal) => api.get<ListingPackageView | null>(
+      `/api/listings/vehicles/${encodeURIComponent(v.id)}/package?channel=website`, { signal, tolerate: [403, 404, 501] }),
+    [v.id, v.version],
   );
-  const pkg = listing.data?.items?.[0] || null;
+  const pkg = listing.data?.package || null;
+  const livePub = (listing.data?.publications || []).find((p) => p.external_url) || (listing.data?.publications || [])[0] || null;
+  const startListing = async () => {
+    const out = await cmd.run<{ package?: { id: string } }>("listing-build", `/api/listings/vehicles/${encodeURIComponent(v.id)}/build`,
+      { channel: "website" }, { okMessage: "Listing package built from the vehicle record" });
+    const newId = out.data?.package?.id;
+    if (out.ok && newId) nav(`/listings/${encodeURIComponent(newId)}`);
+    else if (out.ok) listing.reload();
+  };
 
   return (
     <div className="stack-lg" style={{ maxWidth: 720 }}>
@@ -964,17 +986,49 @@ function SaleTab({ d, reload, cmd, isOwner, costsRead, onMoveReady, moving, canW
       )}
 
       <section className="vh-sect">
-        <div className="vh-sect__head"><h2>Listing package</h2></div>
+        <div className="vh-sect__head">
+          <h2>Listing package</h2>
+          {pkg ? <Button size="sm" variant="soft" to={`/listings/${encodeURIComponent(pkg.id)}`}>Open listing</Button> : null}
+        </div>
         {listing.loading ? <Loading rows={1} label="Looking for a listing package" />
-          : pkg ? (
-            <div className="vh-link">
-              <Link to={`/listings/${encodeURIComponent(pkg.id)}`} className="wrap">Open the listing package</Link>
-              <span className="vh-link__meta">{stateLabel(pkg.state || pkg.status || "")}</span>
+          : listing.data === null ? (
+            <span className="not-recorded">Listings aren't available for your role.</span>
+          ) : pkg ? (
+            <div className="stack-sm">
+              <div className="row-wrap">
+                <span>Version {pkg.package_version} · {stateLabel(pkg.status)}</span>
+                {listing.data.ready
+                  ? <Chip size="sm" tone="ok">Checks passed</Chip>
+                  : <Chip size="sm" tone="amber">{(listing.data.blocked_reasons || []).length || 1} to clear</Chip>}
+                {livePub ? <Chip size="sm" tone={livePub.state === "verified" ? "ok" : "wait"}>{stateLabel(livePub.state)}</Chip> : null}
+              </div>
+              {!listing.data.ready && listing.data.blocked_reasons?.[0]
+                ? <span className="fs13 t3">{listing.data.blocked_reasons[0]}</span> : null}
+              {livePub?.external_url
+                ? <a className="fs13" href={livePub.external_url} target="_blank" rel="noreferrer noopener">Open the live page</a>
+                : <span className="fs13 t4">Not on the website yet.</span>}
             </div>
           ) : (
-            <span className="not-recorded">
-              {listing.data === null ? "Listings aren't connected yet." : "No listing package yet."} It starts once the vehicle is ready for sale.
-            </span>
+            <div className="stack-sm">
+              <span className="not-recorded">No listing package yet.</span>
+              <span className="fs13 t3">
+                {ready
+                  ? "The shop gate has passed — the package can be built from the vehicle record."
+                  : "Listing cannot start until the shop gate passes."}
+              </span>
+              <div>
+                <Button
+                  size="sm"
+                  variant="primary"
+                  loading={cmd.busy("listing-build")}
+                  disabled={!ready || !canDraftListing}
+                  disabledReason={!canDraftListing ? "Your role can't build listing drafts." : "The shop gate hasn't passed yet."}
+                  onClick={startListing}
+                >
+                  Start listing package
+                </Button>
+              </div>
+            </div>
           )}
       </section>
 

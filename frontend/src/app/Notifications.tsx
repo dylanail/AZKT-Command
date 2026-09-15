@@ -221,8 +221,8 @@ function Row({ n, color, onOpen, onActed }: { n: NotificationItem; color: string
     if (r?.status === "ok") { setMode("idle"); onActed(); }
   };
 
-  const snoozeMinutes = async (minutes: number, label: string) => {
-    await act("snooze", { minutes }, `Snoozed until ${label}. The underlying work is unchanged.`);
+  const snoozeMinutes = async (minutes: number, said: string) => {
+    await act("snooze", { minutes }, `${said} The problem itself is untouched.`);
   };
 
   const snoozePicked = async () => {
@@ -233,7 +233,7 @@ function Row({ n, color, onOpen, onActed }: { n: NotificationItem; color: string
     const minutes = Math.round((target.getTime() - Date.now()) / 60000);
     if (minutes < 1) { setPickError("Pick a time in the future."); return; }
     if (minutes > MAX_SNOOZE_MINUTES) { setPickError("Snooze can't go further than 14 days."); return; }
-    await snoozeMinutes(minutes, target.toLocaleString());
+    await snoozeMinutes(minutes, `Snoozed until ${target.toLocaleString()}.`);
   };
 
   return (
@@ -253,9 +253,9 @@ function Row({ n, color, onOpen, onActed }: { n: NotificationItem; color: string
         </span>
         {mode === "snooze" ? (
           <div className="nf-item__acts">
-            <Button size="sm" variant="soft" loading={busy(`${n.id}:snooze`)} onClick={() => snoozeMinutes(60, "an hour from now")}>1 hour</Button>
-            <Button size="sm" variant="soft" loading={busy(`${n.id}:snooze`)} onClick={() => snoozeMinutes(minutesUntilTomorrow8Phoenix(), "tomorrow 8:00 AZ")}>Tomorrow 8:00 AZ</Button>
-            <Input type="datetime-local" aria-label="Snooze until" value={pickAt} onChange={(e) => setPickAt(e.target.value)} style={{ width: 200, minWidth: 0 }} />
+            <Button size="sm" variant="soft" loading={busy(`${n.id}:snooze`)} onClick={() => snoozeMinutes(60, "Snoozed for an hour.")}>1 hour</Button>
+            <Button size="sm" variant="soft" loading={busy(`${n.id}:snooze`)} onClick={() => snoozeMinutes(minutesUntilTomorrow8Phoenix(), "Snoozed until tomorrow 8:00 AZ.")}>Tomorrow 8:00 AZ</Button>
+            <Input type="datetime-local" aria-label="Snooze until" title="Uses this device's clock." value={pickAt} onChange={(e) => setPickAt(e.target.value)} style={{ width: 200, minWidth: 0 }} />
             <Button size="sm" variant="primary" loading={busy(`${n.id}:snooze`)} onClick={snoozePicked} disabled={!pickAt} disabledReason="Pick a date and time first.">Snooze</Button>
             <Button size="sm" variant="ghost" onClick={() => { setMode("idle"); setPickError(null); }}>Back</Button>
             {pickError ? <span className="fs12" style={{ color: "var(--blocked)" }} role="alert">{pickError}</span> : null}
@@ -281,6 +281,8 @@ export function NotificationBell({ mobile }: { mobile?: boolean }) {
   const isMobile = useIsMobile();
   const nav = useNavigate();
   const useSheet = mobile ?? isMobile;
+  const popRef = useRef<HTMLDivElement>(null);
+  const bellRef = useRef<HTMLButtonElement>(null);
 
   const label = useMemo(() => {
     if (!available) return "Notifications · not connected yet";
@@ -290,9 +292,10 @@ export function NotificationBell({ mobile }: { mobile?: boolean }) {
 
   useEffect(() => {
     if (!open || useSheet) return;
-    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") setOpen(false); };
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") { setOpen(false); bellRef.current?.focus(); } };
     document.addEventListener("keydown", onKey);
-    return () => document.removeEventListener("keydown", onKey);
+    const t = window.setTimeout(() => popRef.current?.focus({ preventScroll: true }), 0);
+    return () => { document.removeEventListener("keydown", onKey); window.clearTimeout(t); };
   }, [open, useSheet]);
 
   // Deep links bypass navigation: straight to the record (spec §2.1).
@@ -363,6 +366,7 @@ export function NotificationBell({ mobile }: { mobile?: boolean }) {
   return (
     <>
       <IconButton
+        ref={bellRef}
         label={label}
         title={label}
         active={open}
@@ -379,7 +383,7 @@ export function NotificationBell({ mobile }: { mobile?: boolean }) {
       {open && !useSheet ? (
         <>
           <div className="notif-scrim" onMouseDown={() => setOpen(false)} />
-          <div role="dialog" aria-label="Notifications" className="notif-pop">
+          <div ref={popRef} role="dialog" aria-label="Notifications" tabIndex={-1} className="notif-pop">
             <div className="notif__head">
               <span style={{ fontWeight: 600 }}>Notifications</span>
               <Button size="xs" variant="ghost" onClick={() => void reload()}>Refresh</Button>

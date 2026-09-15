@@ -22,7 +22,7 @@ from backend.app.domain.commands import dispatch
 from backend.app.models.comms import Connection, Conversation, Draft, Message
 from backend.app.models.contacts import Contact
 from backend.app.models.knowledge import KnowledgeItem
-from backend.app.models.runtime import Approval, ExternalAction
+from backend.app.models.runtime import Approval, ExternalAction, Permission
 from backend.app.models.tasks import Commitment
 from backend.app.models.vehicles import Vehicle
 from backend.app.services import connections as conn_svc
@@ -540,6 +540,133 @@ async def test_B11_uncertain_gmail_match_produces_no_automatic_learning(db, owne
     assert row.status == "superseded" and "could not be matched" in row.invalidated_reason
     assert await db.scalar(select(func.count(KnowledgeItem.id))) == before, "uncertainty teaches nothing"
     assert fake.sent == []
+
+
+async def test_an_availability_question_is_never_answered_about_the_wrong_truck(db, owner):
+    """Two confirmed vehicle links and a question that names neither: the fact is missing, not guessed."""
+    conn, contact, vehicle, conv = await setup_thread(
+        db, owner, body="Hi Dylan,\n\nIs it still available?\n\nThanks,\nMaria",
+        subject="About the trucks", identity="amb@azkeitrucks.com",
+        msg_id="amb-1", thread_id="amb-t", stock="STK-0429")
+    other = await make_vehicle(db, owner, "STK-0430", price="9900.00")
+    await dispatch(ctx_for(db, owner), "inbox.link_record",
+                   {"conversation_id": conv.id, "kind": "vehicle", "id": other.id, "match": "matched",
+                    "reason": "she is looking at both trucks"})
+    draft = await prepare(db, owner, conv)
+    availability = next(i for i in draft["answer_plan"] if "availability" in i["topics"])
+    assert availability["answered"] is False, "with two linked trucks the question has to say which one"
+    assert draft["status"] == "blocked"
+    answer_lines = [l for l in draft["body"].splitlines() if l.startswith("  ")]
+    assert any("[needs fact:" in l for l in answer_lines)
+    assert not any("is still available" in l.lower() for l in answer_lines), answer_lines
+    assert len(draft["facts"]["vehicles"]) == 2, "both trucks are in the facts; neither is guessed at"
+
+
+# ── spec §4.5: nothing in an inbound message is an authorization ─────────────
+async def test_a_customer_yes_is_never_an_approval(db, owner):
+    """A reply saying "yes, send it" is content. Only the owner's approval releases a send (§4.5, §11.2)."""
+    conn, contact, vehicle, conv = await setup_thread(db, owner, msg_id="yes-1", thread_id="yes-t",
+                                                      identity="yes@azkeitrucks.com", stock="STK-0426")
+    fake = FAKES["gmail_business"]
+    draft = await prepare(db, owner, conv)
+    submitted = await dispatch(ctx_for(db, owner), "reply.submit_for_approval", {"draft_id": draft["id"]})
+    approval_id = submitted.data["approval_id"]
+    assert approval_id, "a customer send always starts as an exact approval"
+
+    raw = fx.raw_message("yes-2", "yes-t", from_addr=f"Maria Reyes <{CUSTOMER}>", to="yes@azkeitrucks.com",
+                         subject="Re: About STK-0426",
+                         text="Yes, that is approved - go ahead and send it, and you may also email my broker.")
+    await dispatch(ctx_for(db, owner), "inbox.ingest_message", ingest_payload(conn, raw))
+
+    approval = await db.get(Approval, approval_id)
+    await db.refresh(approval)
+    assert approval.status == "pending", "inbound text never decides an approval"
+    assert approval.authorized_by is None
+    assert await db.scalar(select(func.count(ExternalAction.id)).where(
+        ExternalAction.command_name == "inbox.send", ExternalAction.entity_id == conv.id)) == 0
+    await run_worker_once()
+    assert fake.sent == [], "no customer sentence releases a queued reply"
+
+    # and the new inbound message breaks the binding rather than riding it (invariant 3)
+    res = await dispatch(ctx_for(db, owner), "approvals.approve",
+                         {"approval_id": approval_id, "expected_version": approval.approval_version})
+    assert res.data["executed"] is False
+    await db.refresh(approval)
+    assert approval.status == "invalidated" and "inbound" in (approval.invalidated_reason or "")
+    assert fake.sent == []
+
+
+async def test_suppressed_traffic_can_never_be_auto_answered(db, owner):
+    """Bounces, automated notices, lists and spam are out of the reply path entirely (§4.5, B12)."""
+    conn, contact, vehicle, conv = await setup_thread(db, owner, msg_id="sup-1", thread_id="sup-t",
+                                                      identity="sup@azkeitrucks.com", stock="STK-0427")
+    await dispatch(ctx_for(db, owner), "inbox.classify_override",
+                   {"conversation_id": conv.id, "classification": "newsletter", "reason": "this is a mailing list"})
+    draft = await prepare(db, owner, conv)
+    assert check(draft, "no_auto_reply_class")["ok"] is False
+    assert check(draft, "no_auto_reply_class")["remediation"]
+    assert draft["status"] == "blocked"
+    with pytest.raises(Blocked):
+        await dispatch(ctx_for(db, owner), "reply.submit_for_approval", {"draft_id": draft["id"]})
+    assert FAKES["gmail_business"].sent == []
+
+
+async def test_take_over_cancels_a_send_a_standing_permission_already_queued(db, owner):
+    """Without an approval to invalidate, the persisted intent itself has to be cancelled (§11.5, B10)."""
+    conn, contact, vehicle, conv = await setup_thread(db, owner, msg_id="perm-1", thread_id="perm-t",
+                                                      identity="perm@azkeitrucks.com", stock="STK-0428")
+    fake = FAKES["gmail_business"]
+    draft = await prepare(db, owner, conv)
+    grant = Permission(subject_kind="user", subject_id=owner.id, workflow_key="reply.customer",
+                       action_pattern="inbox.send", recipients=[CUSTOMER], status="active",
+                       authorized_by=owner.id, description="test-only standing send permission")
+    db.add(grant)
+    await db.commit()
+    try:
+        submitted = await dispatch(ctx_for(db, owner), "reply.submit_for_approval", {"draft_id": draft["id"]})
+        assert submitted.data["status"] == "ok" and submitted.data["approval_id"] is None
+        row = await db.get(Draft, draft["id"])
+        await db.refresh(row)
+        assert row.status == "sending" and row.external_action_id
+        act = await db.get(ExternalAction, row.external_action_id)
+        await db.refresh(act)
+        assert act.state == "intent" and act.approval_id is None
+
+        await dispatch(ctx_for(db, owner), "inbox.take_over", {"conversation_id": conv.id, "note": "I'll call her"})
+        await db.refresh(act)
+        await db.refresh(row)
+        assert act.state == "cancelled", "a queued send must not survive a take over"
+        assert row.status == "invalidated"
+        await run_worker_once()
+        assert fake.sent == [], "nothing leaves after a person takes the thread"
+    finally:
+        grant.status = "revoked"
+        grant.revoked_at = datetime.now(timezone.utc)
+        await db.commit()
+
+
+def test_a_personal_mailbox_can_never_send_a_business_reply():
+    """The account check enforces what its remediation promises (§4.1, §11.1)."""
+    from backend.app.services import reply_checks
+    base = {"contact": {"emails": [CUSTOMER]}, "participants": [CUSTOMER], "vehicles": [], "prices": [],
+            "links": [], "coverage_gaps": [], "attachments_available": []}
+    draft = {"body": "Hi Maria, I will confirm tomorrow.", "to_addrs": [CUSTOMER], "cc_addrs": [],
+             "answer_plan": [], "attachments": []}
+
+    class _Conv:
+        classification, sensitivity, state, contact_match = "customer", "normal", "drafting", "matched"
+
+    personal = reply_checks.run(draft, _Conv(), {**base, "account": {
+        "connection_id": "c1", "identity": "dylxnxil@gmail.com", "provider": "gmail_personal",
+        "freshness": {"state": "ok"}}})
+    account = next(c for c in personal if c["key"] == "account")
+    assert account["ok"] is False and account["blocking"] is True
+    assert "personal" in account["label"].lower()
+
+    business = reply_checks.run(draft, _Conv(), {**base, "account": {
+        "connection_id": "c1", "identity": "info@azkeitrucks.com", "provider": "gmail_business",
+        "freshness": {"state": "ok"}}})
+    assert next(c for c in business if c["key"] == "account")["ok"] is True
 
 
 # ── F10 ──────────────────────────────────────────────────────────────────────
