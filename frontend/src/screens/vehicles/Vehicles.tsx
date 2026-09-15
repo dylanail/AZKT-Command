@@ -134,8 +134,11 @@ export default function Vehicles() {
       subtitle={
         q ? `Search: "${q}"`
           : employee ? "Only vehicles with your tasks. No prices or customer details."
-            : list.data ? `${items.length} of ${list.data.total} in ${VIEW_LABELS[view]}${attention || docs ? " · filtered" : ""}`
-              : "List by default. Shop also has a board."
+            // The board is its own list (GET /api/shop/board) and can hold more than the Shop view —
+            // count what is actually on screen rather than the list endpoint's total.
+            : board.data ? `${board.data.total} on the shop board`
+              : list.data ? `${items.length} of ${list.data.total} in ${VIEW_LABELS[view]}${attention || docs ? " · filtered" : ""}`
+                : "List by default. Shop also has a board."
       }
       actions={
         <>

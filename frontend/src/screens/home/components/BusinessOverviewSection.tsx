@@ -277,7 +277,8 @@ export function BusinessOverviewSection({
               value={
                 cash.money_hidden || hidden
                   ? <Amt m={null} hidden />
-                  : <><Amt m={cash.receipts} /> <span className="t4">in</span></>
+                  /* Both directions, as the server reported them — the tile is labelled "in and out". */
+                  : <><Amt m={cash.receipts} /> <span className="t4">in</span> <span className="t4">·</span> <Amt m={cash.payouts} /> <span className="t4">out</span></>
               }
               explain="Money that actually settled in this period, by payment date. Cash movement is never profit."
               sub={`${cash.counts.receipts} receipt${cash.counts.receipts === 1 ? "" : "s"} · ${cash.counts.refunds} refund${cash.counts.refunds === 1 ? "" : "s"} · ${cash.counts.payouts} payout${cash.counts.payouts === 1 ? "" : "s"}${cash.counts.unsettled_excluded ? ` · ${cash.counts.unsettled_excluded} not settled yet, excluded` : ""}`}

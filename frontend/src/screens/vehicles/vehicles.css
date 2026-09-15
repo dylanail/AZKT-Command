@@ -61,6 +61,10 @@ a.vh-row:hover, button.vh-row:hover { background: var(--row-hover); text-decorat
 .vh-card__open { display: flex; gap: 10px; align-items: center; text-decoration: none; color: inherit; min-width: 0; white-space: normal; }
 .vh-card__open:hover { text-decoration: none; }
 .vh-card__foot { display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap; }
+/* The board card shows the vehicle's exception as the health label — a whole sentence, not "Blocked".
+   Let it wrap inside the card instead of running past its right edge (the default .health is nowrap). */
+.vh-card__foot > .health { flex: 1 1 140px; min-width: 0; white-space: normal; overflow-wrap: anywhere; align-items: flex-start; }
+.vh-card__foot > .health .health__dot { margin-top: 5px; }
 .vh-boardcol__empty { border: 1px dashed var(--line); border-radius: 14px; padding: 14px; font-size: 13px; color: var(--t4); text-align: center; }
 
 /* ---------- detail header ---------- */

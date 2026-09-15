@@ -12,7 +12,8 @@ const CONNECTION_WORDS: Record<RunConnection, string> = {
   connecting: "Opening the progress feed…",
   live: "Live progress",
   reconnecting: "Reconnecting…",
-  finished: "Finished",
+  // The stream closing is not an outcome — the title and the status chip say what happened to the work.
+  finished: "",
   lost: "Progress feed paused",
 };
 
@@ -47,6 +48,12 @@ export function MissionPanel({ runId, missionId, startCursor, onChanged }: Missi
   const resting = !!run && RESTING_RUN.has(run.status);
   const cancellable = !!runId && !finished && !resting;
 
+  const connectionLine = [
+    CONNECTION_WORDS[connection],
+    note || "",
+    connection === "reconnecting" ? "The work keeps running while this reconnects." : "",
+  ].filter(Boolean).join(" · ");
+
   const cancel = async () => {
     if (!runId) return;
     const r = await command("cancel-run", cancelRunPath(runId), { reason: "cancelled from the Agents screen" }, {
@@ -59,7 +66,7 @@ export function MissionPanel({ runId, missionId, startCursor, onChanged }: Missi
     <GlassPanel padded className="ag-mission" aria-label="Work in progress">
       <div className="between">
         <div className="row-wrap">
-          <span className="ag-mission__title">{finished ? "Finished" : "Working on it"}</span>
+          <span className="ag-mission__title">{finished ? "Finished" : resting ? "Waiting on you" : "Working on it"}</span>
           <Chip size="sm" tone={finished ? "soft" : resting ? "wait" : "act"}>{RUN_WORDS[status] || humanize(status)}</Chip>
           {run ? <span className="fs12 t4 tnum">step {run.steps_used}{run.budget_steps ? ` of ${run.budget_steps}` : ""}</span> : null}
         </div>
@@ -80,11 +87,7 @@ export function MissionPanel({ runId, missionId, startCursor, onChanged }: Missi
 
       {mission?.outcome ? <div className="fs14 t2">{mission.outcome}</div> : null}
 
-      <div className="fs12 t4">
-        {CONNECTION_WORDS[connection]}
-        {note ? ` · ${note}` : ""}
-        {connection === "reconnecting" ? " The work keeps running while this reconnects." : ""}
-      </div>
+      {connectionLine ? <div className="fs12 t4">{connectionLine}</div> : null}
 
       {updates.length ? (
         <ol className="ag-updates">
