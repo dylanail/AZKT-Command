@@ -93,6 +93,19 @@ export interface AutomationSettings {
   spend_caps: { per_action: string | null; daily: string | null; monthly: string | null; currency: string };
   model_daily_budget_usd: string | null; model_monthly_budget_usd: string | null; discretionary_ai_enabled: boolean;
 }
+export interface ReportingSettings { required_cost_categories: string[] }
+/* backend/app/models/finance.py COST_CATEGORIES, in plain English. */
+export const COST_CATEGORIES: { value: string; label: string }[] = [
+  { value: "purchase", label: "Purchase" },
+  { value: "import", label: "Import" },
+  { value: "transport", label: "Transport" },
+  { value: "recon", label: "Recon" },
+  { value: "parts", label: "Parts" },
+  { value: "labor", label: "Labour" },
+  { value: "selling", label: "Selling" },
+  { value: "storage", label: "Storage" },
+  { value: "other", label: "Other" },
+];
 export interface Control { key: string; paused: boolean; reason: string | null; changed_by: string | null; changed_at: string | null }
 export interface Outstanding {
   external_actions: { pending: number; executing: number; unknown: number; by_state: Record<string, number> };

@@ -336,3 +336,34 @@ async def test_reconcile_sweep_is_registered_every_15_minutes():
     from backend.app.domain.jobs import SWEEPS
     fn, interval = SWEEPS["square.reconcile"]
     assert interval == 15 * 60 and callable(fn)
+
+
+async def test_E09_a_retried_event_applies_the_object_fetched_after_the_outage(client, db, owner):
+    """The whole point of keeping an unprocessed event is to re-fetch the *current* object once the API
+    answers again. The retry must apply what Square now says, not silently drop it as a duplicate."""
+    await square_connection(db)
+    fake = square_fake()
+    pid = f"SQP-{_u()}"
+    fake.add_payment(square_payment(pid, amount_minor=150000, status="PENDING", version=1))
+    event = square_event(f"EVT-{_u()}", "payment.created", "payment", fake.payments[pid])
+    with install_square(fake):
+        fake.offline = True
+        assert (await _post(client, event)).status_code == 200
+        await run_jobs()
+        stored = (await _events(db, event["event_id"]))[0]
+        await db.refresh(stored)
+        assert stored.processed_at is None and "auth_expired" in (stored.error or "")
+        p = await _payment(db, pid)
+        assert p is not None and p.status == "pending" and p.amount == 1500
+        # Square answers again and the payment has since completed for its final amount
+        fake.offline = False
+        fake.payments[pid] = square_payment(pid, amount_minor=175000, status="COMPLETED", version=2)
+        out = await square_sync.process_event(db, stored)
+        assert out["api"] == "fetched"
+        await db.refresh(p)
+        assert p.status == "completed" and p.amount == 1750
+        rows = (await db.execute(_load(select(Payment).where(
+            Payment.provider == "square", Payment.provider_payment_id == pid)))).scalars().all()
+        assert len(rows) == 1                      # the retry corrects, it never duplicates
+        await db.refresh(stored)
+        assert stored.processed_at is not None and stored.error is None

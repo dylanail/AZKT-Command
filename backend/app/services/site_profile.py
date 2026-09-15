@@ -172,7 +172,14 @@ async def site_discover(ctx: CommandContext, inp: DiscoverIn) -> dict:
                         "vehicle_post_types": discovered.get("vehicle_post_types"), "note": inp.note})
     ctx.emit("site_profile.changed", aggregate_type="site_profile", aggregate_id=p.id,
              payload={"status": "draft", "profile_version": p.profile_version, "changes": changes})
-    return {"profile": serialize_profile(p), "changes": changes,
+    # The site's schema moved under the version that is currently writing: that is drift, not just a
+    # report. Writes for the channel pause until a new version is validated and activated (F08).
+    paused = {}
+    active = await active_profile(ctx.db)
+    if changes and active is not None and active.id != p.id and not active.writes_paused:
+        paused = await record_drift(ctx, active, source="discovery", reasons=changes,
+                                    detail={"new_profile_id": p.id, "new_profile_version": p.profile_version})
+    return {"profile": serialize_profile(p), "changes": changes, "paused_active_profile": bool(paused.get("drift")),
             "next": "preview one draft package on the staging URL, then activate"}
 
 
@@ -260,9 +267,11 @@ def _package_for_preview(pkg: ListingPackage | None) -> dict:
 
 
 def package_payload(pkg: ListingPackage) -> dict:
+    """The adapter-facing package. `media` carries the media *objects* (url + checksum), never the bare
+    asset ids — `render_payload` maps each one onto the site's image field."""
     return {"headline": pkg.headline, "body": pkg.body, "short_description": pkg.short_description,
             "price": str(pkg.price) if pkg.price is not None else None, "currency": pkg.currency,
-            "media": list(pkg.media or []), "availability": pkg.availability, "specs": list(pkg.specs or []),
+            "media": list(pkg.media_detail or []), "availability": pkg.availability, "specs": list(pkg.specs or []),
             "disclosures": list(pkg.disclosures or []), "package_hash": pkg.package_hash,
             "vehicle_id": pkg.vehicle_id, "sku": (pkg.evidence or {}).get("sku"), "status": "draft"}
 

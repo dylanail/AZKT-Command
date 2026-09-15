@@ -9,10 +9,10 @@ from __future__ import annotations
 from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..adapters import drive as drive_adapter
-from ..auth.deps import command_context, current_actor, require
+from ..auth.deps import command_context, require
 from ..core.errors import Unsupported
 from ..db import get_db
+from ..domain.access import visible_vehicle_ids
 from ..domain.actors import Actor
 from ..domain.commands import CommandContext, dispatch
 from ..services import drive_assets as svc
@@ -62,7 +62,7 @@ async def files(folder_id: str | None = Query(default=None), limit: int = Query(
 async def matches(include_matched: bool = Query(default=False), db: AsyncSession = Depends(get_db),
                   actor: Actor = Depends(require("vehicles.read"))) -> dict:
     states = ("proposed", "ambiguous", "matched") if include_matched else ("proposed", "ambiguous")
-    return {"items": await svc.proposed_matches(db, states=states)}
+    return {"items": await svc.proposed_matches(db, states=states, visible=await visible_vehicle_ids(db, actor))}
 
 
 @router.post("/scan")

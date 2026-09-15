@@ -8,7 +8,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..auth.deps import command_context, current_actor, require
+from ..auth.deps import command_context, require
 from ..db import get_db
 from ..domain.access import assert_vehicle_visible, visible_vehicle_ids
 from ..domain.actors import Actor

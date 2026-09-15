@@ -135,6 +135,7 @@ class FakeDrive:
         self.denied: set[str] = set()
         self.downloads: list[str] = []
         self.offline = False
+        self.no_download: set[str] = set()
         self.fail_download_once: set[str] = set()
 
     # ── construction helpers ─────────────────────────────────────────────
@@ -190,6 +191,14 @@ class FakeDrive:
         """Access removed at the source: later reads raise permission_denied (F03)."""
         self.denied.update(file_ids)
 
+    def deny_download(self, *file_ids: str) -> None:
+        """Sharing narrowed at the source: the file is still listed (with capabilities.canDownload
+        false) but its content may no longer be retrieved (F03)."""
+        for fid in file_ids:
+            self.files[fid]["capabilities"] = {**(self.files[fid].get("capabilities") or {}), "canDownload": False}
+            self.no_download.add(fid)
+            self._record_change(fid)
+
     # ── adapter surface ──────────────────────────────────────────────────
     def _guard(self, file_id: str | None = None) -> None:
         if self.offline:
@@ -217,6 +226,8 @@ class FakeDrive:
     async def download(self, file_id: str) -> bytes:
         self._guard(file_id)
         self.downloads.append(file_id)
+        if file_id in self.no_download:
+            raise ProviderError(f"drive permission denied for {file_id}", kind="permission_denied")
         if file_id in self.fail_download_once:
             self.fail_download_once.discard(file_id)
             raise ProviderError("drive transient error 503", kind="transient")

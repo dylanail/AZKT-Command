@@ -64,6 +64,10 @@ DOC_HINTS: tuple[tuple[str, tuple[str, ...]], ...] = (
 )
 SHORT_HINTS = {"bl", "b/l", "bill", "title", "inv-"}   # matched on word boundaries only
 SENSITIVE = {"invoice", "id_document", "shipping_paper"}
+# Retrieval eligibility is only ever re-granted by a scan when the source still permits retrieval.
+# A revocation observed at download time survives every later scan until the source says otherwise.
+REVOKED_PREFIX = "source access revoked"
+NO_DOWNLOAD_REASON = "the source no longer permits downloading this file"
 
 
 def iso(dt: datetime | None) -> str | None:
@@ -219,7 +223,7 @@ def _apply_meta(row: DriveFile, meta: dict, *, path: str, now: datetime) -> None
     row.owner_email = ((meta.get("owners") or [{}])[0]).get("emailAddress") or row.owner_email
     row.modified_time = meta.get("modifiedTime") or row.modified_time
     new_checksum = meta.get("md5Checksum")
-    if new_checksum and row.checksum and new_checksum != row.checksum and row.import_status == "imported":
+    if new_checksum and row.checksum and new_checksum != row.checksum and row.import_status in ("imported", "deduplicated"):
         # a corrected version of an already imported file: re-import keeps the lineage (F03)
         row.import_status = "pending"
         row.import_error = None
@@ -244,7 +248,14 @@ async def _upsert_file(ctx: CommandContext, conn: Connection, meta: dict, *, pat
                         created_by=ctx.actor.user_id, updated_by=ctx.actor.user_id)
         ctx.db.add(row)
     _apply_meta(row, meta, path=path, now=ctx.now)
-    if not row.removed and row.in_root:
+    can_download = (meta.get("capabilities") or {}).get("canDownload")
+    if row.removed:
+        pass
+    elif can_download is False:
+        # Drive says this account may no longer retrieve the content: never try, never invent (F03).
+        row.retrieval_eligible = False
+        row.ineligible_reason = NO_DOWNLOAD_REASON
+    elif row.in_root and not str(row.ineligible_reason or "").startswith(REVOKED_PREFIX):
         row.retrieval_eligible = True
         row.ineligible_reason = None
     if created:
@@ -583,6 +594,7 @@ class ImportAssetsIn(BaseModel):
     file_ids: list[str] = Field(default_factory=list)
     limit: int = Field(default=25, ge=1, le=200)
     include_documents: bool = True
+    reimport: bool = False        # re-fetch a file whose current revision is already stored
 
 
 async def _link_target(db: AsyncSession, conn: Connection, row: DriveFile) -> tuple[str | None, dict]:
@@ -635,6 +647,13 @@ async def drive_import_assets(ctx: CommandContext, inp: ImportAssetsIn) -> dict:
     out = {"imported": 0, "deduplicated": 0, "skipped": 0, "failed": 0, "blocked": 0}
     items: list[dict] = []
     for row in rows:
+        if row.asset_id and row.import_status in ("imported", "deduplicated") and not inp.reimport:
+            # this exact revision is already in AZKT storage: naming the file again never re-fetches it
+            # and never relabels the original as a duplicate of itself
+            out["skipped"] += 1
+            items.append({"file_id": row.file_id, "name": row.name, "status": row.import_status,
+                          "asset_id": row.asset_id, "reason": "this revision is already imported"})
+            continue
         if not row.retrieval_eligible:
             row.import_status = "skipped"
             row.import_error = row.ineligible_reason or "retrieval is not permitted for this file"
@@ -660,7 +679,7 @@ async def drive_import_assets(ctx: CommandContext, inp: ImportAssetsIn) -> dict:
             kind = drive_adapter.error_kind(e)
             if kind in ("permission_denied", "auth_expired"):
                 row.retrieval_eligible = False
-                row.ineligible_reason = f"source access revoked ({kind})"
+                row.ineligible_reason = f"{REVOKED_PREFIX} ({kind})"
                 row.import_status = "failed"
                 out["blocked"] += 1
             else:
@@ -745,11 +764,9 @@ async def _scan_job(jctx: jobs.JobContext, payload: dict) -> dict:
     except Blocked as e:
         return {"skipped": e.message}
     except Unsupported as e:
-        # no credential / no client: setup blocked is a state, not a failing job
+        # no usable Google client (setup blocked): a state, not a failing job — never retry forever
+        # and never invent an index
         return {"setup_blocked": str(e)}
-    except Unsupported as e:
-        # no usable Google client (setup blocked): say so, never retry forever and never invent an index
-        return {"setup_blocked": e.message}
     data = res.data or {}
     if data.get("pending_import"):
         await jobs.enqueue(jctx.db, "drive.import_assets", {}, dedupe_key="drive:import")
@@ -767,8 +784,6 @@ async def _import_job(jctx: jobs.JobContext, payload: dict) -> dict:
         return {"skipped": e.message}
     except Unsupported as e:
         return {"setup_blocked": str(e)}
-    except Unsupported as e:
-        return {"setup_blocked": e.message}
     data = res.data or {}
     return {k: v for k, v in data.items() if k != "items"}
 
@@ -911,7 +926,10 @@ async def coverage(db: AsyncSession) -> dict:
             "freshness": conn_svc.freshness(conn), "failure": conn.failure or {}}
 
 
-async def proposed_matches(db: AsyncSession, *, states: tuple[str, ...] = ("proposed", "ambiguous")) -> list[dict]:
+async def proposed_matches(db: AsyncSession, *, states: tuple[str, ...] = ("proposed", "ambiguous"),
+                           visible: set[str] | None = None) -> list[dict]:
+    """Folder → vehicle proposals with their evidence. `visible` is the caller's record scope: a
+    proposal names a vehicle, so a person who may not see that vehicle is not shown it (spec §11.1)."""
     conn = await drive_connection(db)
     if conn is None:
         return []
@@ -920,10 +938,16 @@ async def proposed_matches(db: AsyncSession, *, states: tuple[str, ...] = ("prop
                                                       DriveFile.removed.is_(False)))).scalars().all()
     out = []
     for r in rows:
+        if visible is not None and r.vehicle_id and r.vehicle_id not in visible:
+            continue
         cands = []
         for c in (r.match_evidence or {}).get("candidates") or []:
+            if visible is not None and c.get("vehicle_id") not in visible:
+                continue
             v = await db.get(Vehicle, c.get("vehicle_id")) if c.get("vehicle_id") else None
             cands.append({**c, "title": v.title if v else None, "stock_no": v.stock_no if v else None})
+        if visible is not None and not cands and not r.vehicle_id:
+            continue
         out.append({**serialize_drive_file(r), "candidates": cands})
     return out
 

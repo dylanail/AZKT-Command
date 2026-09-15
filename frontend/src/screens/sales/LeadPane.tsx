@@ -22,7 +22,7 @@ export function DepositGateDialog({ message, onClose }: { message: string | null
   const mobile = useIsMobile();
   return (
     <ResponsiveDialog mobile={mobile} open={!!message} onClose={onClose} title="Deposit Paid comes from payment evidence" size="sm"
-      footer={<><Button variant="primary" to="/finance?tab=needs-matching">Record payment</Button><Button variant="ghost" onClick={onClose}>Not now</Button></>}>
+      footer={<><Button variant="primary" to="/finance?tab=matching">Record payment</Button><Button variant="ghost" onClick={onClose}>Not now</Button></>}>
       <Notice tone="blocked" lead="Blocked" role="alert">{message}</Notice>
       <p className="fs13 t3">Match the payment in Finance › Needs matching. The lead moves to Deposit Paid on its own and hands off to the vehicle's Sale tab or the import request.</p>
     </ResponsiveDialog>
@@ -159,6 +159,8 @@ export function LeadPane({ leadId, onChanged, initialTaskType = null }: LeadPane
 
   const contactLine = d.contact ? [d.contact.name, d.contact.primary_phone || d.contact.primary_email].filter(Boolean).join(" · ") : card.name;
   const budgetHidden = o.budget_amount === null || o.budget_amount === undefined;
+  /* Ask AZKT about this lead — the Agents screen pins ?context=kind:id&label=. */
+  const askHref = `/agents?context=${encodeURIComponent(`opportunity:${o.id}`)}&label=${encodeURIComponent(card.name || "this lead")}`;
 
   return (
     <div className="lp">
@@ -192,6 +194,7 @@ export function LeadPane({ leadId, onChanged, initialTaskType = null }: LeadPane
             </span>
           ) : null}
           {isLost ? <span className="fs13 t3">Lost{o.lost_at ? <> · <When iso={o.lost_at} format="date" /></> : null}{o.lost_reason ? ` · ${o.lost_reason}` : ""}</span> : null}
+          <Button size="sm" variant="soft" to={askHref}>Ask about this lead</Button>
           <span className="fs12" style={{ color: d.deposit.state === "confirmed" ? "var(--ok)" : d.deposit.state === "partial" ? "var(--risk)" : d.deposit.state === "awaiting" ? "var(--wait)" : "var(--t4)" }}>{d.deposit.label}</span>
         </div>
       </div>

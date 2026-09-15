@@ -224,7 +224,7 @@ export default function ImportRequestDetail() {
             <Button size="sm" variant="soft" onClick={() => setDialog("deposit-rule")} disabled={!write} disabledReason={writeReason}>
               {depositRuleSet(r) ? "Change the deposit rule" : "Set the deposit rule"}
             </Button>
-            <Button size="sm" variant="ghost" to="/finance?tab=needs-matching">Record payment</Button>
+            <Button size="sm" variant="ghost" to="/finance?tab=matching">Record payment</Button>
           </div>
           <span className="fs12 t4">Deposits are confirmed from payment evidence in Finance, never by hand here.</span>
         </GlassPanel>

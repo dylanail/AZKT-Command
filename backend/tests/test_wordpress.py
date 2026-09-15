@@ -341,3 +341,28 @@ async def test_site_profile_router_reads_and_actions(client, db, owner):
         detail = (await client.get(f"/api/site/profile/{pid}")).json()
         assert detail["status"] == "active" and detail["preview"]["written"] is False
         assert (await client.post("/api/site/profile/nope", json={})).status_code == 404
+
+
+async def test_F08_a_schema_change_pauses_the_version_that_is_currently_writing(db, owner):
+    """A REST namespace disappearing under the active profile is drift, not just a report: the version
+    that is writing right now no longer matches the site, so writes pause until a new one is validated."""
+    await wordpress_connections(db)
+    await _reset_profiles(db)
+    site = wordpress_fake()
+    with install_wordpress(site):
+        first = (await _discover(db, owner))["profile"]
+        await dispatch(ctx_for(db, owner), "site.validate", {"profile_id": first["id"]})
+        await dispatch(ctx_for(db, owner), "site.activate", {"profile_id": first["id"]})
+        active = await db.get(SiteProfile, first["id"])
+        assert site_svc.writable(active) == (True, None)
+        site.namespaces = [n for n in site.namespaces if n != "wc/v3"]   # a plugin change removes WooCommerce
+        data = await _discover(db, owner)
+        assert data["changes"] and data["paused_active_profile"] is True
+        await db.refresh(active)
+        assert active.status == "drift" and active.writes_paused is True
+        assert "REST namespaces removed" in (active.pause_reason or "")
+        ok, why = site_svc.writable(active)
+        assert ok is False and "namespaces" in (why or "")
+        # the new draft is the way forward; it is not writable until it is validated and activated
+        assert data["profile"]["status"] == "draft"
+        assert site_svc.writable(await db.get(SiteProfile, data["profile"]["id"]))[0] is False

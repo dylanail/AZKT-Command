@@ -30,7 +30,7 @@ import re
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -205,7 +205,8 @@ def _template_copy(v: Vehicle, listing_class: str, specs: list[dict], disclosure
         phrase = STATUS_PHRASES.get(v.logistics_state, "in transit")
         lines.append(f"Status: this truck is {phrase}. It is not yet available for inspection.")
         if eta:
-            lines.append(f"Estimated arrival: {str(eta['at'])[:10]} (estimated, source: {eta['source']}).")
+            label = "estimated" if eta.get("status") != "completed" else "confirmed"
+            lines.append(f"Estimated arrival: {str(eta['at'])[:10]} ({label}, source: {eta['source']}).")
         else:
             lines.append("Arrival date is not confirmed yet — we update this listing when the date is sourced.")
     else:
@@ -244,8 +245,12 @@ async def _model_copy(db: AsyncSession, v: Vehicle, listing_class: str, specs: l
             return headline, body, short, "template"
         first, _, rest = text.partition("\n")
         gen_headline, gen_body = first.strip()[:200], (rest.strip() or body)
-        if eta is None and DATE_LIKE.search(gen_body):
-            log.warning("model copy contained an unsourced date; falling back to the template")
+        # A date in the copy may only ever be the sourced one: with no sourced ETA no date is allowed
+        # at all, and with one, a *different* date is just as invented (F09).
+        sourced = str((eta or {}).get("at") or "")[:10]
+        allowed = set(DATE_LIKE.findall(sourced)) if sourced else set()
+        if set(DATE_LIKE.findall(gen_body)) - allowed:
+            log.warning("model copy contained a date that is not the sourced arrival; falling back to the template")
             return headline, body, short, "template"
         return gen_headline or headline, gen_body, (gen_body.split("\n")[0][:300] or short), "model"
     except (ModelUnavailable, ModelRefused, Exception) as e:  # noqa: BLE001 - copy never blocks a draft
@@ -537,48 +542,73 @@ def _publish_consequence(p: PublishIn) -> dict:
             "targets": {"channel": p.channel, "package_id": p.package_id}}
 
 
-async def publish_revalidate(ctx: CommandContext, inp: PublishIn, approval) -> list[str]:
-    """Immediately before execution: the approved package, profile version, gates and availability
-    must still be exactly what the owner approved (invariant 9)."""
+async def publish_blockers(db: AsyncSession, pkg: ListingPackage | None, *, channel: str,
+                           expected_package_hash: str | None = None,
+                           expected_profile_version: int | None = None) -> list[str]:
+    """Everything that must still be exactly true immediately before a channel is written
+    (invariant 9). Shared by the exact-approval revalidate hook and by the handler itself, so a
+    standing permission can never take the shortcut past these checks."""
     reasons: list[str] = []
-    pkg = await ctx.db.get(ListingPackage, inp.package_id)
     if pkg is None:
         return ["listing package no longer exists"]
-    bound = approval.payload or {}
-    if bound.get("expected_package_hash") and bound["expected_package_hash"] != pkg.package_hash:
+    if expected_package_hash and expected_package_hash != pkg.package_hash:
         reasons.append("the package changed since it was approved — review again")
-    if inp.expected_package_hash and inp.expected_package_hash != pkg.package_hash:
-        reasons.append("package hash changed — review again")
     if pkg.status in ("superseded", "invalidated", "published"):
         reasons.append(f"package is {pkg.status} — review again")
-    newer = await latest_package(ctx.db, pkg.vehicle_id, channel=inp.channel)
+    newer = await latest_package(db, pkg.vehicle_id, channel=channel)
     if newer is not None and newer.id != pkg.id and newer.package_hash != pkg.package_hash:
         reasons.append("a newer package version was built — review again")
-    profile = await site_svc.active_profile(ctx.db)
-    if profile is None:
-        reasons.append("no active site profile")
-    else:
-        expected_version = bound.get("expected_profile_version") or inp.expected_profile_version or pkg.profile_version
-        if expected_version and profile.profile_version != expected_version:
-            reasons.append("the site profile changed version — review again")
-        ok, why = site_svc.writable(profile)
-        if not ok:
-            reasons.append(f"website writes are paused: {why}")
-    v = await ctx.db.get(Vehicle, pkg.vehicle_id)
-    if v is not None and availability_for(v, pkg.listing_class) != pkg.availability:
-        reasons.append(f"availability changed to {availability_for(v, pkg.listing_class)} — review again")
+    profile = await site_svc.active_profile(db)
+    if channel in SUPPORTED_CHANNELS:
+        if profile is None:
+            reasons.append("no active site profile")
+        else:
+            want = expected_profile_version or pkg.profile_version
+            if want and profile.profile_version != want:
+                reasons.append("the site profile changed version — review again")
+            ok, why = site_svc.writable(profile)
+            if not ok:
+                reasons.append(f"website writes are paused: {why}")
+    v = await db.get(Vehicle, pkg.vehicle_id)
     if v is not None:
+        if availability_for(v, pkg.listing_class) != pkg.availability:
+            reasons.append(f"availability changed to {availability_for(v, pkg.listing_class)} — review again")
         approved = str(v.asking_price) if (v.asking_price is not None and v.price_approved_at is not None) else None
         if approved != (str(pkg.price) if pkg.price is not None else None):
             reasons.append("the approved price changed — review again")
-    if v is not None:
-        gates = await evaluate_gates(ctx.db, v, profile, pkg.listing_class, {**package_payload(pkg),
-                                                                             "media_detail": list(pkg.media_detail or []),
-                                                                             "evidence": dict(pkg.evidence or {})})
+        gates = await evaluate_gates(db, v, profile, pkg.listing_class, {**package_payload(pkg),
+                                                                        "media_detail": list(pkg.media_detail or []),
+                                                                        "evidence": dict(pkg.evidence or {})})
         failing = [g["label"] for g in gates if not g["ok"]]
         if failing:
             reasons.append("gates no longer pass: " + ", ".join(failing))
     return reasons
+
+
+async def publish_revalidate(ctx: CommandContext, inp: PublishIn, approval) -> list[str]:
+    """Immediately before execution: the approved package, profile version, gates and availability
+    must still be exactly what the owner approved (invariant 9)."""
+    bound = approval.payload or {}
+    return await publish_blockers(
+        ctx.db, await ctx.db.get(ListingPackage, inp.package_id), channel=inp.channel,
+        expected_package_hash=bound.get("expected_package_hash") or inp.expected_package_hash,
+        expected_profile_version=bound.get("expected_profile_version") or inp.expected_profile_version)
+
+
+async def dedupe_key_for(db: AsyncSession, base: str, *, limit: int = 50) -> str:
+    """The dedupe key for a new external action.
+
+    The same logical send is never repeated: while an action for `base` is alive (intent, executing,
+    confirmed or unknown) the intent is reused. A *dead* attempt is different — an action that failed
+    at the provider or was cancelled can never execute again, so reusing it would leave the owner's
+    new approval reading `queued`/`confirmed` while nothing is ever sent. Those get their own key."""
+    key = base
+    for n in range(1, limit + 1):
+        act = (await db.execute(select(ExternalAction).where(ExternalAction.dedupe_key == key))).scalar_one_or_none()
+        if act is None or act.state not in ("failed", "cancelled"):
+            return key
+        key = f"{base}:retry{n}"
+    return key
 
 
 async def _publication_for(ctx: CommandContext, pkg: ListingPackage, channel: str) -> Publication:
@@ -609,6 +639,14 @@ async def listings_publish(ctx: CommandContext, inp: PublishIn) -> dict:
         raise NotFound("listing package not found")
     if not pkg.ready:
         raise Blocked("package does not pass its gates", blocked_reasons=list(pkg.blocked_reasons or []))
+    if ctx.approval is None:
+        # No exact approval is bound (a standing permission allowed this): the revalidate hook never
+        # ran, so the same bindings are checked here rather than trusted.
+        blockers = await publish_blockers(ctx.db, pkg, channel=inp.channel,
+                                          expected_package_hash=inp.expected_package_hash,
+                                          expected_profile_version=inp.expected_profile_version)
+        if blockers:
+            raise Blocked("; ".join(blockers), reasons=blockers)
     pub = await _publication_for(ctx, pkg, inp.channel)
     pub.package_id = pkg.id
     pub.package_version = pkg.package_version
@@ -644,7 +682,7 @@ async def listings_publish(ctx: CommandContext, inp: PublishIn) -> dict:
     _history(pub, "queued", f"package v{pkg.package_version}")
     act = await approvals_svc.intend_external_action(
         ctx, command_name="listings.publish", provider="wordpress", entity_kind="publication", entity_id=pub.id,
-        dedupe_key=f"listing:publish:{pkg.id}:{pkg.package_version}:{inp.channel}",
+        dedupe_key=await dedupe_key_for(ctx.db, f"listing:publish:{pkg.id}:{pkg.package_version}:{inp.channel}"),
         payload={"package_id": pkg.id, "publication_id": pub.id, "channel": inp.channel,
                  "package_hash": pkg.package_hash, "profile_id": profile.id,
                  "profile_version": profile.profile_version})
@@ -752,13 +790,19 @@ async def _apply_verification(db: AsyncSession, pub: Publication, pkg: ListingPa
                               for m in verification["api"]["mismatches"])
         _history(pub, "mismatch", pub.error)
         edited_by = verification["api"].get("edited_by")
-        if profile is not None and edited_by and edited_by != "azkt":
+        if profile is not None and edited_by != "azkt":
+            # The site's own API disagrees with exactly what AZKT wrote on a field AZKT owns: someone
+            # edited it outside AZKT. A live WordPress/WooCommerce row carries no "who edited this",
+            # so the pause is driven by the comparison itself and only *names* an editor when the site
+            # reports one (F08). Writes for the channel stop until a new version is validated.
+            fields = ", ".join(m["field"] for m in verification["api"]["mismatches"])
+            who = f" (last edited by {edited_by})" if edited_by else ""
             ctx = CommandContext(db=db, actor=SYSTEM_ACTOR, channel="worker")
             await site_svc.record_drift(ctx, profile, source="readback",
-                                        reasons=[f"a manual edit changed AZKT-owned field(s) "
-                                                 f"{', '.join(m['field'] for m in verification['api']['mismatches'])}"],
+                                        reasons=[f"a manual edit changed AZKT-owned field(s) {fields}{who}"],
                                         detail={"publication_id": pub.id,
                                                 "mismatches": verification["api"]["mismatches"],
+                                                "edited_by": edited_by,
                                                 "editor_fields_preserved": verification["api"].get("editor_fields")})
         return pub.state
     if public_ok is True:
@@ -851,8 +895,7 @@ async def _exec_publish(db: AsyncSession, act: ExternalAction) -> dict:
     except (ProviderError, Unsupported) as e:
         readback = {"api": {}, "public": {"fetched": False, "error": str(e)}}
     state = await _apply_verification(db, pub, pkg, profile, readback, expected_payload)
-    pub.media_map = {m.get("sha256") or m.get("asset_id"): img.get("id")
-                     for m, img in zip(pkg.media_detail or [], ((readback.get("api") or {}).get("images") or []))}
+    pub.media_map = _media_map(pkg, (readback.get("api") or {}).get("images") or [])
     pkg.status = "published"
     pkg.bump(None)
     if state == "verified":
@@ -863,6 +906,26 @@ async def _exec_publish(db: AsyncSession, act: ExternalAction) -> dict:
     await db.commit()
     return {"sent": True, "state": state, "provider_ref": pub.external_id, "external_url": pub.external_url,
             "verification": pub.verification}
+
+
+def _media_map(pkg: ListingPackage, images: list) -> dict:
+    """asset checksum → the media id the site reports for it.
+
+    Matched on the checksum the payload carried whenever the site echoes it back; position is only
+    trusted when the site returned exactly the images that were sent. A map that cannot be proved is
+    left empty rather than pairing a checksum with somebody else's media id."""
+    wanted = list(pkg.media_detail or [])
+    out: dict = {}
+    for i, m in enumerate(wanted):
+        key = m.get("sha256") or m.get("asset_id")
+        if not key:
+            continue
+        img = next((x for x in images if isinstance(x, dict) and x.get("sha256") and x.get("sha256") == m.get("sha256")), None)
+        if img is None and len(images) == len(wanted) and isinstance(images[i], dict):
+            img = images[i]
+        if img and img.get("id"):
+            out[key] = img["id"]
+    return out
 
 
 async def _task(db: AsyncSession, *, title: str, vehicle_id: str | None, source_id: str, instructions: str = "",
@@ -964,25 +1027,48 @@ async def listings_update_availability(ctx: CommandContext, inp: AvailabilityIn)
 
 
 async def _cancel_incompatible(ctx: CommandContext, pub: Publication, desired: str) -> list[str]:
-    """A queued availability publication that contradicts the new desired state never leaves (F10)."""
+    """A queued channel write that contradicts the new desired state never leaves (F10).
+
+    That covers the availability reply *and* a publication that has not gone out yet: an approved
+    package states an availability, so a package that says "available" must not reach the site once
+    the truck is reserved or sold."""
     rows = (await ctx.db.execute(select(ExternalAction).where(
         ExternalAction.entity_kind == "publication", ExternalAction.entity_id == pub.id,
         ExternalAction.state.in_(("intent",))))).scalars().all()
-    cancelled = []
+    cancelled, reasons = [], []
     for act in rows:
-        wanted = (act.payload or {}).get("availability")
-        if act.command_name == "listings.push_availability" and wanted and wanted != desired:
-            act.state = "cancelled"
-            act.error = f"no longer compatible: the desired availability is now {desired}"
-            cancelled.append(act.id)
-        elif act.command_name == "listings.publish" and desired in ("sold",):
-            act.state = "cancelled"
-            act.error = "the vehicle is sold; this queued publication is no longer compatible"
-            cancelled.append(act.id)
+        why = None
+        if act.command_name == "listings.push_availability":
+            wanted = (act.payload or {}).get("availability")
+            if wanted and wanted != desired:
+                why = f"no longer compatible: the desired availability is now {desired}"
+        elif act.command_name == "listings.publish":
+            queued_pkg = await ctx.db.get(ListingPackage, (act.payload or {}).get("package_id"))
+            stated = queued_pkg.availability if queued_pkg is not None else None
+            if stated != desired:
+                why = (f"the queued publication states availability {stated or 'unknown'} but the truck is now "
+                       f"{desired}; it is no longer compatible")
+        if why is None:
+            continue
+        act.state = "cancelled"
+        act.error = why
+        cancelled.append(act.id)
+        reasons.append(why)
+        if act.approval_id:
+            # the approval is bound to this exact action: it can no longer be executed either
+            await dispatch(ctx.child(), "approvals.invalidate",
+                           {"approval_id": act.approval_id,
+                            "reason": f"availability changed to {desired} — review again"}, commit=False)
     if cancelled:
         await approvals_svc.invalidate_for_entity(ctx, "publication", pub.id,
                                                   f"availability changed to {desired} — review again")
-        _history(pub, "cancelled_queued", f"{len(cancelled)} queued action(s) cancelled")
+        _history(pub, "cancelled_queued", f"{len(cancelled)} queued action(s) cancelled", reasons=reasons)
+        if pub.state in ("queued", "accepted") and not pub.external_id:
+            # nothing reached the site and nothing will: say so instead of leaving a stale "queued"
+            pub.state = "cleanup_pending"
+            pub.cleanup_required = True
+            pub.error = ("the approved publication was cancelled before it was sent; rebuild the package for the "
+                         f"current availability ({desired}) and approve it again")
     return cancelled
 
 
@@ -1028,7 +1114,8 @@ async def listings_push_availability(ctx: CommandContext, inp: PushAvailabilityI
     pub.cleanup_required = True   # stays true until the channel is verified (F10)
     act = await approvals_svc.intend_external_action(
         ctx, command_name="listings.push_availability", provider="wordpress", entity_kind="publication",
-        entity_id=pub.id, dedupe_key=f"listing:availability:{pub.id}:{inp.availability}:{pub.version}",
+        entity_id=pub.id,
+        dedupe_key=await dedupe_key_for(ctx.db, f"listing:availability:{pub.id}:{inp.availability}:{pub.version}"),
         payload={"publication_id": pub.id, "availability": inp.availability, "reason": inp.reason,
                  "profile_id": profile.id, "profile_version": profile.profile_version})
     pub.external_action_id = act.id

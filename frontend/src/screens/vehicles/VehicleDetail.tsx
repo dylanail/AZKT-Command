@@ -44,7 +44,6 @@ export default function VehicleDetail() {
   const { id = "" } = useParams();
   const { user } = useAuth();
   const mobile = useIsMobile();
-  const nav = useNavigate();
   const insp = useInspector();
   const { toast } = useToast();
   const [params, setParams] = useSearchParams();
@@ -164,11 +163,11 @@ export default function VehicleDetail() {
     if (out.ok) reload();
   }
 
-  const askAbout = () => {
-    const ctx = { label: `${v.stock_no || v.title}`, href: `/vehicles/${v.id}` };
-    if (mobile) { nav(`/agents?about=${encodeURIComponent(`vehicle:${v.id}`)}`); return; }
-    insp.openAsk(ctx);
-  };
+  /* Ask about this truck. Desktop opens the inspector; phones open the Agents screen with the
+     pinned context the Agents screen reads (?context=kind:id&label=). */
+  const askLabel = v.stock_no || v.title || "this truck";
+  const askHref = `/agents?context=${encodeURIComponent(`vehicle:${v.id}`)}&label=${encodeURIComponent(askLabel)}`;
+  const askAbout = () => insp.openAsk({ label: askLabel, href: `/vehicles/${v.id}` });
 
   return (
     <div className="page page-wide">
@@ -211,7 +210,11 @@ export default function VehicleDetail() {
             >
               Add update
             </Button>
-            <Button variant="glass" onClick={askAbout} disabled={employee} disabledReason="Ask AZKT isn't part of your view.">Ask about this</Button>
+            {mobile ? (
+              <Button variant="glass" to={employee ? undefined : askHref} disabled={employee} disabledReason="Ask AZKT isn't part of your view.">Ask about this truck</Button>
+            ) : (
+              <Button variant="glass" onClick={askAbout} disabled={employee} disabledReason="Ask AZKT isn't part of your view.">Ask about this truck</Button>
+            )}
             {!employee ? (
               <MoveStageButton
                 stages={SHOP_STAGES}

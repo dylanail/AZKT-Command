@@ -309,9 +309,16 @@ async def process_event(db: AsyncSession, ev: ProviderEvent) -> dict:
         out["api_error"] = api_error
     now = datetime.now(timezone.utc)
     result: dict = {}
+    # A retry of a stored event exists precisely to apply what Square says *now* (E09). Finance treats a
+    # repeat of the same provider_event_id as a duplicate and keeps the older record, so the event id is
+    # only claimed on the first attempt — by the retry it is already recorded on the payment, and the
+    # fresh object must be allowed through. Payment identity (provider+merchant+id) still prevents a
+    # second row, and a replay of an event that was processed cleanly stays a no-op.
+    retried = bool(ev.error)
+    upsert_event_id = None if retried else parts["event_id"]
 
     if otype == "payment":
-        payload = map_payment(fetched or fallback, merchant_id=merchant, event_id=parts["event_id"],
+        payload = map_payment(fetched or fallback, merchant_id=merchant, event_id=upsert_event_id,
                               connection_id=conn.id if conn else None, fetched_at=now, from_api=api_error is None and ad is not None)
         if not payload.get("provider_payment_id"):
             out["skipped"] = "payment event without an id"
@@ -328,12 +335,12 @@ async def process_event(db: AsyncSession, ev: ProviderEvent) -> dict:
             out["skipped"] = "refund event without a payment reference"
         else:
             base: dict = {"provider": PROVIDER, "merchant_id": merchant, "provider_payment_id": payment_id,
-                          "provider_event_id": parts["event_id"], "connection_id": conn.id if conn else None,
+                          "provider_event_id": upsert_event_id, "connection_id": conn.id if conn else None,
                           "refunds": [refund], "fetched_at": now}
             if ad is not None and api_error is None:
                 try:
                     fresh_payment = await ad.get_payment(payment_id)
-                    mapped = map_payment(fresh_payment, merchant_id=merchant, event_id=parts["event_id"],
+                    mapped = map_payment(fresh_payment, merchant_id=merchant, event_id=upsert_event_id,
                                          connection_id=conn.id if conn else None, fetched_at=now, from_api=True)
                     others = [r for r in (mapped.get("refunds") or []) if r.get("id") != refund.get("id")]
                     base = {**mapped, "refunds": [refund] + others}
@@ -357,7 +364,7 @@ async def process_event(db: AsyncSession, ev: ProviderEvent) -> dict:
         else:
             try:
                 result = await _upsert(db, {"provider": PROVIDER, "merchant_id": merchant, "provider_payment_id": payment_id,
-                                            "provider_event_id": parts["event_id"], "connection_id": conn.id if conn else None,
+                                            "provider_event_id": upsert_event_id, "connection_id": conn.id if conn else None,
                                             "disputes": [dispute], "fetched_at": now}, correlation_id=parts["event_id"])
             except DomainError as e:
                 out["skipped"] = f"dispute arrived before its payment ({e.message}); reconciliation will apply it"
@@ -366,7 +373,7 @@ async def process_event(db: AsyncSession, ev: ProviderEvent) -> dict:
             out["payment"] = (result.get("payment") or {}).get("id")
             out["dispute"] = dispute.get("id")
     elif otype == "payout":
-        payload = map_payout(fetched or fallback, merchant_id=merchant, event_id=parts["event_id"],
+        payload = map_payout(fetched or fallback, merchant_id=merchant, event_id=upsert_event_id,
                              connection_id=conn.id if conn else None)
         if not payload.get("provider_payment_id"):
             out["skipped"] = "payout event without an id"
@@ -461,7 +468,8 @@ async def _compare_email_signals(db: AsyncSession, api_payments: list[dict], beg
     """An email said a payment happened; the authenticated API is the authority. Disagreements are
     visible with evidence and never averaged away (E05/E06)."""
     claims = (await db.execute(select(Payment).where(
-        Payment.provider == "claim", Payment.status == "reported"))).scalars().all()
+        Payment.provider == "claim", Payment.status == "reported")
+        .order_by(Payment.created_at.desc()).limit(500))).scalars().all()
     out: list[dict] = []
     for c in claims:
         when = c.occurred_at or c.created_at

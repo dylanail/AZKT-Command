@@ -82,7 +82,10 @@ class Publication(Base, BusinessRow):
     external_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     desired_state: Mapped[str] = mapped_column(String, default="published")  # published|available|reserved|sold|unpublished
     observed_state: Mapped[str | None] = mapped_column(String, nullable=True)
-    state: Mapped[str] = mapped_column(String, default="queued", index=True)  # queued|accepted|published|verified|pending_verification|mismatch|failed|unsupported|cleanup_pending|unpublished
+    # queued|accepted|published|verified|pending_verification|mismatch|needs_review|unknown|failed|
+    # unsupported|cleanup_pending|unpublished  — `unknown` is a lost result (never a claim that the
+    # site was written), `needs_review` waits for a person to confirm an existing site listing.
+    state: Mapped[str] = mapped_column(String, default="queued", index=True)
     external_action_id: Mapped[str | None] = mapped_column(String, nullable=True)
     receipt: Mapped[dict] = mapped_column(JSON, default=dict)
     media_map: Mapped[dict] = mapped_column(JSON, default=dict)  # asset sha → wp media id

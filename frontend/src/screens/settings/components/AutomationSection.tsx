@@ -10,7 +10,7 @@ import { useIsMobile } from "../../../lib/viewport";
 import { can, whyNot } from "../../../lib/perms";
 import { humanize } from "../../../lib/links";
 import { Button, Chip, EmptyState, ErrorState, Field, GlassPanel, Input, Loading, Notice, ResponsiveDialog, Select, Switch, Table, When } from "../../../ui";
-import { RECON_STATES, REQUIREMENT_LABELS, type AutomationSettings, type GateRule, type GateRulesResp, type PauseResp, type SettingEntry } from "./types";
+import { COST_CATEGORIES, RECON_STATES, REQUIREMENT_LABELS, type AutomationSettings, type GateRule, type GateRulesResp, type PauseResp, type ReportingSettings, type SettingEntry } from "./types";
 
 function OutstandingChips({ o }: { o: PauseResp["outstanding"] }) {
   const x = o.external_actions, a = o.approvals;
@@ -156,6 +156,64 @@ function Caps() {
   );
 }
 
+/* Reporting — which cost categories must be recorded before Home labels gross profit "Recorded".
+   GET/POST /api/settings/reporting, the same envelope the caps block uses for /api/settings/automation. */
+function Reporting() {
+  const { run, busy } = useCommand();
+  const q = useQuery<SettingEntry<ReportingSettings>>((signal) => api.get<SettingEntry<ReportingSettings>>("/api/settings/reporting", { signal }), []);
+  const [v, setV] = useState<ReportingSettings | null>(null);
+  useEffect(() => { if (q.data) setV(JSON.parse(JSON.stringify(q.data.value)) as ReportingSettings); }, [q.data]);
+  if (q.loading) return <GlassPanel clip><Loading label="Loading reporting" rows={2} /></GlassPanel>;
+  if (q.error) return <GlassPanel clip><ErrorState error={q.error} onRetry={q.reload} /></GlassPanel>;
+  if (!q.data || !v) return null;
+
+  const required = v.required_cost_categories || [];
+  const dirty = JSON.stringify(required) !== JSON.stringify(q.data.value.required_cost_categories || []);
+  const toggle = (value: string, on: boolean) => setV((x) => {
+    if (!x) return x;
+    const keep = new Set(x.required_cost_categories || []);
+    if (on) keep.add(value); else keep.delete(value);
+    return { ...x, required_cost_categories: COST_CATEGORIES.map((c) => c.value).filter((c) => keep.has(c)) };
+  });
+  const save = async () => {
+    const r = await run("reporting", "/api/settings/reporting", { value: v, expected_version: q.data?.version, replace: true },
+      { success: "Reporting saved.", onError: (_m, e) => { if (e instanceof ApiError && e.code === "conflict") q.reload(); } });
+    if (r?.status === "ok") q.reload();
+  };
+
+  return (
+    <div className="stack">
+      <div className="eyebrow">Reporting <span style={{ textTransform: "none", letterSpacing: 0 }}>· v{q.data.version}</span></div>
+      <GlassPanel clip>
+        <div className="set-row">
+          <div className="set-row__main">
+            <span className="set-row__title">Costs that must be recorded</span>
+            <span className="set-row__meta">Gross profit is labelled Recorded only when these costs are recorded for every vehicle in the period.</span>
+          </div>
+        </div>
+        <div className="set-row">
+          <div className="set-row__main">
+            <div className="row-wrap" style={{ gap: 14 }}>
+              {COST_CATEGORIES.map((c) => (
+                <label key={c.value} className="row" style={{ gap: 8, minHeight: 44 }}>
+                  <input type="checkbox" checked={required.includes(c.value)} onChange={(e) => toggle(c.value, e.target.checked)} />
+                  <span>{c.label}</span>
+                </label>
+              ))}
+            </div>
+          </div>
+        </div>
+      </GlassPanel>
+      <div className="row-wrap">
+        <Button variant="primary" loading={busy("reporting")} disabled={!dirty || required.length === 0}
+          disabledReason={required.length === 0 ? "Pick at least one cost category." : "Nothing changed yet."} onClick={save}>Save reporting</Button>
+        <Button variant="ghost" disabled={!dirty} disabledReason="Nothing to discard."
+          onClick={() => setV(JSON.parse(JSON.stringify(q.data?.value)) as ReportingSettings)}>Discard</Button>
+      </div>
+    </div>
+  );
+}
+
 function GateRules() {
   const { run, busy } = useCommand();
   const isMobile = useIsMobile();
@@ -252,6 +310,7 @@ export function AutomationSection() {
     <div className="stack-lg">
       <PauseControls />
       <Caps />
+      <Reporting />
       <GateRules />
     </div>
   );

@@ -38,8 +38,20 @@ LOCATION = "LOC-PHX"
 
 # ── small deterministic media ────────────────────────────────────────────────
 def jpeg(seed: int = 1, size: tuple[int, int] = (320, 240)) -> bytes:
+    """A deterministic image that is unique per seed.
+
+    Assets deduplicate by checksum, so two different seeds must never render identical bytes: a plain
+    `seed * k % 256` fill collides for every seed congruent modulo 256 (231 and 999 render the same
+    picture), which silently makes one scenario reuse another scenario's asset. The seed is therefore
+    painted into the image as blocks large enough to survive JPEG quantization."""
     from PIL import Image
     im = Image.new("RGB", size, ((seed * 37) % 256, (seed * 91) % 256, (seed * 53) % 256))
+    px = im.load()
+    for i in range(8):                       # 8 nibbles = every seed below 2**32, 16px blocks
+        v = (seed >> (i * 4)) & 0x0F
+        for x in range(i * 16, i * 16 + 16):
+            for y in range(16):
+                px[x, y] = (v * 17, 255 - v * 17, (v * 37) % 256)
     buf = io.BytesIO()
     im.save(buf, format="JPEG", quality=75)
     return buf.getvalue()

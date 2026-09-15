@@ -393,3 +393,33 @@ async def test_missing_drive_connection_reports_setup_blocked(db):
     conn = await drive_connection(db)
     with pytest.raises(Unsupported, match="disabled in tests"):
         drive_adapter.adapter_for(db, conn)
+
+
+async def test_F03_a_source_that_no_longer_permits_download_stays_ineligible_across_scans(db, owner):
+    """Retrieval eligibility follows the source. A file the account may no longer download is never
+    retried, and a later scan must not quietly hand the eligibility back."""
+    await _vehicles(db, owner)
+    fake, conn = await _fresh_index(db, salt=180)
+    with install_drive(fake):
+        await _select_root(db, owner)
+        await dispatch(ctx_for(db, owner), "drive.scan", {"full": True})
+        assert (await _row(db, conn, "F-PHOTO-1")).retrieval_eligible is True
+        # sharing is narrowed at the source: the file is still listed, its content is not retrievable
+        fake.deny_download("F-PHOTO-1")
+        await dispatch(ctx_for(db, owner), "drive.scan", {"full": True})
+        row = await _row(db, conn, "F-PHOTO-1")
+        assert row.retrieval_eligible is False and "no longer permits downloading" in row.ineligible_reason
+        calls = len(fake.downloads)
+        out = (await dispatch(ctx_for(db, owner), "drive.import_assets", {"file_ids": ["F-PHOTO-1"]})).data
+        assert out["blocked"] == 1 and out["imported"] == 0 and len(fake.downloads) == calls
+
+        # a revocation discovered at download time also survives the next scan
+        fake.no_download.discard("F-PHOTO-1")
+        fake.files["F-PHOTO-1"]["capabilities"] = {"canDownload": True}
+        fake.revoke("F-ACTY-1")
+        denied = (await dispatch(ctx_for(db, owner), "drive.import_assets", {"file_ids": ["F-ACTY-1"]})).data
+        assert denied["blocked"] == 1
+        fake.denied.discard("F-ACTY-1")            # the index must not forget because a list call succeeds
+        await dispatch(ctx_for(db, owner), "drive.scan", {"full": True})
+        acty = await _row(db, conn, "F-ACTY-1")
+        assert acty.retrieval_eligible is False and "revoked" in acty.ineligible_reason

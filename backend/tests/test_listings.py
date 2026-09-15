@@ -20,7 +20,6 @@ What is proved here:
 from __future__ import annotations
 
 import uuid
-from decimal import Decimal
 
 import pytest
 from sqlalchemy import delete, select
@@ -34,7 +33,7 @@ from backend.app.models.vehicles import VehicleMilestone
 from backend.app.services import listings as svc
 from backend.app.services import site_profile as site_svc
 from backend.tests.conftest import ctx_for, login
-from backend.tests.fixtures_providers import (SITE_URL, STAGING_URL, install_wordpress, jpeg, run_jobs,
+from backend.tests.fixtures_providers import (STAGING_URL, install_wordpress, jpeg, run_jobs,
                                               wordpress_connections, wordpress_fake)
 from backend.tests.test_assets import upload_via_commands
 
@@ -75,7 +74,10 @@ async def _vehicle(db, owner, *, price: str | None = "12500.00", photos: int = 1
         await dispatch(ctx_for(db, owner), "vehicles.set_asking_price",
                        {"vehicle_id": v["id"], "amount": price, "currency": "USD"})
     for i in range(photos):
-        asset_id = await upload_via_commands(db, owner, jpeg(200 + i + hash(v["id"]) % 50), f"photo-{i}.jpg")
+        # a stable per-vehicle seed: `hash()` is randomized per interpreter run, which made this
+        # scenario reuse another test's asset on some runs
+        seed = 200 + i * 7 + int(v["id"].replace("-", "")[:8], 16) % 5000
+        asset_id = await upload_via_commands(db, owner, jpeg(seed), f"photo-{i}.jpg")
         await dispatch(ctx_for(db, owner), "assets.link", {"asset_id": asset_id, "entity_kind": "vehicle",
                                                            "entity_id": v["id"], "role": "photo", "position": i})
         await dispatch(ctx_for(db, owner), "assets.classify", {"asset_id": asset_id, "classification": "listing_photo",
@@ -551,3 +553,138 @@ async def test_listings_router_package_preview_and_publications(client, db, owne
 async def test_listings_reconcile_sweep_is_registered():
     from backend.app.domain.jobs import SWEEPS
     assert SWEEPS["listings.reconcile"][1] == svc.VERIFY_SECONDS == 15 * 60
+
+
+# ── review regressions ───────────────────────────────────────────────────────
+async def test_a_retry_after_a_failed_publish_actually_runs(db, owner):
+    """A publication that failed at the provider must be re-publishable. Reusing the dead external
+    action would leave the new approval reading 'confirmed' while nothing was ever sent."""
+    site = wordpress_fake(with_existing=False)
+    await wordpress_connections(db)
+    with install_wordpress(site):
+        await _profile(db, owner)
+        v = await _vehicle(db, owner, stock_no=f"STK-{_u()[:4].upper()}")
+        pkg = (await _build(db, owner, v["id"]))["package"]
+        first, _ = await _approve_publish(db, owner, pkg["id"], package_hash=pkg["package_hash"])
+        site.unsupported_ops.add("upsert_draft")
+        await run_jobs()
+        pub = await _publication(db, v["id"])
+        assert pub.state == "failed" and len(site.items) == 0
+        # the site is fixed and the owner approves the same package again
+        site.unsupported_ops.discard("upsert_draft")
+        second, _ = await _approve_publish(db, owner, pkg["id"], package_hash=pkg["package_hash"])
+        assert second.id != first.id
+        assert second.external_action_id and second.external_action_id != first.external_action_id
+        assert second.status == "queued"          # an executable intent, not a confirmed no-op
+        assert await run_jobs() >= 1
+        pub = await _publication(db, v["id"])
+        await db.refresh(second)
+        assert pub.state == "verified" and second.status == "confirmed"
+        assert len(site.items) == 1               # exactly one post, never two
+
+
+async def test_a_reservation_cancels_a_queued_publication_before_it_lists_in_stock(db, owner):
+    """The approved package says 'available'. If the truck is reserved before the worker runs, that
+    queued publication must not go out — a reserved truck is never listed in stock (F10)."""
+    site = wordpress_fake(with_existing=False)
+    await wordpress_connections(db)
+    with install_wordpress(site):
+        await _profile(db, owner)
+        v = await _vehicle(db, owner, stock_no=f"STK-{_u()[:4].upper()}")
+        pkg = (await _build(db, owner, v["id"]))["package"]
+        assert pkg["availability"] == "available"
+        a, _ = await _approve_publish(db, owner, pkg["id"], package_hash=pkg["package_hash"])
+        res = (await dispatch(ctx_for(db, owner), "listings.update_availability",
+                              {"vehicle_id": v["id"], "availability": "reserved",
+                               "reason": "deposit received"})).data
+        assert res["publications"][0]["cancelled_queued"] == [a.external_action_id]
+        await run_jobs()
+        act = await db.get(ExternalAction, a.external_action_id)
+        await db.refresh(act)
+        assert act.state == "cancelled"
+        assert site.items == {}                   # nothing was published as in stock
+        pub = await _publication(db, v["id"])
+        assert pub.desired_state == "reserved" and pub.cleanup_required is True
+
+
+async def test_F08_a_changed_price_on_the_site_pauses_writes_without_an_editor_marker(db, owner):
+    """Drift is detected by comparing the readback with what AZKT wrote. A real WordPress row carries
+    no 'who edited this' field, so the pause must not depend on one."""
+    sku = f"STK-{_u()[:4].upper()}"
+    site = wordpress_fake(with_existing=False)
+    site.add_product(sku=sku, name="2018 Daihatsu Hijet", price="1.00", external_id="501")
+    await wordpress_connections(db)
+    with install_wordpress(site):
+        profile = await _profile(db, owner)
+        v = await _vehicle(db, owner, stock_no=sku)
+        site.set_public_stale("501", "regular_price", "1.00")      # the CDN lags: pending_verification
+        pkg = (await _build(db, owner, v["id"]))["package"]
+        await _approve_publish(db, owner, pkg["id"], package_hash=pkg["package_hash"])
+        await run_jobs()
+        pub = await _publication(db, v["id"])
+        assert pub.state == "pending_verification"
+        await db.refresh(profile)
+        assert profile.writes_paused is False
+        # someone edits the managed price in wp-admin; the live row records no editor
+        site.manual_edit("501", "regular_price", "9900.00", editor=None)
+        await svc.listings_reconcile_sweep(_sessions())
+        await run_jobs()
+        pub = await _publication(db, v["id"])
+        assert pub.state == "mismatch" and "9900.00" in (pub.error or "")
+        await db.refresh(profile)
+        assert profile.status == "drift" and profile.writes_paused is True
+        ok, why = site_svc.writable(profile)
+        assert ok is False and "price" in (why or "")
+
+
+async def test_site_validate_previews_a_real_package_without_writing(db, owner):
+    """`site.validate` with a package renders that package's payload; media are objects, not ids."""
+    site = wordpress_fake(with_existing=False)
+    await wordpress_connections(db)
+    with install_wordpress(site):
+        await _profile(db, owner)
+        v = await _vehicle(db, owner, photos=2, stock_no=f"STK-{_u()[:4].upper()}")
+        pkg = (await _build(db, owner, v["id"]))["package"]
+        profile = await site_svc.active_profile(db)
+        res = (await dispatch(ctx_for(db, owner), "site.validate",
+                              {"profile_id": profile.id, "package_id": pkg["id"]})).data
+        payload = res["preview"]["payload"]
+        assert res["preview"]["ok"] is True and res["preview"]["written"] is False
+        assert payload["regular_price"] == "12500.00" and payload["status"] == "draft"
+        assert len(payload["images"]) == 2 and all(i["sha256"] for i in payload["images"])
+        assert site.items == {}
+
+
+async def test_F09_model_copy_that_states_a_date_other_than_the_sourced_one_is_refused(db, owner, monkeypatch):
+    """A sourced estimate may be repeated. A *different* date is invented, whether or not an ETA
+    exists, so the deterministic template is used instead."""
+    await wordpress_connections(db)
+    with install_wordpress(wordpress_fake(with_existing=False)):
+        await _profile(db, owner)
+        v = await _vehicle(db, owner, logistics_state="on_vessel", stock_no=f"STK-{_u()[:4].upper()}")
+        await dispatch(ctx_for(db, owner), "vehicles.record_milestone", {
+            "vehicle_id": v["id"], "kind": "received", "status": "estimated", "at": "2026-10-20T00:00:00Z",
+            "source_kind": "exporter", "source_ref": "booking-9912"})
+
+        class _Res:
+            text = "2018 Daihatsu Hijet\nArrives 2026-11-05, guaranteed."
+
+        calls: list[dict] = []
+
+        class _Client:
+            def __init__(self, *a, **kw):
+                pass
+
+            async def complete(self, **kw):
+                calls.append(kw)
+                return _Res()
+
+        monkeypatch.setattr(svc, "model_available", lambda: True)
+        monkeypatch.setattr(svc, "ModelClient", _Client)
+        data = await dispatch(ctx_for(db, owner), "listings.build_package",
+                              {"vehicle_id": v["id"], "use_model": True})
+        pkg = data.data["package"]
+        assert len(calls) == 1                    # the model answered; the *scrub* rejected its date
+        assert pkg["generated_by"] == "template"
+        assert "2026-11-05" not in pkg["body"] and "2026-10-20" in pkg["body"]
+        assert "estimated" in pkg["body"] and "exporter" in pkg["body"]
