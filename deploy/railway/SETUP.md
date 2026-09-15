@@ -27,9 +27,20 @@ python3 -c "import secrets; print('SESSION_SECRET =', secrets.token_hex(32))"
 python3 -c "import secrets; print('SETUP_TOKEN    =', secrets.token_urlsafe(32))"
 ```
 
-A Fernet key *is* 32 random bytes in url-safe base64, which is exactly what the first line prints — so
-`Fernet.generate_key()` is not needed and neither is the `cryptography` package, which macOS does not
-ship. `openssl rand -base64 32 | tr '+/' '-_'` produces an equally valid key if you prefer it.
+`openssl` works just as well for all three and needs nothing installed either:
+
+```bash
+openssl rand -base64 32     # ENCRYPTION_KEY — always 44 characters ending in "="
+openssl rand -hex 32        # SESSION_SECRET
+openssl rand -base64 24     # SETUP_TOKEN — any opaque string; it is only ever compared
+```
+
+A Fernet key *is* 32 random bytes in base64, so `openssl rand -base64 32` produces a valid one
+directly. The `+` and `/` characters standard base64 can contain are accepted; no `tr` is needed.
+
+**Do not let a newline ride along.** `openssl rand -base64 32 | pbcopy` puts a trailing newline on
+the clipboard. The app strips surrounding whitespace before deriving the key so this is now harmless,
+but paste the value and check the field ends at the `=` before you save it.
 
 Generate them on your own machine, not in a shared terminal or a chat window, and paste them straight
 into Railway's variable editor. Railway stores them encrypted and hides them after saving.
