@@ -28,16 +28,12 @@ import { MetricDrilldown } from "./components/MetricDrilldown";
 import { HomeSection, SectionBody } from "./components/parts";
 import { StatusSummary } from "./components/StatusSummary";
 import { TodayList } from "./components/Today";
-import { TimelineList, VehicleTimelineControls, type Horizon } from "./components/VehicleTimelineSection";
+import { TimelineList, VehicleTimelineControls, readHorizon, type Horizon } from "./components/VehicleTimelineSection";
 import type { DrilldownMetric, HomeResp, PeriodKind } from "./types";
 import { isDrilldownMetric, isPeriodKind } from "./types";
 
 const REFRESH_MS = 60_000;
 const TZ_NAME = TZ.phoenix;
-
-function readHorizon(raw: string | null): Horizon {
-  return raw === "30" ? 30 : 7;
-}
 
 /** Owner mobile: Needs your decision and Today stay one tap away without pushing a hash onto history. */
 function JumpButton({ to, label, count }: { to: string; label: string; count: number }) {
@@ -336,7 +332,9 @@ export default function Home() {
         </CompletedExpander>
       </section>
 
-      {openMetric ? (
+      {/* A deep-linked ?metric= only opens once we know this role may see the overview at all — otherwise the
+          dialog would exist only to show a permission error the page has already explained. */}
+      {openMetric && d && d.business_overview.available !== false ? (
         <MetricDrilldown
           metric={openMetric}
           periodQuery={applied}

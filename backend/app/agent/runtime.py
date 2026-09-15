@@ -398,16 +398,17 @@ async def _progress(db, mission: Mission) -> dict | None:
     (spec §10.4 step 8, §11.4). States and receipts here are read from the records, never invented.
     """
     prior = dict(mission.result or {})
-    updates = [u for u in (mission.updates or []) if u.get("state") not in ("queued", "running")][-12:]
-    if not updates and not prior.get("summary"):
-        return None
+    updates = [u for u in (mission.updates or [])
+               if u.get("state") not in ("open", "queued", "running", "resuming")][-12:]
+    from ..models.runtime import Approval
+    rows = (await db.execute(select(Approval).where(Approval.mission_id == mission.id)
+                             .order_by(Approval.created_at))).scalars().all()
+    if not (updates or rows or prior.get("summary") or prior.get("changed")):
+        return None                      # a first run has nothing to replay
     out: dict = {"previous_result": {k: prior.get(k) for k in ("summary", "run_status", "error", "needed_input")
                                      if prior.get(k)},
                  "changed_so_far": (prior.get("changed") or [])[-20:],
                  "updates": updates}
-    from ..models.runtime import Approval
-    rows = (await db.execute(select(Approval).where(Approval.mission_id == mission.id)
-                             .order_by(Approval.created_at))).scalars().all()
     if rows:
         out["approvals"] = [{"id": a.id, "title": a.title, "command": a.command_name, "status": a.status,
                              "decided_at": _iso(a.decided_at), "decision_note": a.decision_note,

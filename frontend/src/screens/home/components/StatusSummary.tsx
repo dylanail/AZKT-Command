@@ -60,6 +60,7 @@ export function StatusSummary({
   const required = status.connections.filter((c) => c.required);
   const shown = required.length ? required : status.connections;
   const unhealthy = shown.filter((c) => c.freshness.state !== "ok");
+  const connected = shown.filter((c) => c.freshness.state !== "disconnected").length;
   const synced = lastSync(status.connections);
 
   return (
@@ -68,8 +69,8 @@ export function StatusSummary({
       <div className="hm-status-meta fs13 t3 tnum">
         <span>
           {shown.length
-            ? `Based on ${shown.length} connected source${shown.length === 1 ? "" : "s"}`
-            : "No connected sources yet"}
+            ? `Based on ${connected} of ${shown.length} source${shown.length === 1 ? "" : "s"} AZKT needs`
+            : "No sources connected yet"}
         </span>
         <span aria-hidden="true">·</span>
         <span>
@@ -85,11 +86,18 @@ export function StatusSummary({
 
       {shown.length ? (
         <div className="hm-conns" role="group" aria-label="Connection freshness">
-          {shown.map((c) => (
+          {/* A source that is behind gets named; the healthy ones collapse into one count so the sentence
+              above stays the headline. The full list lives in Settings → Connections. */}
+          {unhealthy.map((c) => (
             <Chip key={c.provider} size="sm" tone={tone(c.freshness.state)} title={`${c.label}: ${c.freshness.label}`}>
-              {c.label} · {c.freshness.label}
+              <span className="truncate">{c.label} · {c.freshness.label}</span>
             </Chip>
           ))}
+          {shown.length - unhealthy.length > 0 ? (
+            <Chip size="sm" tone="ok" title="These sources synced recently.">
+              {shown.length - unhealthy.length} fresh
+            </Chip>
+          ) : null}
           {canOpenConnections ? (
             <Link className="fs13" to="/settings/connections">Connections</Link>
           ) : (

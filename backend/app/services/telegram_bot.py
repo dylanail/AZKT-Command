@@ -17,7 +17,7 @@ from datetime import datetime, timedelta, timezone
 from itsdangerous import BadSignature, Signer
 from itsdangerous.encoding import want_bytes
 from pydantic import BaseModel
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..adapters.telegram import TelegramClient, deep_link
@@ -250,6 +250,8 @@ def compose_reminder(ctx: dict) -> str:
                 lines.append(f"{label}: {ctx[key]}")
     if ctx.get("late"):
         lines.append("(late — delayed by a service interruption)")
+    elif ctx.get("snoozed"):
+        lines.append("(snoozed reminder — the meeting time has not changed)")
     if ctx.get("link"):
         lines.append(str(ctx["link"]))
     return bound("\n".join(l for l in lines if l))
@@ -422,7 +424,7 @@ async def process_update(jctx: jobs.JobContext, payload: dict) -> dict:
         return {"skipped": "provider event missing"}
     if ev.processed_at is not None:
         return {"skipped": "already processed"}          # duplicate update -> one intended effect (D03)
-    replies: list[tuple[int, str, dict | None]] = []
+    replies: list[tuple] = []          # (chat_id, text, reply_markup[, chat_turn_id])
     answers: list[tuple[str, str]] = []
     try:
         note = await _handle_update(db, dict(ev.payload or {}), replies, answers)
@@ -434,22 +436,32 @@ async def process_update(jctx: jobs.JobContext, payload: dict) -> dict:
     await db.commit()
     # outbound only after the record change committed: no message claims an effect that did not happen
     tok = await bot_token(db)
-    sent = 0
-    for chat_id, text, markup in replies:
+    sent, receipts = 0, []
+    for item in replies:
+        chat_id, text, markup = item[0], item[1], item[2]
+        turn_id = item[3] if len(item) > 3 else None
         if not tok:
             break
         try:
-            await client(tok).send_message(chat_id, bound(text), reply_markup=markup, disable_preview=True)
+            res = await client(tok).send_message(chat_id, bound(text), reply_markup=markup, disable_preview=True)
             sent += 1
-        except (ProviderError, Unsupported) as e:
+            mid = ((res or {}).get("result") or {}).get("message_id")
+            if turn_id and mid:
+                receipts.append((turn_id, int(mid)))
+        except Exception as e:  # noqa: BLE001  - the record change is already committed; never re-run it
             log.info("telegram reply failed: %s", e)
     for cq_id, text in answers:
         if not tok:
             break
         try:
             await client(tok).answer_callback(cq_id, text)
-        except (ProviderError, Unsupported) as e:
+        except Exception as e:  # noqa: BLE001
             log.info("telegram callback answer failed: %s", e)
+    if receipts:
+        # outbound message ids so the web and Telegram views cite the same message (spec §5.5)
+        for turn_id, mid in receipts:
+            await db.execute(update(ChatTurn).where(ChatTurn.id == turn_id).values(telegram_message_id=mid))
+        await db.commit()
     return {"note": note, "replies": sent}
 
 
@@ -567,8 +579,8 @@ async def _handle_text(db: AsyncSession, pairing: TelegramPairing, actor: Actor,
                "conversation.")
     else:
         out = await _free_text(db, pairing, actor, text)
-    await _store_turn(db, pairing, "assistant", out, None)
-    replies.append((chat_id, out, None))
+    turn = await _store_turn(db, pairing, "assistant", out, None)
+    replies.append((chat_id, out, None, turn.id))
     return "text handled"
 
 
@@ -852,12 +864,12 @@ async def _handle_voice(db: AsyncSession, pairing: TelegramPairing, actor: Actor
     if flags:
         out = ("Transcript: “" + bound(text, 400) + "”\nBefore I act: I heard " + ", ".join(flags)
                + ". Confirm the exact value and I'll continue.")
-        await _store_turn(db, pairing, "assistant", out, None)
-        replies.append((pairing.chat_id, out, None))
+        turn = await _store_turn(db, pairing, "assistant", out, None)
+        replies.append((pairing.chat_id, out, None, turn.id))
         return "voice transcript needs confirmation"
     out = "Transcript: “" + bound(text, 400) + "”\n" + await _free_text(db, pairing, actor, text)
-    await _store_turn(db, pairing, "assistant", out, None)
-    replies.append((pairing.chat_id, out, None))
+    turn = await _store_turn(db, pairing, "assistant", out, None)
+    replies.append((pairing.chat_id, out, None, turn.id))
     return "voice transcript handled"
 
 

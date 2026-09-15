@@ -3,6 +3,7 @@
 import type { ReactNode } from "react";
 import { Link } from "react-router-dom";
 import { Button, EmptyState, ErrorState, GlassPanel, Loading, Money, NotRecorded } from "../../../ui";
+import { resolveLink } from "../api";
 import type { MoneyV, Unavailable } from "../types";
 
 /** One amount with its currency. Null reads "Not recorded"; a role without costs.read reads "••••". */
@@ -106,12 +107,23 @@ export function sentence(reason: string | null | undefined): string {
   return /[.!?]$/.test(s) ? s : `${s}.`;
 }
 
-/** "Open the queue" affordance on a group — a real link when the API gave one, disabled with a reason otherwise. */
+/** "Open the queue" affordance on a group: a real link when the API named a page this app has, and a
+    disabled button with the reason when it named one that does not exist yet. Never a dead button. */
 export function QueueLink({ to, label, mobile }: { to: string | null | undefined; label: string; mobile: boolean }) {
-  if (!to) {
-    return <Button size={mobile ? "xl" : "sm"} variant="soft" disabled disabledReason="This list has no filtered view yet.">{label}</Button>;
+  const href = resolveLink(to);
+  if (!href) {
+    return (
+      <Button
+        size={mobile ? "xl" : "sm"}
+        variant="soft"
+        disabled
+        disabledReason={to ? "There isn't a page for this list yet." : "This list has no filtered view yet."}
+      >
+        {label}
+      </Button>
+    );
   }
-  return <Button size={mobile ? "xl" : "sm"} variant="soft" to={to}>{label}</Button>;
+  return <Button size={mobile ? "xl" : "sm"} variant="soft" to={href}>{label}</Button>;
 }
 
 /** A record reference rendered as a link when we know its route, plain text otherwise. */

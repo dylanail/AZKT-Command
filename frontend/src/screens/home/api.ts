@@ -4,7 +4,6 @@
    Writes: none. Home is read-only (the router is GET-only on purpose). */
 import { useCallback, useEffect, useState } from "react";
 import { ApiError, api } from "../../lib/api";
-import { TZ } from "../../lib/format";
 import type { DrilldownResp, FinanceFilters, HomeResp, PeriodKind } from "./types";
 
 export interface PeriodQuery { period: PeriodKind; start?: string | null; end?: string | null }
@@ -113,4 +112,31 @@ export function usePeopleNames(enabled = true, meId?: string | null) {
     const p = people.find((x) => x.id === id);
     return p ? p.display_name : "Assigned";
   }, [people, meId]);
+}
+
+/* ── queue links ─────────────────────────────────────────────────────────────
+   Attention groups carry the queue the API wants opened (e.g. "/tasks?bucket=blocked"). Most of those pages
+   exist; a few (a sale detail page, for instance) do not yet. Rather than send someone to a Not-found page,
+   an unknown route disables the button with a reason — never a dead link. Mirrors app/routes.tsx. */
+const LIST_ROUTES: ReadonlySet<string> = new Set([
+  "vehicles", "sales", "requests", "tasks", "inbox", "contacts", "agents", "activity",
+  "finance", "settings", "approvals", "shipments", "more",
+]);
+/* Detail routes that exist in app/routes.tsx. "activity" is deliberately absent: there is a list page but
+   no /activity/:id route, so an activity link resolves to the list instead of a Not-found page. */
+const DETAIL_ROUTES: ReadonlySet<string> = new Set([
+  "vehicles", "requests", "tasks", "contacts", "shipments", "listings", "candidates", "approvals",
+  "inbox", "settings", "agents", "more",
+]);
+
+export function resolveLink(link: string | null | undefined): string | null {
+  if (!link || !link.startsWith("/")) return null;
+  const [path] = link.split("?");
+  const parts = path.split("/").filter(Boolean);
+  if (!parts.length) return null;
+  if (parts.length === 1) return LIST_ROUTES.has(parts[0]) ? link : null;
+  if (parts.length === 2) return DETAIL_ROUTES.has(parts[0]) ? link : null;
+  // deeper paths only exist under /vehicles/:id/… and /settings/:section
+  if (parts[0] === "settings" || parts[0] === "vehicles") return link;
+  return null;
 }

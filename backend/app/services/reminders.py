@@ -22,7 +22,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..core.config import settings
-from ..core.errors import ProviderError, Unsupported
+from ..core.errors import DomainError, ProviderError, Unsupported
 from ..core.ids import new_id
 from ..core.time import PHOENIX, ensure_aware, fmt_local, reminder_fire_at, to_zone
 from ..domain.events import on_event
@@ -33,6 +33,7 @@ from ..models.notify import Notification, ScheduledDelivery
 from ..models.runtime import Approval
 from ..models.tasks import Task
 from . import email_templates
+from .forbidden_recipient import ForbiddenRecipientError
 from .team import effective_notification_prefs
 
 log = logging.getLogger("azkt.reminders")
@@ -45,6 +46,7 @@ DIGEST_WINDOW_MINUTES = 120           # send the digest inside this window after
 DIGEST_STATE_KEY = "reminders.digest_state"
 CLAIM_BATCH = 50
 LEASE_SECONDS = 120
+MAX_SEND_ATTEMPTS = 5                 # a rate-limited channel falls back instead of retrying for ever
 
 
 def now() -> datetime:
@@ -222,7 +224,9 @@ async def _supersede(db: AsyncSession, task: Task, *, reason: str, all_revisions
     if not all_revisions:
         q = q.where(or_(ScheduledDelivery.task_revision.is_(None),
                         ScheduledDelivery.task_revision != (task.schedule_revision or 1)))
-    rows = (await db.execute(q)).scalars().all()
+    # FOR UPDATE: a row another worker is delivering right now is re-read after the lock, so a row that
+    # became `accepted` meanwhile is no longer matched and its truthful state is never overwritten.
+    rows = (await db.execute(q.with_for_update())).scalars().all()
     for r in rows:
         r.state = "cancelled" if all_revisions else "superseded"
         r.cancel_reason = reason
@@ -247,18 +251,20 @@ async def schedule_for_task(db: AsyncSession, task: Task) -> dict:
     recipients = await recipients_for_task(db, task)
 
     # 1 · task reminder at the chosen offset (or at the snoozed time)
+    snooze = ensure_aware(task.snoozed_until)
     fire: datetime | None = None
-    if due and task.reminder_kind and cfg["task_reminder_enabled"]:
-        snooze = ensure_aware(task.snoozed_until)
+    if cfg["task_reminder_enabled"]:
         if snooze:
+            # Snooze is itself a request to be reminded again (spec §5.3), with or without a chosen
+            # offset and whether or not the original time has passed. It never moves due_at.
             fire = snooze
-        else:
+        elif due and task.reminder_kind:
             fire = reminder_fire_at(due, task.reminder_kind, task.reminder_custom_minutes)
             if fire and fire < right_now:
                 # the offset already passed but the appointment has not: remind now, not "in 15 minutes"
                 fire = right_now if (ends or due) > right_now else None
-        if fire is not None and (ends or due) <= right_now and not snooze:
-            fire = None   # the call/meeting already ended: never a misleading "starts in 15 minutes"
+            if fire is not None and (ends or due) <= right_now:
+                fire = None   # the call/meeting already ended: never a misleading "starts in 15 minutes"
     if fire is not None:
         for u in recipients:
             for ch in channels_for(u, "task_reminder", cfg["channels"]):
@@ -268,13 +274,18 @@ async def schedule_for_task(db: AsyncSession, task: Task) -> dict:
                     entity_kind="task", entity_id=task.id, recipient_user_id=u.id, channel=ch,
                     deliver_at=apply_quiet_hours(u, fire, "task_reminder"),
                     payload={"title": task.title, "due_at": due.isoformat() if due else None,
-                             "reminder_kind": task.reminder_kind, "snoozed": bool(task.snoozed_until)})
+                             "reminder_kind": task.reminder_kind, "snoozed": bool(snooze),
+                             "snoozed_until": snooze.isoformat() if snooze else None})
                 if made:
                     created.append(key)
 
     # 2 · one overdue email per task revision, one hour after the time passes
     if due and cfg["overdue_enabled"] and task.status in ACTIONABLE:
         overdue_at = due + timedelta(minutes=cfg["overdue_delay_minutes"])
+        if snooze and snooze > right_now:
+            # "Respect ... snooze" (spec §5.4): snoozing an already-overdue task must not fire the
+            # overdue email immediately; it waits the same delay after the snoozed reminder.
+            overdue_at = max(overdue_at, snooze + timedelta(minutes=cfg["overdue_delay_minutes"]))
         for u in recipients:
             for ch in channels_for(u, "overdue", cfg["channels"]):
                 key = dedupe_key(task.id, revision, "overdue", u.id, ch)
@@ -546,7 +557,7 @@ def _obsolete_reason(row: ScheduledDelivery, task: Task | None, right_now: datet
             return "task is no longer overdue"
         if task.status not in ACTIONABLE:
             return f"task is {task.status}"
-    if row.kind == "task_reminder":
+    if row.kind == "task_reminder" and not (row.payload or {}).get("snoozed"):
         end = ensure_aware(task.end_at) or ensure_aware(task.due_at)
         if end and end <= right_now and row.payload.get("reminder_kind") not in (None, "at"):
             return "the appointment already ended"
@@ -582,6 +593,7 @@ async def build_context(db: AsyncSession, row: ScheduledDelivery, task: Task | N
     if task is None:
         ctx.update(dict(row.payload or {}))
         return ctx
+    ctx["snoozed"] = bool((row.payload or {}).get("snoozed")) and row.kind == "task_reminder"
     ctx.update({"task_id": task.id, "title": task.title, "due_at": ensure_aware(task.due_at),
                 "note": (task.notes or "").strip().splitlines()[0][:160] if task.notes else None,
                 "offset_note": _offset_note(task)})
@@ -673,6 +685,11 @@ async def _send_email(db: AsyncSession, row: ScheduledDelivery, user: User, ctx:
             row.lease_token = None
             return "unknown"
         return _fail(row, f"{e}")
+    except ForbiddenRecipientError as e:
+        # nothing left the building and nothing ever will: a refused address is failed, not "unknown"
+        return _fail(row, f"refused recipient: {e}")
+    except DomainError as e:
+        return _fail(row, f"{type(e).__name__}: {e.message}")
     except Exception as e:  # noqa: BLE001
         row.state = "unknown"
         row.last_error = f"send result unknown: {type(e).__name__}: {e}"[:1000]
@@ -705,13 +722,18 @@ async def _send_telegram(db: AsyncSession, row: ScheduledDelivery, user: User, c
     except ProviderError as e:
         kind = (getattr(e, "detail", {}) or {}).get("kind", "unknown")
         await telegram_bot.record_failure(db, pairing, kind, str(e))
-        if kind == "rate_limited":
+        if kind == "rate_limited" and (row.attempts or 0) < MAX_SEND_ATTEMPTS:
             retry = int((getattr(e, "detail", {}) or {}).get("retry_after") or 30)
             row.state = "scheduled"
             row.deliver_at = now() + timedelta(seconds=retry)
-            row.last_error = f"rate limited; retrying in {retry}s"
+            row.last_error = f"rate limited; retrying in {retry}s (attempt {row.attempts})"
             row.lease_token = None
             return "rescheduled"
+        if kind == "rate_limited":
+            # bounded retry (spec §5.5): after this the fallback channel takes over rather than
+            # a delivery that retries for ever
+            await _telegram_fallback(db, row, user, f"telegram rate limited after {row.attempts} attempts", cfg)
+            return _fail(row, f"telegram rate limited after {row.attempts} attempts")
         await _telegram_fallback(db, row, user, f"telegram {kind}: {e}", cfg)
         return _fail(row, f"telegram {kind}: {e}")
     except Unsupported as e:
@@ -764,13 +786,16 @@ async def _send_inapp(db: AsyncSession, row: ScheduledDelivery, user: User, ctx:
 # ── notifications (one source for bell / Home / mobile) ─────────────────────
 async def notify(db: AsyncSession, *, user_id: str, kind: str, urgency: str, title: str, body: str = "",
                  entity_kind: str | None = None, entity_id: str | None = None, deep_link: str | None = None,
-                 group_key: str | None = None, dedupe: str, payload: dict | None = None) -> tuple[Notification, bool]:
+                 group_key: str | None = None, dedupe: str, payload: dict | None = None,
+                 reopen: bool = True) -> tuple[Notification, bool]:
     existing = (await db.execute(select(Notification).where(Notification.dedupe_key == dedupe))).scalar_one_or_none()
     if existing is not None:
         existing.occurrences = (existing.occurrences or 1) + 1
         existing.last_event_at = now()
-        if existing.state in ("resolved",):
+        if reopen and existing.state in ("resolved", "acknowledged"):
             existing.state = "unread"
+            existing.acknowledged_at = None
+            existing.snoozed_until = None
         if body and body != existing.body:
             existing.body = body
         return existing, False
@@ -824,13 +849,15 @@ async def _on_deposit_confirmed(db: AsyncSession, ev) -> None:
     next_step = {"import_request": "Agreement · requirements · active search",
                  "sale": "Reservation agreement · pickup date · aftercare"}.get(handoff_kind or "",
                                                                                 "Open the record for the next step")
+    confirmed_at = (_parse_dt(p.get("confirmed_at")) or _parse_dt(p.get("paid_at"))
+                    or ensure_aware(getattr(ev, "happened_at", None)) or now())
     payload = {"person": person or "The buyer", "vehicle": vehicle, "request": request,
                "what": vehicle or request or "the deposit obligation",
                "amount": p.get("amount"), "currency": p.get("currency"),
                "receipt_ref": p.get("provider_receipt_ref") or p.get("source_ref"),
                "moved_to": "handed off to " + (handoff_kind or "the linked record") if handoff_kind else "recorded",
                "next_step": next_step, "cancelled_tasks": p.get("cancelled_tasks") or [],
-               "confirmed_at": now().isoformat(), "payment_id": payment_id,
+               "confirmed_at": confirmed_at.isoformat(), "payment_id": payment_id,
                "entity_kind": entity_kind, "entity_id": entity_id}
     for u in await owner_users(db):
         for ch in channels_for(u, "deposit_confirmed", cfg["channels"]):
@@ -846,6 +873,31 @@ async def _on_deposit_confirmed(db: AsyncSession, ev) -> None:
 
 
 # ── connection issues (grouped by provider; one "needs attention" per incident) ──
+async def _recovered_at(db: AsyncSession, connection_id: str | None) -> datetime | None:
+    """The last time this source actually synced. A success after the previous alert closes that
+    incident, so the next failure is a new one worth telling Dylan about."""
+    if not connection_id:
+        return None
+    try:
+        from ..models.comms import Connection
+        conn = await db.get(Connection, connection_id)
+    except Exception:  # noqa: BLE001
+        return None
+    return ensure_aware(conn.last_success_at) if conn is not None else None
+
+
+def _incident_number(prior: Notification | None, recovered_at: datetime | None) -> tuple[int, bool]:
+    """(incident number, is_new). A repeated failure inside one incident only raises the count."""
+    if prior is None:
+        return 1, True
+    seen = (prior.payload or {}).get("incident")
+    current = int(seen) if isinstance(seen, int) and seen > 0 else 1
+    last = ensure_aware(prior.last_event_at) or ensure_aware(prior.created_at)
+    if recovered_at and last and recovered_at > last:
+        return current + 1, True
+    return current, False
+
+
 @on_event("connection.degraded")
 async def _on_connection_degraded(db: AsyncSession, ev) -> None:
     p = dict(ev.payload or {})
@@ -860,18 +912,28 @@ async def _on_connection_degraded(db: AsyncSession, ev) -> None:
     body = (f"{label} has not completed a successful sync ({kind}). Lists and counts only cover data that did sync — "
             f"this is not an all-clear. {p.get('message', '')}").strip()
     urgent = kind in ("auth_expired", "permission_denied")
+    recovered_at = await _recovered_at(db, ev.aggregate_id)
     for u in await owner_users(db):
+        dedupe = f"connection:{provider}:{kind}:{u.id}"
+        prior = (await db.execute(select(Notification).where(Notification.dedupe_key == dedupe))).scalar_one_or_none()
+        incident, is_new = _incident_number(prior, recovered_at)
         note, created = await notify(db, user_id=u.id, kind="connection_issue",
                                      urgency="high" if urgent else "later", title=title, body=body,
                                      entity_kind="connection", entity_id=ev.aggregate_id,
                                      deep_link=f"{email_templates.origin()}/settings/connections",
-                                     group_key=f"connection:{provider}",
-                                     dedupe=f"connection:{provider}:{kind}:{u.id}",
-                                     payload={"provider": provider, "kind": kind, "message": p.get("message")})
-        if created and urgent:
+                                     group_key=f"connection:{provider}", dedupe=dedupe, reopen=is_new,
+                                     payload={"provider": provider, "kind": kind, "message": p.get("message"),
+                                              "incident": incident})
+        if is_new and not created:
+            # the source recovered and broke again: one fresh row, counted from this incident
+            note.payload = {**(note.payload or {}), "provider": provider, "kind": kind,
+                            "message": p.get("message"), "incident": incident}
+            note.occurrences = 1
+            note.urgency = "high" if urgent else "later"
+        if is_new and urgent:
             cfg = await config(db)
             for ch in channels_for(u, "connection_issue", cfg["channels"]):
-                await _ensure_delivery(db, dedupe=f"connissue:{provider}:{kind}:{note.id}:{ch}",
+                await _ensure_delivery(db, dedupe=f"connissue:{provider}:{kind}:{note.id}:{incident}:{ch}",
                                        kind="connection_issue", task_id=None, task_revision=None,
                                        entity_kind="connection", entity_id=ev.aggregate_id, recipient_user_id=u.id,
                                        channel=ch, deliver_at=apply_quiet_hours(u, now(), "connection_issue"),

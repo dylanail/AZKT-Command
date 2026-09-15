@@ -424,3 +424,67 @@ async def test_set_webhook_reports_setup_blocked_without_a_secret(client, db, ow
         assert r.status_code == 409 and "setup_blocked" in r.json()["message"]
     finally:
         settings.TELEGRAM_WEBHOOK_SECRET = old
+
+
+# ── outbound receipts (spec §5.5: web and Telegram views cite the same message) ──
+async def test_outbound_replies_record_their_telegram_message_id(client, db, owner):
+    tg_user_id, chat_id = _uid(), _uid()
+    await pair_owner(client, db, owner, tg_user_id, chat_id)
+    await post_update(client, message(chat_id, tg_user_id, "/tasks"))
+    await run_worker_once()
+    turns = (await db.execute(select(ChatTurn).where(ChatTurn.thread_key == f"{owner.id}:manager",
+                                                     ChatTurn.role == "assistant")
+                              .order_by(ChatTurn.created_at.desc()).limit(1)
+                              .execution_options(populate_existing=True))).scalars().all()
+    assert turns and turns[0].channel == "telegram"
+    assert isinstance(turns[0].telegram_message_id, int) and turns[0].telegram_message_id > 0, \
+        "the outbound message id is this reply's receipt"
+    assert telegram_bot.bound(turns[0].content) == sent()[-1]["text"], \
+        "the stored turn is the message that was sent (bounded for Telegram)"
+
+
+# ── D06: a rate-limited channel retries with bounds, then falls back ─────────
+async def test_a_rate_limited_telegram_delivery_is_bounded_and_then_falls_back(client, db, owner, monkeypatch):
+    tg_user_id, chat_id = _uid(), _uid()
+    await pair_owner(client, db, owner, tg_user_id, chat_id)
+    login(client, owner)
+    await client.patch("/api/me/prefs",
+                       json={"notification_prefs": {"channels": {"task_reminder": "telegram_fallback_email"}}})
+    tag = _u()
+    try:
+        t = (await client.post("/api/tasks", json={"title": f"Rate limited {tag}", "type": "call",
+                                                   "due_at": (datetime.now(timezone.utc) + timedelta(hours=3)).isoformat(),
+                                                   "reminder_kind": "1h", "owner_user_id": owner.id,
+                                                   "dedupe": False})).json()["data"]["task"]
+        await run_worker_once()
+        row = (await db.execute(select(ScheduledDelivery).where(
+            ScheduledDelivery.task_id == t["id"], ScheduledDelivery.channel == "telegram",
+            ScheduledDelivery.kind == "task_reminder").execution_options(populate_existing=True))).scalar_one()
+        row.deliver_at = datetime.now(timezone.utc) - timedelta(minutes=1)
+        await db.commit()
+
+        async def limited(self, chat, text, **kw):
+            raise ProviderError("telegram rate limited", kind="rate_limited", retry_after=1)
+        monkeypatch.setattr(TelegramClient, "send_message", limited)
+        await run_worker_once()
+        await db.refresh(row)
+        assert row.state == "scheduled" and "rate limited" in (row.last_error or ""), "first refusal waits"
+        assert not (await db.execute(select(ScheduledDelivery).where(
+            ScheduledDelivery.fallback_of_id == row.id))).scalars().all()
+
+        row.attempts = 5                       # it has been refused all the way to the bound
+        row.deliver_at = datetime.now(timezone.utc) - timedelta(minutes=1)
+        await db.commit()
+        await run_worker_once()
+        await db.refresh(row)
+        assert row.state == "failed" and "rate limited" in (row.last_error or "")
+        fallback = (await db.execute(select(ScheduledDelivery).where(
+            ScheduledDelivery.fallback_of_id == row.id).execution_options(populate_existing=True))).scalars().all()
+        assert len(fallback) == 1 and fallback[0].channel == "email", "the email fallback takes over"
+        monkeypatch.undo()
+        await run_worker_once()
+        await db.refresh(fallback[0])
+        assert fallback[0].state == "accepted"
+    finally:
+        await client.patch("/api/me/prefs",
+                           json={"notification_prefs": {"channels": {"task_reminder": "email_only"}}})

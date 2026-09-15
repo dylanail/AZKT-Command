@@ -4,6 +4,7 @@
 import type { ReactNode } from "react";
 import { Chip, Expander, GlassPanel, When } from "../../../ui";
 import { entityHref, humanize } from "../../../lib/links";
+import { resolveLink } from "../api";
 import type { CompletedItem, ProgressItem } from "../types";
 import { Explain, RecordLink } from "./parts";
 
@@ -59,7 +60,8 @@ export function CompletedList({ items }: { items: CompletedItem[] }) {
   return (
     <GlassPanel clip>
       {items.map((it) => {
-        const href = entityHref(it.entity_kind, it.entity_id) || it.activity_path;
+        // the record itself when we can route to it, otherwise Activity — never a Not-found page
+        const href = resolveLink(entityHref(it.entity_kind, it.entity_id)) || resolveLink(it.activity_path) || "/activity";
         return (
           <div className="hm-row hm-row--completed" key={it.id}>
             <div className="hm-row__when tnum">

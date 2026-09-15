@@ -100,7 +100,14 @@ def strict_schema(schema: dict) -> dict:
             node.pop("format", None)
         if node.get("type") == "object" or "properties" in node:
             node["type"] = "object"
-            props = {k: walk(v, depth + 1) for k, v in (node.get("properties") or {}).items()}
+            if not node.get("properties"):
+                # A free-form payload (`dict` field, recursive model). Closing it would advertise "an
+                # object with no permitted keys", which the model would then be unable to fill at all —
+                # so it stays open and its tool simply does not claim `strict`.
+                node.pop("required", None)
+                node["additionalProperties"] = True
+                return node
+            props = {k: walk(v, depth + 1) for k, v in node["properties"].items()}
             node["properties"] = props
             node["additionalProperties"] = False
             node["required"] = [r for r in (node.get("required") or []) if r in props]

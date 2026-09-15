@@ -10,7 +10,7 @@ import { ConnectionsSection } from "./components/ConnectionsSection";
 import { TeamSection } from "./components/TeamSection";
 import { RemindersSection } from "./components/RemindersSection";
 import { AutomationSection } from "./components/AutomationSection";
-import { LaterSection } from "./components/LaterSection";
+import { ExternalAgentsSection } from "./components/ExternalAgentsSection";
 import { ProceduresSection } from "./components/ProceduresSection";
 import { KnowledgeSection } from "./components/KnowledgeSection";
 import { RecoverySection } from "./components/RecoverySection";
@@ -72,7 +72,7 @@ export default function Settings() {
         {current === "team" ? <TeamSection level={2} /> : null}
         {current === "reminders" ? <RemindersSection /> : null}
         {current === "automation" ? <AutomationSection /> : null}
-        {current === "external-agents" ? <LaterSection id={current} /> : null}
+        {current === "external-agents" ? <ExternalAgentsSection /> : null}
         {current === "procedures" ? <ProceduresSection /> : null}
         {current === "knowledge" ? <KnowledgeSection /> : null}
         {current === "recovery" ? <RecoverySection /> : null}

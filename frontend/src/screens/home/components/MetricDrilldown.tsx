@@ -3,13 +3,12 @@
    identical cohort. Sheet on a phone, dialog on desktop. Nothing here is recomputed in the browser — the
    rows are the server's own contributing records. */
 import { Link } from "react-router-dom";
-import { api } from "../../../lib/api";
 import { useQuery } from "../../../lib/useQuery";
 import { humanize } from "../../../lib/links";
 import { Button, Chip, ErrorState, Loading, NotRecorded, ResponsiveDialog, Table, Tr, When } from "../../../ui";
-import { drilldownPath, financeHref, type PeriodQuery } from "../api";
+import { drilldownPath, fetchDrilldown, financeHref, type PeriodQuery } from "../api";
 import type { DrilldownMetric, DrilldownResp, DurationMetric, SaleRow } from "../types";
-import { CATEGORY_LABELS, METRIC_TITLES } from "../types";
+import { CATEGORY_LABELS, METRIC_TITLES } from "../labels";
 import { Amt, Explain, sentence } from "./parts";
 
 function SaleTable({ rows, hidden }: { rows: SaleRow[]; hidden: boolean }) {
@@ -216,8 +215,9 @@ export function MetricDrilldown({
   mobile: boolean;
   onClose: () => void;
 }) {
+  // the path is the cache key: it changes with the metric and the applied period, nothing else
   const path = drilldownPath(metric, periodQuery, tz);
-  const q = useQuery<DrilldownResp>((signal) => api.get<DrilldownResp>(path, { signal }), [path]);
+  const q = useQuery<DrilldownResp>((signal) => fetchDrilldown(metric, periodQuery, tz, signal), [path]);
   const d = q.data;
   const finance = d ? financeHref(d.finance_filters) : null;
 
@@ -238,7 +238,7 @@ export function MetricDrilldown({
             size={mobile ? "xl" : "md"}
             to={finance || undefined}
             disabled={!finance}
-            disabledReason="Finance has no view for this measure yet."
+            disabledReason={q.loading ? "Still loading this cohort." : "Finance has no page for this measure yet."}
           >
             Open in Finance
           </Button>

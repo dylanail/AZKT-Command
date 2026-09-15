@@ -234,6 +234,53 @@ async def test_J03_read_only_vehicle_limited_client_cannot_widen_through_manager
         assert "revoked" in (m.paused_reason or "")
 
 
+async def test_J03_a_record_limited_client_cannot_read_activity_about_other_trucks(db, owner):
+    """The grant follows every read, not only the vehicle ones: activity is a history of the same records
+    (invariant 14). Without this a client with read:activity reads what happened to trucks outside its scope."""
+    from backend.app.domain.commands import CommandContext
+    from backend.app.agent import tools as agent_tools
+    from backend.app.services import external_clients as ec
+    mine = await make_vehicle(db, owner, make="Daihatsu", model=f"Hijet {uid()}")
+    theirs = await make_vehicle(db, owner, make="Honda", model=f"Acty {uid()}")
+    await dispatch(ctx_for(db, owner), "vehicles.update", {"vehicle_id": theirs.id, "color": "secret-colour"})
+    c, _token = await register(db, owner, scopes=["read:vehicles", "read:tasks", "read:activity", "ask"],
+                               record_scope={"vehicle_ids": [mine.id]})
+    actor = await ec.actor_for(db, c)
+    res = await agent_tools.execute(CommandContext(db=db, actor=actor, channel="http"),
+                                    "activity_recent", {"limit": 50})
+    assert res.status == "ok" and res.data["scope_limited"] is True
+    ids = {i.get("entity_id") for i in res.data["items"]}
+    assert theirs.id not in ids and "secret-colour" not in res.for_model()
+    assert ids <= {mine.id} | {None}
+    # the owner is unrestricted
+    owner_res = await agent_tools.execute(ctx_for(db, owner, "agent"), "activity_recent", {"limit": 50})
+    assert owner_res.data["scope_limited"] is False
+
+
+async def test_a_request_that_fails_is_recorded_as_failed_not_left_accepted(db, owner, client):
+    """`(client, request_key)` is unique, so a request whose work blew up must say so: otherwise every retry
+    replays an 'accepted' request that has no mission and can never move."""
+    from unittest.mock import patch
+    from backend.app.agent import manager as mgr
+    c, token = await register(db, owner)
+    key = f"boom-{uid()}"
+
+    async def explode(*a, **kw):
+        raise RuntimeError("the tool loop blew up")
+
+    with patch.object(mgr, "handle_message", explode), pytest.raises(RuntimeError):
+        await client.post("/api/integrations/v1/ask", json={"message": "do the thing", "request_key": key},
+                          headers=hdr(token))
+    req = (await db.execute(select(DelegatedRequest).where(DelegatedRequest.client_id == c.id,
+                                                           DelegatedRequest.request_key == key))).scalar_one()
+    await db.refresh(req)
+    assert req.status == "failed" and "RuntimeError" in (req.error or "")
+    assert req.mission_id is None
+    # the retry reports the failure truthfully instead of pretending work is in flight
+    again = await client.get(f"/api/integrations/v1/work/{req.id}", headers=hdr(token))
+    assert again.status_code == 200 and again.json()["state"] == "failed"
+
+
 async def test_J03_a_paused_client_mission_cannot_be_resumed_on_a_withdrawn_grant(db, owner):
     c, token = await register(db, owner)
     v = await make_vehicle(db, owner, make="Mazda", model=f"Scrum {uid()}")
@@ -361,6 +408,43 @@ async def test_J05_upload_ownership_foreign_assets_urls_and_delegation_depth(db,
     assert fine.status_code in (200, 202)
     m = await db.get(Mission, fine.json()["mission_id"])
     assert m.depth == 2 and m.client_id == c1.id and m.correlation_id
+
+
+async def test_a_connector_upload_slot_is_actually_bounded_and_expires(db, owner, client):
+    """`prepare_upload` promises a bounded, expiring slot, so the connector route must enforce the same
+    limit and expiry the signed-in upload route does — otherwise the bound is only documentation."""
+    from datetime import datetime, timedelta, timezone
+    from backend.app.models.assets import UploadSession
+    from backend.tests.test_assets import jpeg_bytes
+    c, token = await register(db, owner)
+    prep = await client.post("/api/integrations/v1/uploads/prepare",
+                             json={"content_type": "image/jpeg", "filename": "big.jpg"}, headers=hdr(token))
+    up = prep.json()
+    slot = await db.get(UploadSession, up["upload_id"])
+    slot.max_bytes = 64
+    await db.commit()
+    too_big = await client.put(f"/api/integrations/v1/uploads/{up['upload_id']}", content=b"x" * 100,
+                               headers=hdr(token))
+    assert too_big.status_code == 413 and too_big.json()["detail"]["max_bytes"] == 64
+
+    # a whole-file Content-Range completes the slot instead of leaving it open forever
+    data = jpeg_bytes(77)
+    slot.max_bytes = len(data) * 4
+    await db.commit()
+    ranged = await client.put(f"/api/integrations/v1/uploads/{up['upload_id']}", content=data,
+                              headers=hdr(token, **{"Content-Range": f"bytes 0-{len(data) - 1}/{len(data)}"}))
+    assert ranged.status_code == 200 and ranged.json()["complete"] is True
+    fin = await client.post(f"/api/integrations/v1/uploads/{up['upload_id']}/finalize", json={}, headers=hdr(token))
+    assert fin.status_code == 200 and fin.json()["status"] == "ready"
+
+    # an expired slot is refused
+    p2 = await client.post("/api/integrations/v1/uploads/prepare",
+                           json={"content_type": "image/jpeg"}, headers=hdr(token))
+    slot2 = await db.get(UploadSession, p2.json()["upload_id"])
+    slot2.expires_at = datetime.now(timezone.utc) - timedelta(minutes=1)
+    await db.commit()
+    stale = await client.put(f"/api/integrations/v1/uploads/{p2.json()['upload_id']}", content=data, headers=hdr(token))
+    assert stale.status_code == 409 and "expired" in str(stale.json()).lower()
 
 
 # ═════════════════════════════════════════════════════════════════════════════

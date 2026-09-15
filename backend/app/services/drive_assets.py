@@ -687,20 +687,25 @@ async def drive_import_assets(ctx: CommandContext, inp: ImportAssetsIn) -> dict:
             items.append({"file_id": row.file_id, "name": row.name, "status": "failed", "reason": row.import_error})
             continue
         a = await ctx.db.get(Asset, asset["id"])
-        a.provider_ref = f"drive:{row.file_id}"
-        a.provider_revision = row.revision
-        a.provider_link = row.web_link
-        a.source = "drive"
+        # Identical bytes may already exist from another origin (a shop photo taken after recon).
+        # Lineage always records this Drive source; provenance labels are only (re)written for an
+        # asset this import owns — a post-recon photo never becomes "importer / pre-arrival" (§7.1).
+        drive_owned = (not res.get("deduplicated")) or a.source == "drive"
         lineage = list((a.analysis or {}).get("drive_sources") or [])
         if not any(s.get("file_id") == row.file_id for s in lineage):
             lineage.append({"file_id": row.file_id, "name": row.name, "checksum": row.checksum,
                             "revision": row.revision, "path": row.path, "link": row.web_link,
                             "imported_at": ctx.now.isoformat()})
         a.analysis = {**(a.analysis or {}), "drive_sources": lineage}
+        if drive_owned:
+            a.provider_ref = f"drive:{row.file_id}"
+            a.provider_revision = row.revision
+            a.provider_link = row.web_link
+            a.source = "drive"
         if classification in SENSITIVE:
             a.sensitive, a.public_eligible = True, False
             a.visibility = "owner" if classification == "id_document" else "internal"
-        else:
+        elif drive_owned:
             a.pre_arrival = True      # importer photo: never proof of post-recon condition
         a.bump(ctx.actor.user_id)
         row.asset_id = a.id

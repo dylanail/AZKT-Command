@@ -486,3 +486,175 @@ async def test_a_delivery_stuck_in_claimed_returns_to_the_queue(client, db, owne
     await run_worker_once()
     await db.refresh(row)
     assert row.state == "accepted" and len(_mails(tag)) == 1
+
+
+# ── snooze actually delivers (C03 / §5.3: snooze delays the notification, not the meeting) ──
+async def test_C03_a_snooze_delivers_the_reminder_at_the_snoozed_time(client, db, owner):
+    """A snooze is a request to be reminded again. It must fire even when the meeting time itself has
+    passed (that is the usual case: the reminder arrives, the meeting slips, the owner snoozes)."""
+    from backend.app.models.tasks import Task
+    login(client, owner)
+    tag = _u()
+    t = (await client.post("/api/tasks", json={"title": f"Chase Renee {tag}", "type": "call",
+                                               "due_at": _iso(timedelta(hours=-2)), "reminder_kind": "15m",
+                                               "owner_user_id": owner.id, "dedupe": False})).json()["data"]["task"]
+    await run_worker_once()
+    s = (await client.post(f"/api/tasks/{t['id']}/snooze", json={"minutes": 30})).json()["data"]["task"]
+    assert s["due_at"] == t["due_at"], "snooze never moves the meeting"
+    await run_worker_once()
+    row = [x for x in await _deliveries(db, t["id"])
+           if x.kind == "task_reminder" and x.task_revision == s["schedule_revision"]]
+    assert row, "the snooze must schedule a new reminder"
+    row = row[0]
+    assert abs((row.deliver_at - datetime.fromisoformat(s["snoozed_until"])).total_seconds()) < 2
+    # the snooze window elapses
+    task = await db.get(Task, t["id"])
+    task.snoozed_until = datetime.now(timezone.utc) - timedelta(seconds=5)
+    row.deliver_at = datetime.now(timezone.utc) - timedelta(seconds=5)
+    await db.commit()
+    await run_worker_once()
+    await _fresh(db)
+    await db.refresh(row)
+    assert row.state == "accepted", f"the snoozed reminder was {row.state}: {row.cancel_reason}"
+    mail = _mails(tag)[-1]
+    assert "snoozed reminder" in mail["subject"] and "meeting time has not changed" in mail["text"]
+
+
+async def test_a_snooze_without_a_chosen_offset_still_schedules_the_nudge(client, db, owner):
+    login(client, owner)
+    tag = _u()
+    t = (await client.post("/api/tasks", json={"title": f"No offset {tag}", "due_at": _iso(timedelta(hours=3)),
+                                               "owner_user_id": owner.id, "dedupe": False})).json()["data"]["task"]
+    await run_worker_once()
+    assert not [x for x in await _deliveries(db, t["id"]) if x.kind == "task_reminder"], "no offset, no reminder"
+    s = (await client.post(f"/api/tasks/{t['id']}/snooze", json={"minutes": 45})).json()["data"]["task"]
+    await run_worker_once()
+    rows = [x for x in await _deliveries(db, t["id"])
+            if x.kind == "task_reminder" and x.task_revision == s["schedule_revision"]]
+    assert rows, "the app promised a nudge in 45 minutes; it has to be scheduled"
+    assert abs((rows[0].deliver_at - datetime.fromisoformat(s["snoozed_until"])).total_seconds()) < 2
+
+
+async def test_C07_snoozing_an_overdue_task_does_not_repeat_the_overdue_email(client, db, owner):
+    """§5.4: 'respect ... snooze'. The overdue nag waits until after the snoozed reminder."""
+    login(client, owner)
+    tag = _u()
+    t = (await client.post("/api/tasks", json={"title": f"Snoozed overdue {tag}", "due_at": _iso(timedelta(hours=-3)),
+                                               "owner_user_id": owner.id, "dedupe": False})).json()["data"]["task"]
+    for _ in range(2):
+        await run_worker_once()
+    before = len([m for m in _mails(tag) if m["subject"].startswith("Overdue:")])
+    assert before == 1
+    s = (await client.post(f"/api/tasks/{t['id']}/snooze", json={"minutes": 120})).json()["data"]["task"]
+    for _ in range(2):
+        await run_worker_once()
+    assert len([m for m in _mails(tag) if m["subject"].startswith("Overdue:")]) == before, \
+        "snoozing must not fire a second overdue email on the spot"
+    new = [x for x in await _deliveries(db, t["id"]) if x.kind == "overdue"
+           and x.task_revision == s["schedule_revision"]][0]
+    assert new.state == "scheduled" and new.deliver_at > datetime.fromisoformat(s["snoozed_until"])
+
+
+# ── truthful dates and truthful failures ────────────────────────────────────
+async def test_E08_the_deposit_email_dates_the_confirmation_not_the_worker_run(client, db, owner):
+    """The worker may run long after the deposit was confirmed; the email must not invent 'now'."""
+    from backend.app.services import email_templates as et
+    tag = _u()
+    happened = (datetime.now(timezone.utc) - timedelta(hours=5)).replace(microsecond=0)
+    db.add(Event(type="deposit.confirmed", aggregate_type="invoice", aggregate_id=f"inv-{tag}",
+                 payload={"invoice_id": f"inv-{tag}", "payment_id": f"pay-{tag}", "amount": "500.00",
+                          "currency": "USD", "handoff_kind": "sale", "provider_receipt_ref": f"sq-{tag}"},
+                 happened_at=happened, actor={}))
+    await db.commit()
+    await run_worker_once()
+    await _fresh(db)
+    row = (await db.execute(select(ScheduledDelivery).where(
+        ScheduledDelivery.dedupe_key == f"deposit:pay-{tag}:{owner.id}:email")
+        .execution_options(populate_existing=True))).scalar_one()
+    assert datetime.fromisoformat(row.payload["confirmed_at"]) == happened
+    await run_worker_once()
+    mail = [m for m in MemoryTransport.sent if m["subject"].startswith("Deposit paid") and tag in m["text"]][-1]
+    assert et.clock(happened, "America/Phoenix") in mail["text"], "the email states when it was confirmed"
+
+
+async def test_a_refused_recipient_is_failed_not_unknown(client, db, owner):
+    """`unknown` is reserved for a send that may have been accepted. A blocked address never was."""
+    login(client, owner)
+    tag = _u()
+    t = (await client.post("/api/tasks", json={"title": f"Forbidden {tag}", "type": "call",
+                                               "due_at": _iso(timedelta(hours=3)), "reminder_kind": "15m",
+                                               "owner_user_id": owner.id, "dedupe": False})).json()["data"]["task"]
+    await run_worker_once()
+    row = [x for x in await _deliveries(db, t["id"]) if x.kind == "task_reminder"][0]
+    row.deliver_at = datetime.now(timezone.utc) - timedelta(seconds=5)
+    await db.commit()
+    old = settings.FORBIDDEN_RECIPIENTS
+    settings.FORBIDDEN_RECIPIENTS = f"{old},{reminders.recipient_email(owner)}"
+    try:
+        await run_worker_once()
+    finally:
+        settings.FORBIDDEN_RECIPIENTS = old
+    await _fresh(db)
+    await db.refresh(row)
+    assert row.state == "failed" and "refused recipient" in (row.last_error or "")
+    assert not _mails(tag)
+
+
+# ── H11: an incident ends when the source recovers ──────────────────────────
+async def test_H11_a_source_that_recovered_and_broke_again_is_a_new_incident(client, db, owner):
+    login(client, owner)
+    tag = _u()
+    provider = f"probe_{tag}"          # a provider Home does not gate on: no effect on other feeds
+    conn = Connection(provider=provider, label=f"Probe {tag}", status="connected", environment="test")
+    db.add(conn)
+    await db.flush()
+
+    async def degrade():
+        db.add(Event(type="connection.degraded", aggregate_type="connection", aggregate_id=conn.id,
+                     payload={"provider": provider, "kind": "auth_expired", "message": "token expired"},
+                     happened_at=datetime.now(timezone.utc), actor={}))
+        await db.commit()
+        await run_worker_once()
+        await _fresh(db)
+
+    async def alerts() -> list[ScheduledDelivery]:
+        return list((await db.execute(select(ScheduledDelivery).where(
+            ScheduledDelivery.dedupe_key.like(f"connissue:{provider}:auth_expired:%"),
+            ScheduledDelivery.fallback_of_id.is_(None)).execution_options(populate_existing=True))).scalars().all())
+
+    try:
+        await degrade()
+        await degrade()
+        note = (await db.execute(select(Notification).where(
+            Notification.dedupe_key == f"connection:{provider}:auth_expired:{owner.id}")
+            .execution_options(populate_existing=True))).scalar_one()
+        assert len(await alerts()) == 1, "one 'needs attention' per incident, not per failed poll"
+        assert note.occurrences == 2 and note.payload.get("incident") == 1
+
+        # Dylan acknowledges; while it is still broken he is not told again
+        await client.post(f"/api/notifications/{note.id}/acknowledge", json={})
+        await degrade()
+        assert len(await alerts()) == 1
+        await db.refresh(note)
+        assert note.state == "acknowledged", "an acknowledged, still-broken source is not re-nagged"
+
+        # he reconnects it, and weeks later it expires again: that is a new incident
+        conn.last_success_at = datetime.now(timezone.utc)
+        conn.status = "connected"
+        await db.commit()
+        await degrade()
+        await db.refresh(note)
+        assert len(await alerts()) == 2 and note.payload.get("incident") == 2
+        assert note.state == "unread" and note.occurrences == 1
+        feed = (await client.get("/api/notifications")).json()
+        assert any(i["group_key"] == f"connection:{provider}" for i in feed["high"]), \
+            "the bell shows the new incident again"
+    finally:
+        for r in (await db.execute(select(ScheduledDelivery).where(
+                ScheduledDelivery.dedupe_key.like(f"connissue:{provider}:%")))).scalars().all():
+            await db.delete(r)
+        for n in (await db.execute(select(Notification).where(
+                Notification.dedupe_key.like(f"connection:{provider}:%")))).scalars().all():
+            await db.delete(n)
+        await db.delete(conn)
+        await db.commit()

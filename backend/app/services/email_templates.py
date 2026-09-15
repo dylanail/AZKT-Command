@@ -215,15 +215,20 @@ def _task_reminder(ctx: dict) -> tuple[str, str, str]:
     title = (ctx.get("title") or "Task").strip()
     lead = lead_phrase(due, now)
     late = bool(ctx.get("late"))
+    snoozed = bool(ctx.get("snoozed"))
     # subject: action + person + time. Never "Reminder:".
     subject = f"{title} {lead} · {clock(due, tz)}".strip() if lead else f"{title} · {clock(due, tz)}"
     if late:
         subject = f"{title} · {clock(due, tz)} (late reminder)"
+    elif snoozed:
+        subject = f"{subject} (snoozed reminder)"
     sub = f'{_esc(day_phrase(due, tz, now))} · <b style="font-weight:600;color:{INK}">{_esc(clock(due, tz))}</b>'
     if lead:
         sub += f" · {_esc(lead)}"
     if late:
         sub += f' · <span style="color:{RED};font-weight:600">late — sent after a service interruption</span>'
+    elif snoozed:
+        sub += ' · you snoozed this reminder; the meeting time has not changed'
     pairs = _detail_pairs(ctx)
     inner = (_headline(title, sub) + _rows(pairs)
              + _button(ctx.get("button_label") or "Open in AZKT", ctx.get("link") or deep_link("task", ctx.get("task_id")))
@@ -231,10 +236,12 @@ def _task_reminder(ctx: dict) -> tuple[str, str, str]:
                            ("Snooze 1 hour", review_link(ctx["task_id"], "snooze")),
                            ("Reschedule", review_link(ctx["task_id"], "reschedule"))] if ctx.get("task_id") else []))
     note = ctx.get("offset_note") or "You set this reminder for this task. Change reminder timing in Sales › Tasks."
-    html = _shell("Late reminder" if late else "Reminder", RED if late else MUTED, inner, _footer(note))
+    status_word = "Late reminder" if late else ("Snoozed reminder" if snoozed else "Reminder")
+    html = _shell(status_word, RED if late else MUTED, inner, _footer(note))
     text = _text_block(subject, title, [
         f"{day_phrase(due, tz, now)} · {clock(due, tz)}" + (f" · {lead}" if lead else ""),
         "This reminder is late — it was delayed by a service interruption." if late else "",
+        "You snoozed this reminder; the meeting time has not changed." if snoozed and not late else "",
     ], pairs, ctx.get("link") or deep_link("task", ctx.get("task_id")),
         [("Mark done", review_link(ctx["task_id"], "done")), ("Snooze 1 hour", review_link(ctx["task_id"], "snooze"))]
         if ctx.get("task_id") else [], note)

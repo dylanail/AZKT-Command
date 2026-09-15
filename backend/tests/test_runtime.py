@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import uuid
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
@@ -604,6 +605,116 @@ async def test_tool_definitions_are_strict_and_permission_filtered(db, owner, me
     assert {"home_metrics", "finance_sold_cohort"} & mech == set()
     # approving is never a tool
     assert "approvals_approve" not in by_name
+
+
+async def test_tool_schemas_declare_strict_only_when_the_api_can_honour_it(db, owner):
+    """`strict: true` guarantees the model's tool input validates — worth having, because nothing forces a
+    tool call here. The API rejects it for schemas carrying numeric/string constraints, a free-form object
+    or a recursive model, so the generator drops the unsupported keywords and claims strict only when the
+    result really is strict-shaped (Claude API reference: JSON Schema limitations)."""
+    defs = agent_tools.definitions(actor_of(owner, "agent")) + rt.control_definitions()
+    strict = [d for d in defs if d.get("strict")]
+    assert len(strict) > len(defs) // 2, "most tools should carry the guarantee"
+    banned = ("minimum", "maximum", "multipleOf", "minLength", "maxLength", "pattern", "minItems", "maxItems")
+
+    def objects(node):
+        if isinstance(node, list):
+            for x in node:
+                yield from objects(x)
+        elif isinstance(node, dict):
+            if node.get("type") == "object":
+                yield node
+            for v in node.values():
+                yield from objects(v)
+
+    for d in defs:
+        text = json.dumps(d["input_schema"])
+        for key in banned:
+            assert f'"{key}"' not in text, f"{d['name']} still advertises {key}"
+        for obj in objects(d["input_schema"]):
+            if d.get("strict"):
+                assert obj.get("additionalProperties") is False and "properties" in obj
+                assert isinstance(obj.get("required"), list)
+            elif not obj.get("properties"):
+                # the reason it is not strict: a free-form payload must stay open, or the model could
+                # never fill it at all
+                assert obj.get("additionalProperties") is True
+    # a command with a free-form dict field (tasks.create carries `extra`) is still offered, just without
+    # the guarantee — and its free-form field stays fillable
+    by_name = {d["name"]: d for d in defs}
+    assert by_name["tasks_create"].get("strict") is None
+    assert by_name["tasks_create"]["input_schema"]["properties"]["extra"]["additionalProperties"] is True
+    assert by_name["vehicles_update"].get("strict") is True
+    assert by_name["vehicles_get_context"].get("strict") is True
+    assert all(d.get("strict") for d in rt.control_definitions())
+
+
+async def test_a_write_tool_result_never_carries_money_to_someone_without_costs(db, owner, manager):
+    """A02 on the write side: the HTTP routers redact a command result before it leaves; the agent surface
+    must too, or a person without costs.read reads the purchase amount out of an edit instead of a read."""
+    v = await make_vehicle(db, owner, purchase_amount="4321.00", purchase_currency="USD")
+    mgr_ctx = CommandContext(db=db, actor=actor_of(manager, "agent"), channel="web")
+    assert actor_of(manager, "agent").perms["costs.read"] is False
+    res = await agent_tools.execute(mgr_ctx, "vehicles_update", {"vehicle_id": v.id, "color": "blue"})
+    assert res.status == "ok" and res.changed
+    body = res.for_model()
+    assert "4321" not in body and "4,321" not in body
+    assert res.data["vehicle"]["purchase_amount"] is None and res.data["vehicle"]["money_hidden"] is True
+    # the owner still gets the figure
+    owner_res = await agent_tools.execute(CommandContext(db=db, actor=actor_of(owner, "agent"), channel="web"),
+                                          "vehicles_update", {"vehicle_id": v.id, "color": "red"})
+    assert owner_res.data["vehicle"]["purchase_amount"] == "4321.00"
+
+
+def test_a_checkpoint_stays_a_resumable_conversation():
+    """A crashed run is picked up from its checkpoint, so the stored messages must still be a valid
+    conversation: it may not begin on an assistant turn, and a tool_result may never outlive its tool_use
+    (invariant 2, H01/H02)."""
+    msgs = [{"role": "user", "content": "<mission>…</mission>"},
+            {"role": "user", "content": "<request>…</request>"}]
+    for i in range(30):
+        msgs.append({"role": "assistant", "content": [{"type": "tool_use", "id": f"t{i}", "name": "tasks_list",
+                                                       "input": {}}]})
+        msgs.append({"role": "user", "content": [{"type": "tool_result", "tool_use_id": f"t{i}", "content": "{}"}]})
+    kept = rt.trim_messages(msgs, keep=12)
+    assert len(kept) <= 12
+    assert kept[0] == msgs[0] and kept[1] == msgs[1], "the mission contract is never dropped"
+    assert kept[2]["role"] == "assistant"
+    ids = {b["id"] for m in kept if m["role"] == "assistant" for b in m["content"] if b["type"] == "tool_use"}
+    for m in kept:
+        if m["role"] == "user" and isinstance(m["content"], list):
+            for b in m["content"]:
+                assert b["tool_use_id"] in ids, "a tool_result must never outlive its tool_use"
+    assert rt.trim_messages(msgs[:5], keep=12) == msgs[:5]
+
+
+async def test_a_resumed_run_is_told_what_already_happened(db, owner):
+    """After the owner decides an approval the mission resumes in a NEW run with an empty checkpoint. Without
+    the record of what already happened the model re-plans from the bare outcome and asks for the same
+    consequential action again — a second approval for work the owner already decided (spec §10.4 step 8)."""
+    to = f"resumed-{uid()}@example.com"
+    m = await make_mission(db, owner, f"Send the vendor the quote request {uid()}")
+    with use_model(FakeModel([{"text": "Preparing.",
+                               "tools": [{"name": "agenttest_send", "input": {"to": to, "body": "hi"}}]},
+                              {"text": "Prepared and waiting for your review."}])):
+        run, out = await rt.run_inline(db, await db.get(Mission, m.id))
+    assert out.mission_status == "waiting_approval"
+    approval_id = out.approvals[0]["id"]
+    await dispatch(ctx_for(db, owner), "approvals.approve", {"approval_id": approval_id})
+
+    mission = await db.get(Mission, m.id)
+    await db.refresh(mission)
+    _system, messages = await rt.assemble_context(db, mission, actor_of(owner, "agent"))
+    ctx_text = messages[0]["content"]
+    assert "<work_already_done>" in ctx_text
+    assert approval_id in ctx_text
+    assert '"status": "confirmed"' in ctx_text or '"status": "queued"' in ctx_text
+    assert "Prepared and waiting for your review." in ctx_text
+    assert "do not ask again for an approval" in ctx_text.lower()
+    # a first run has nothing to replay, so the block is absent rather than empty
+    fresh = await make_mission(db, owner, f"Something new {uid()}")
+    _s2, m2 = await rt.assemble_context(db, await db.get(Mission, fresh.id), actor_of(owner, "agent"))
+    assert "<work_already_done>" not in m2[0]["content"]
 
 
 async def test_home_metrics_tool_is_wired_and_never_fakes_a_success(db, owner):

@@ -5,7 +5,7 @@
 import { Chip, Expander, GlassPanel, HealthLabel, When } from "../../../ui";
 import { entityHref, humanize, shortId } from "../../../lib/links";
 import type { AttentionGroup, AttentionItem } from "../types";
-import { ATTENTION_KIND_LABELS, severityHealth } from "../types";
+import { ATTENTION_KIND_LABELS, severityHealth } from "../labels";
 import { Explain, QueueLink, RecordLink } from "./parts";
 
 /** One line per grouped item, using whichever of its fields the server filled in. */
@@ -18,7 +18,8 @@ function itemLine(it: AttentionItem): { text: string; href: string | null } {
     || (it.channel ? `${humanize(it.channel)}${it.state ? ` — ${humanize(it.state)}` : ""}` : "")
     || (it.id ? `${humanize(it.kind || "item")} ${shortId(it.id, 8)}` : humanize(it.kind || "item"));
   const href = entityHref(it.kind || null, (it.id as string) || null)
-    || (it.vehicle_id ? `/vehicles/${it.vehicle_id}` : null);
+    || (it.vehicle_id ? `/vehicles/${it.vehicle_id}` : null)
+    || (typeof it.contact_id === "string" ? `/contacts/${it.contact_id}` : null);
   return { text, href };
 }
 

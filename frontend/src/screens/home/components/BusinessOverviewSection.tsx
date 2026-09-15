@@ -6,7 +6,7 @@
 import type { FormEvent, ReactNode } from "react";
 import { Button, Chip, Field, GlassPanel, Input, Notice, NotRecorded, SegmentedControl, When } from "../../../ui";
 import type { BusinessOverview, DrilldownMetric, PeriodKind } from "../types";
-import { CATEGORY_LABELS } from "../types";
+import { CATEGORY_LABELS } from "../labels";
 import { Amt, Explain, sentence } from "./parts";
 
 export interface PeriodState { period: PeriodKind; start: string; end: string }
@@ -115,6 +115,11 @@ export function BusinessOverviewSection({
       >
         Apply
       </Button>
+      {!periodState.start || !periodState.end ? (
+        <span className="fs12 t3">
+          Pick both dates and apply. Until then the numbers below are still {data?.period ? data.period.label : "the last applied period"}.
+        </span>
+      ) : null}
     </form>
   ) : null;
 

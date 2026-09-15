@@ -68,10 +68,23 @@ export function InspectorProvider({ children }: { children: ReactNode }) {
     const id = `m${Date.now().toString(36)}`;
     setState((s) => ({ ...s, askDraft: "", askMessages: [...s.askMessages, { id, role: "me", text: q }, { id: `${id}-r`, role: "azkt", text: "", pending: true }] }));
     try {
-      // TODO(backend): POST /api/ask {question, context:{label, href}} → {answer, actions?[]}. Provisional shape.
+      // The Manager: POST /api/agent/chat (backend/app/routers/agent.py). The Agents screen streams the same
+      // endpoint; here the plain JSON reply is enough. The pinned context becomes the `context` object the
+      // manager understands (vehicle_id / case_id), so "this one" means the record on screen.
       const ctx = state.askContext;
-      const r = await api.post<{ answer?: string; reply?: string } | null>("/api/ask", { question: q, context: ctx }, { tolerate: [404, 501] });
-      const answer = r?.answer || r?.reply || "Ask AZKT isn't connected yet. Your question is kept here.";
+      const context: Record<string, unknown> = {};
+      if (ctx?.label) context.label = ctx.label;
+      const vehicle = /^\/vehicles\/([^/?#]+)/.exec(ctx?.href || "");
+      if (vehicle) context.vehicle_id = decodeURIComponent(vehicle[1]);
+      else if (ctx?.href) context.href = ctx.href;
+      const r = await api.post<{ text?: string; status?: string; reasons?: string[] } | null>(
+        "/api/agent/chat",
+        { message: q, role: "manager", context, attachments: [], request_id: id },
+        { idempotencyKey: id },
+      );
+      const reasons = (r?.reasons || []).filter(Boolean).join(" · ");
+      const answer = (r?.text || "").trim()
+        || (reasons ? `That is blocked: ${reasons}` : "It answered without any words. Open Agents for the full conversation.");
       setState((s) => ({ ...s, askMessages: s.askMessages.map((m) => (m.id === `${id}-r` ? { ...m, text: answer, pending: false } : m)) }));
     } catch (e) {
       const msg = e instanceof ApiError ? describeError(e) : "Couldn't reach AZKT.";

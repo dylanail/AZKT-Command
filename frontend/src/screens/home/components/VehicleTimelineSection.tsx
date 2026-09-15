@@ -6,11 +6,19 @@
 import { Chip, GlassPanel, HealthLabel, NotRecorded, SegmentedControl, When } from "../../../ui";
 import type { Health } from "../../../ui";
 import type { TimelineItem, TimelineSection } from "../types";
-import { STAGE_DIMENSION_LABELS, stateLabel } from "../types";
+import { STAGE_DIMENSION_LABELS, stateLabel } from "../labels";
 import { Explain, RecordLink } from "./parts";
 
+/** The two offered horizons. Any 1–365 day value that arrives in the URL is honoured and shown as a third
+    option rather than silently snapped to 7 — the server accepts the same range. */
 export const HORIZONS = [7, 30] as const;
-export type Horizon = (typeof HORIZONS)[number];
+export type Horizon = number;
+
+export function readHorizon(raw: string | null): Horizon {
+  const n = Number(raw);
+  if (!Number.isFinite(n) || !Number.isInteger(n) || n < 1 || n > 365) return 7;
+  return n;
+}
 
 const HEALTHS: ReadonlySet<string> = new Set(["blocked", "risk", "ok", "wait"]);
 function healthOf(h: string | null): Health | null {
@@ -89,8 +97,11 @@ export function VehicleTimelineControls({
         label="Future events horizon"
         size="sm"
         value={String(horizon)}
-        onChange={(v) => onHorizon(Number(v) === 30 ? 30 : 7)}
-        options={[{ value: "7", label: "Next 7 days" }, { value: "30", label: "Next 30 days" }]}
+        onChange={(v) => onHorizon(readHorizon(v))}
+        options={[
+          ...HORIZONS.map((h) => ({ value: String(h), label: `Next ${h} days` })),
+          ...(HORIZONS.includes(horizon as 7 | 30) ? [] : [{ value: String(horizon), label: `Next ${horizon} days` }]),
+        ]}
       />
       {section && section.available !== false ? (
         <span className="fs12 t3 tnum">

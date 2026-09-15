@@ -181,3 +181,23 @@ async def test_the_feed_needs_a_signed_in_person(client):
     client.cookies.clear()
     r = await client.get("/api/notifications")
     assert r.status_code in (401, 403)
+
+
+async def test_expected_version_is_enforced_on_a_notification_write(client, db, owner):
+    """A write that carries `expected_version` must conflict, not silently win (ARCHITECTURE rule 4)."""
+    tag = _u()
+    note, _ = await reminders.notify(db, user_id=owner.id, kind="case_update", urgency="later",
+                                     title=f"Versioned {tag}", dedupe=f"versioned:{tag}",
+                                     group_key=f"versioned:{tag}")
+    await db.commit()
+    login(client, owner)
+    stale = note.version + 5
+    r = await client.post(f"/api/notifications/{note.id}/snooze", json={"minutes": 30, "expected_version": stale})
+    assert r.status_code == 409 and "changed since" in r.json()["message"]
+    fresh = (await client.get("/api/notifications")).json()
+    row = [i for i in fresh["later"] if i["id"] == note.id][0]
+    assert row["state"] == "unread", "the refused write changed nothing"
+    r = await client.post(f"/api/notifications/{note.id}/snooze",
+                          json={"minutes": 30, "expected_version": note.version})
+    assert r.status_code == 200 and r.json()["data"]["notification"]["state"] == "snoozed"
+    await client.post(f"/api/notifications/{note.id}/dismiss", json={})

@@ -144,9 +144,12 @@ async def upload_bytes(upload_id: str, request: Request, c: Caller = Depends(cal
     from ..domain.commands import CommandContext, dispatch
     from ..services import assets as assets_svc
     from ..services.storage import storage
+    from datetime import datetime, timezone
     s = await assets_svc.get_session(c.db, c.actor, upload_id)      # 404 for another client's slot
     if s.state not in ("open", "received"):
         raise Blocked(f"upload is {s.state}", upload=assets_svc.serialize_upload(s))
+    if s.expires_at and s.expires_at < datetime.now(timezone.utc):
+        raise Blocked("upload slot expired; prepare a new upload")
     data = await request.body()
     if not data:
         raise ValidationFailed("empty body")
@@ -154,23 +157,35 @@ async def upload_bytes(upload_id: str, request: Request, c: Caller = Depends(cal
     key = s.storage_key or assets_svc.part_key(s.id)
     current = len(st.get(key)) if st.exists(key) else 0
     rng = request.headers.get("Content-Range")
+    complete = True
     if rng:
-        m = _RANGE.match(rng)
+        m = _RANGE.match(rng.strip())
         if not m:
             raise ValidationFailed("Content-Range must be 'bytes start-end/total'")
-        start, end = int(m.group(1)), int(m.group(2))
+        start, end, total = int(m.group(1)), int(m.group(2)), m.group(3)
         if end - start + 1 != len(data):
             raise ValidationFailed("Content-Range length does not match the body")
+        if start == 0 and current:
+            st.delete(key)
+            current = 0
         if start != current:
             raise HTTPException(409, detail={"error": "offset_mismatch", "next_offset": current})
+        if total != "*" and int(total) > s.max_bytes:
+            raise HTTPException(413, detail={"error": "too_large", "max_bytes": s.max_bytes})
+        complete = total != "*" and end + 1 >= int(total)
     else:
-        st.delete(key)
+        if current:
+            st.delete(key)
         current = 0
+    # the bound `prepare_upload` promised is enforced here, exactly as on the signed-in route: a client
+    # cannot stream past its slot's limit (spec §10.8 "bounded, expiring upload session")
+    if current + len(data) > s.max_bytes:
+        raise HTTPException(413, detail={"error": "too_large", "max_bytes": s.max_bytes})
     size = st.append_part(key, data)
     ctx = CommandContext(db=c.db, actor=c.actor, channel="http")
     res = await dispatch(ctx, "assets.record_chunk", {"upload_id": upload_id, "received_bytes": size,
-                                                      "complete": bool(rng is None)})
-    return {"next_offset": size, "complete": rng is None, "upload": (res.data or {}).get("upload")}
+                                                      "complete": complete})
+    return {"next_offset": size, "complete": complete, "upload": (res.data or {}).get("upload")}
 
 
 @router.post("/uploads/{upload_id}/finalize")

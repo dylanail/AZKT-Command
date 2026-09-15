@@ -8,7 +8,7 @@ import json
 from datetime import datetime, timedelta, timezone
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from backend.app.core.errors import Denied
 from backend.app.domain.commands import dispatch
@@ -109,6 +109,44 @@ async def test_C10_model_outage_keeps_the_mission_open_and_never_fabricates(db, 
     assert m.finished_at is None and m.status in ("needs_information", "paused")
     # the deterministic fast paths still answer
     assert (await say(db, owner, "today"))["fast_path"] == "tasks:upcoming"
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Idempotency — a retried chat message is the same logical request
+# ═════════════════════════════════════════════════════════════════════════════
+async def test_a_retried_chat_request_id_reuses_the_same_mission(db, owner):
+    """POST /api/agent/chat carries a request_id. A dropped connection must not open a second mission and
+    re-run the work (spec §12.1 step 3); the stored answer is replayed instead."""
+    from backend.app.core.errors import DomainError
+    from backend.app.models.runtime import ChatTurn
+    tag = uid()
+    v = await make_vehicle(db, owner, make="Suzuki", model=f"Carry {tag}")
+    rid = f"req-{tag}"
+    text = f"Log a yard follow-up for the Carry {tag}"
+    script = [{"text": "Creating the follow-up.",
+               "tools": [{"name": "tasks_create", "input": {"title": f"Call the yard {tag}", "vehicle_id": v.id}}]},
+              {"text": "Done — one task created."}]
+    with use_model(FakeModel(list(script))) as fake:
+        first = await say(db, owner, text, request_id=rid)
+    assert first["mission_id"] and first.get("replayed") is not True
+    assert len(fake.calls) == 2
+
+    with use_model(FakeModel(list(script))) as fake2:
+        again = await say(db, owner, text, request_id=rid)
+    assert again["mission_id"] == first["mission_id"] and again["replayed"] is True
+    assert again["text"] == first["text"] and again["run_id"] == first["run_id"]
+    assert fake2.calls == [], "a retry must not call the model again"
+
+    assert await db.scalar(select(func.count()).select_from(Task).where(Task.title == f"Call the yard {tag}")) == 1
+    assert await db.scalar(select(func.count()).select_from(Mission).where(
+        Mission.correlation_id == mgr.chat_correlation(actor_of(owner, "agent"), rid))) == 1
+    turns = (await db.execute(select(ChatTurn).where(ChatTurn.thread_key == first["thread_key"],
+                                                     ChatTurn.content == text))).scalars().all()
+    assert len(turns) == 1, "the retried turn is not stored twice"
+
+    # the same id with a different message is a conflict, not a silently wrong answer
+    with pytest.raises(DomainError):
+        await say(db, owner, "something else entirely", request_id=rid)
 
 
 # ═════════════════════════════════════════════════════════════════════════════

@@ -16,7 +16,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..core.errors import Denied, NotFound
+from ..core.errors import Conflict, Denied, NotFound
 from ..core.time import PHOENIX, ensure_aware, fmt_local
 from ..domain.access import can_see_costs, visible_vehicle_ids
 from ..domain.actors import Actor
@@ -182,20 +182,22 @@ class NotificationSnoozeIn(BaseModel):
     expected_version: int | None = None
 
 
-async def _own(ctx: CommandContext, notification_id: str) -> Notification:
+async def _own(ctx: CommandContext, notification_id: str, expected_version: int | None = None) -> Notification:
     n = (await ctx.db.execute(select(Notification).where(Notification.id == notification_id)
                               .with_for_update())).scalar_one_or_none()
     if n is None:
         raise NotFound("notification not found")
     if n.user_id != ctx.actor.user_id:
         raise Denied("that notification belongs to someone else")
+    if expected_version is not None and n.version != expected_version:
+        raise Conflict("notification changed since you loaded it", current_version=n.version)
     return n
 
 
 @command("notifications.acknowledge", input=NotificationRefIn, perm=None, action_class="internal",
          description="Acknowledge one of your own notifications (acknowledged is a person's action, not a provider receipt).")
 async def acknowledge(ctx: CommandContext, inp: NotificationRefIn) -> dict:
-    n = await _own(ctx, inp.notification_id)
+    n = await _own(ctx, inp.notification_id, inp.expected_version)
     n.state = "acknowledged"
     n.acknowledged_at = ctx.now
     n.snoozed_until = None
@@ -208,7 +210,7 @@ async def acknowledge(ctx: CommandContext, inp: NotificationRefIn) -> dict:
 @command("notifications.snooze", input=NotificationSnoozeIn, perm=None, action_class="internal",
          description="Hide a notification until later without resolving the underlying problem.")
 async def snooze(ctx: CommandContext, inp: NotificationSnoozeIn) -> dict:
-    n = await _own(ctx, inp.notification_id)
+    n = await _own(ctx, inp.notification_id, inp.expected_version)
     n.state = "snoozed"
     n.snoozed_until = ctx.now + timedelta(minutes=inp.minutes)
     ctx.touch(n, "notification")
@@ -220,7 +222,7 @@ async def snooze(ctx: CommandContext, inp: NotificationSnoozeIn) -> dict:
 @command("notifications.dismiss", input=NotificationRefIn, perm=None, action_class="internal",
          description="Dismiss a notification. The underlying record keeps its own state.")
 async def dismiss(ctx: CommandContext, inp: NotificationRefIn) -> dict:
-    n = await _own(ctx, inp.notification_id)
+    n = await _own(ctx, inp.notification_id, inp.expected_version)
     n.state = "resolved"
     ctx.touch(n, "notification")
     ctx.record(f"Dismissed: {n.title}", entity_kind="notification", entity_id=n.id, kind="system", state="resolved",

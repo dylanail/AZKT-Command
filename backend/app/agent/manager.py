@@ -17,6 +17,7 @@ different role prompt over the same records and the same policy — never a sepa
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import re
 from datetime import datetime, timedelta, timezone
@@ -74,6 +75,9 @@ async def store_turn(db, thread_key: str, role: str, content: str, *, channel: s
 
 
 async def thread(db, actor: Actor, role: str = "manager", *, limit: int = 50) -> dict:
+    # coerce exactly as handle_message does, or a chat sent with an unknown role would be stored on the
+    # manager thread while this endpoint reported an empty one
+    role = role if role in ROLES else "manager"
     key = thread_key_for(actor, role)
     rows = (await db.execute(select(ChatTurn).where(ChatTurn.thread_key == key)
                              .order_by(ChatTurn.created_at.desc()).limit(limit))).scalars().all()
@@ -495,10 +499,15 @@ async def stream_message(db, actor: Actor, text: str, **kw) -> AsyncGenerator[di
         result = task.result()
         yield {"event": "done", "data": result}
     except Exception as e:  # noqa: BLE001
-        if not task.done():
-            task.cancel()
         log.exception("manager stream failed")
         yield {"event": "error", "data": {"error": f"{type(e).__name__}: {str(e)[:300]}"}}
+    finally:
+        # A browser that closes the stream must not leave handle_message running on a session the caller
+        # is about to close. The mission itself is durable and keeps its completed effects.
+        if not task.done():
+            task.cancel()
+        with contextlib.suppress(BaseException):
+            await task
 
 
 # ── status (per role) ────────────────────────────────────────────────────────

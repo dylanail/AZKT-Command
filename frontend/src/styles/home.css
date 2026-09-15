@@ -63,6 +63,7 @@ button.hm-tile:active { transform: translateY(1px); }
 .hm-tile--blocked .hm-tile__value { color: var(--blocked); }
 .hm-tile--wait .hm-tile__label { color: var(--wait); }
 .hm-tile--ghost { min-height: 92px; background: var(--soft); border-style: dashed; }
+.hm-tiles--secondary .hm-tile__value { font-size: 18px; }
 
 /* ---------- completeness ---------- */
 .hm-complete { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
@@ -75,8 +76,9 @@ button.hm-tile:active { transform: translateY(1px); }
   padding: 13px 16px; border-bottom: 1px solid var(--line2); align-items: center; min-width: 0;
 }
 .hm-row:last-child { border-bottom: 0; }
-.hm-row--today, .hm-row--completed { grid-template-columns: 96px minmax(0, 1fr); align-items: start; }
-.hm-row__when { display: flex; flex-direction: column; gap: 2px; font-variant-numeric: tabular-nums; min-width: 0; }
+.hm-row--today { grid-template-columns: 88px minmax(0, 1fr); align-items: start; }
+.hm-row--completed { grid-template-columns: 108px minmax(0, 1fr); align-items: start; }
+.hm-row__when { display: flex; flex-direction: column; gap: 2px; font-size: 13px; font-variant-numeric: tabular-nums; min-width: 0; }
 .hm-row__main { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
 .hm-row__title { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; font-weight: 500; min-width: 0; }
 .hm-row__title > .chip, .hm-row__title > .health { flex: none; }
@@ -105,7 +107,9 @@ button.hm-tile:active { transform: translateY(1px); }
   .hm-tile__value { font-size: 19px; }
   /* rows stack: the action sits under the facts, still a 44px target */
   .hm-row { grid-template-columns: minmax(0, 1fr); padding: 14px 16px; }
-  .hm-row--today, .hm-row--completed { grid-template-columns: 84px minmax(0, 1fr); }
+  .hm-row--today { grid-template-columns: 76px minmax(0, 1fr); }
+  .hm-row--completed { grid-template-columns: 96px minmax(0, 1fr); }
+  .hm-row__when { font-size: 12px; }
   .hm-row__right { justify-content: flex-start; }
   .hm-row__right .btn { min-height: 44px; }
   .hm-range .field { min-width: 100%; }
