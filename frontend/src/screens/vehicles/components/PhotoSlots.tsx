@@ -206,7 +206,7 @@ export function PhotoSlots({ vehicleId, photos, requiredSlots, missingSlots, her
           <a href={sel.urls?.web || sel.urls?.original || thumbUrl(sel.id) || "#"} target="_blank" rel="noreferrer" className="fs12">Open full size</a>
         </div>
       ) : (
-        <span className="fs12 t4">Select a photo to set its slot, make it the main photo or remove it. Photos stay private until a reviewed listing package uses them.</span>
+        <span className="fs12 t4">Select a photo to set its slot, make it the main photo or remove it. The slot labels are the order. Photos stay private until a reviewed listing package uses them.</span>
       )}
 
       {pending.length ? (

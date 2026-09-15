@@ -17,6 +17,7 @@ import {
 import { openApproval } from "../approvals/useApprovalReview";
 import { CandidateCard } from "./components/CandidateCard";
 import { DualTime } from "./components/DualTime";
+import { DeniedOrError } from "./components/DeniedPanel";
 import { GateList } from "./components/GateList";
 import { RequirementTiers } from "./components/RequirementTiers";
 import {
@@ -25,7 +26,7 @@ import {
 } from "./RequestDialogs";
 import { activityPath, bidAction, matchAction, requestPath, requestTranslation } from "./api";
 import {
-  BID_LABEL, agreementLabel, candidateTitle, depositLabel, lifecycleLabel,
+  BID_LABEL, agreementLabel, candidateTitle, depositLabel, depositRuleSet, lifecycleLabel,
   type ActivityRow, type ApprovalRef, type Bid, type CandidateMatch, type RequestDetailResp, type Translation,
 } from "./types";
 import "./requests.css";
@@ -77,7 +78,7 @@ export default function ImportRequestDetail() {
   }, [d?.bid_approvals]);
 
   if (q.loading) return <PageLoading />;
-  if (q.error) return <div className="page"><GlassPanel clip><ErrorState error={q.error} onRetry={q.reload} /></GlassPanel></div>;
+  if (q.error) return <div className="page"><GlassPanel clip><DeniedOrError error={q.error} onRetry={q.reload} what="this import request" backTo="/requests" backLabel="Back to import requests" /></GlassPanel></div>;
   if (!d || !r) {
     return (
       <div className="page">
@@ -105,7 +106,7 @@ export default function ImportRequestDetail() {
 
   const menu: MenuItem[] = [
     { label: "Revise requirements…", meta: `v${r.requirements_version}`, onSelect: () => setDialog("revise"), disabled: !write, disabledReason: writeReason },
-    { label: "Set the deposit rule…", meta: r.deposit_rule?.amount ? "recorded" : "not set", onSelect: () => setDialog("deposit-rule"), disabled: !write, disabledReason: writeReason },
+    { label: "Set the deposit rule…", meta: depositRuleSet(r) ? "recorded" : "not set", onSelect: () => setDialog("deposit-rule"), disabled: !write, disabledReason: writeReason },
     { label: "Record the purchase…", onSelect: () => setDialog("purchase"), disabled: !write || r.status === "closed", disabledReason: !write ? writeReason : "This request is closed.", sepBefore: true },
     { label: "Next check…", meta: r.next_check_at ? "scheduled" : "none", onSelect: () => setDialog("next-check"), disabled: !write, disabledReason: writeReason },
   ];
@@ -195,9 +196,9 @@ export default function ImportRequestDetail() {
 
             <dt id="deposit">Deposit rule</dt>
             <dd>
-              {r.deposit_rule?.amount ? (
+              {depositRuleSet(r) ? (
                 <>
-                  <Money amount={r.deposit_rule.amount} currency={r.deposit_rule.currency || "USD"} hidden={!financeStatus} />
+                  <Money amount={r.deposit_rule.amount ?? null} currency={r.deposit_rule.currency || "USD"} hidden={!financeStatus} />
                   {r.deposit_rule.source_ref ? <span className="t4"> · {String(r.deposit_rule.source_ref)}</span> : null}
                 </>
               ) : (
@@ -221,7 +222,7 @@ export default function ImportRequestDetail() {
               {r.agreement_status === "signed" ? "Replace the signed evidence" : "Mark signed"}
             </Button>
             <Button size="sm" variant="soft" onClick={() => setDialog("deposit-rule")} disabled={!write} disabledReason={writeReason}>
-              {r.deposit_rule?.amount ? "Change the deposit rule" : "Set the deposit rule"}
+              {depositRuleSet(r) ? "Change the deposit rule" : "Set the deposit rule"}
             </Button>
             <Button size="sm" variant="ghost" to="/finance?tab=needs-matching">Record payment</Button>
           </div>

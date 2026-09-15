@@ -17,6 +17,7 @@ import {
 } from "../../ui";
 import { JsonDetail } from "../shared/JsonDetail";
 import { openApproval } from "../approvals/useApprovalReview";
+import { DeniedOrError } from "../requests/components/DeniedPanel";
 import { DualTime, deadlineTone } from "../requests/components/DualTime";
 import { MarkSentDialog, RejectCandidateDialog } from "../requests/RequestDialogs";
 import { bidAction, matchAction, prepareBid, candidatePath, requestTranslation, CURRENCIES } from "../requests/api";
@@ -60,7 +61,7 @@ export default function CandidateDetail() {
   const reload = () => { q.reload(); setPrepare(false); setResult(null); setReject(null); setMarkSent(null); };
 
   if (q.loading) return <PageLoading />;
-  if (q.error) return <div className="page"><GlassPanel clip><ErrorState error={q.error} onRetry={q.reload} /></GlassPanel></div>;
+  if (q.error) return <div className="page"><GlassPanel clip><DeniedOrError error={q.error} onRetry={q.reload} what="this candidate" backTo="/requests" backLabel="Back to import requests" /></GlassPanel></div>;
   if (!d || !c) {
     return (
       <div className="page">

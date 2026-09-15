@@ -87,7 +87,8 @@ export function useCostItems(enabled: boolean) {
     setLoading(true);
     api.get<{ items: CostItem[] }>("/api/finance/costs?limit=500", { signal: ctrl.signal })
       .then((r) => { setItems(r?.items || []); setLoading(false); })
-      .catch((e) => { if (!ctrl.signal.aborted) { setError(e); setLoading(false); } });
+      // Set items on failure too, so the effect's guard stops it retrying on every render.
+      .catch((e) => { if (!ctrl.signal.aborted) { setError(e); setItems([]); setLoading(false); } });
     return () => ctrl.abort();
   }, [enabled, items, loading]);
 

@@ -143,9 +143,9 @@ export default function Vehicles() {
             variant="primary"
             to={canIntake ? "/vehicles/intake" : undefined}
             disabled={!canIntake}
-            disabledReason="Your role can't book in vehicles."
+            disabledReason="Your role can't add photos or notes to a vehicle."
           >
-            Book in vehicle
+            {employee ? "Add photos or a note" : "Book in vehicle"}
           </Button>
         </>
       }
@@ -336,7 +336,7 @@ function BoardView({ state, canMove, mobile, onMove, busyId, ownerName }: {
                   <MoveStageButton
                     stages={SHOP_STAGES}
                     current={col.state}
-                    size={mobile ? "md" : "sm"}
+                    size={mobile ? "lg" : "sm"}
                     busy={busyId === `move:${v.id}`}
                     disabledReason={!canMove ? "Your role can't move vehicles between stages." : undefined}
                     onMove={(to) => onMove(v, to)}

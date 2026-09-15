@@ -99,7 +99,7 @@ export function PayablesTab({ canWrite, refs }: { canWrite: boolean; refs: Retur
       {byVendor.map(([vendor, rows]) => (
         <Section key={vendor} title={vendor} count={rows.length}>
           <GlassPanel clip>
-            <Table minWidth={820} aria-label={`Payables for ${vendor}`}>
+            <Table minWidth={820} wrapClassName="fin-table" aria-label={`Payables for ${vendor}`}>
               <thead>
                 <tr>
                   <th>Cost</th><th>Vehicle</th><th style={{ textAlign: "right" }}>Invoiced</th>
@@ -118,8 +118,10 @@ export function PayablesTab({ canWrite, refs }: { canWrite: boolean; refs: Retur
                           <Chip size="sm" tone={c.status === "partially_paid" ? "wait" : "amber"}>{humanize(c.status)}</Chip>
                           {c.is_pass_through ? <Chip size="sm" tone="soft" title="Billed on to the customer; not a vehicle cost.">Pass-through</Chip> : null}
                           {c.shared ? <Chip size="sm" tone="soft">Split across vehicles</Chip> : null}
+                          {c.restatements?.length ? <Chip size="sm" tone="wait" count={c.restatements.length} title="Corrected after the fact. The change is kept as a note, not applied silently.">restated</Chip> : null}
                           {c.invoice_ref ? <span className="nowrap">{c.invoice_ref}</span> : null}
                         </span>
+                        {c.restatement_note ? <span className="fs12 t3">Restated: {c.restatement_note}</span> : null}
                       </span>
                     </td>
                     <td>

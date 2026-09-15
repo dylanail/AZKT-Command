@@ -111,10 +111,10 @@ export function SoldCohortTab({ refs }: { refs: ReturnType<typeof useRefs> }) {
                     {d.sales.map((s) => (
                       <Tr key={s.vehicle_id}>
                         <td>
-                          <span className="stack-sm" style={{ gap: 1 }}>
+                          <div className="stack-sm" style={{ gap: 4 }}>
                             <Link to={`/vehicles/${s.vehicle_id}?tab=money`}>{s.stock_no || refs.vehicleName(s.vehicle_id)}</Link>
-                            <span className="fs12 t3"><CategoryChips by={s.by_category} /></span>
-                          </span>
+                            <CategoryChips by={s.by_category} />
+                          </div>
                         </td>
                         <td className="t3 fs13">
                           <When iso={s.completed_at} format="date" />

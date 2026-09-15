@@ -44,4 +44,6 @@
   .fin-row { padding: 14px; }
   .fin-row__actions .btn { min-height: 44px; }
   .fin-row__amount { font-size: 15px; }
+  /* Row actions inside a finance table stay thumb-sized. */
+  .fin-table td.actions .btn { min-height: 44px; padding: 0 14px; }
 }

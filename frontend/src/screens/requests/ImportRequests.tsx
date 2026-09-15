@@ -16,9 +16,10 @@ import {
   Badge, Button, Chip, EmptyState, ErrorState, Field, GlassPanel, HealthLabel, Input, ListRow, Loading, Menu,
   Money, Notice, PageHeader, PlusIcon, ResponsiveDialog, SegmentedControl, Select, Textarea, When, type MenuItem,
 } from "../../ui";
+import { DeniedOrError } from "./components/DeniedPanel";
 import { requestAction, requestsPath, CURRENCIES } from "./api";
 import {
-  BOARD_COLUMNS, OPEN_STATUSES, agreementLabel, depositLabel, lifecycleHealth, lifecycleLabel,
+  BOARD_COLUMNS, OPEN_STATUSES, agreementLabel, depositLabel, depositRuleSet, lifecycleHealth, lifecycleLabel,
   type ImportRequest, type RequestListResp,
 } from "./types";
 import "./requests.css";
@@ -151,7 +152,7 @@ export default function ImportRequests() {
       {list.loading ? (
         <GlassPanel clip><Loading label="Loading import requests" rows={4} /></GlassPanel>
       ) : list.error ? (
-        <GlassPanel clip><ErrorState error={list.error} onRetry={list.reload} /></GlassPanel>
+        <GlassPanel clip><DeniedOrError error={list.error} onRetry={list.reload} what="import requests" /></GlassPanel>
       ) : list.data === null ? (
         <GlassPanel clip><EmptyState title="Import requests aren't connected yet" body="This list fills in once the import-requests API is live." /></GlassPanel>
       ) : view === "board" ? (
@@ -267,7 +268,7 @@ function BoardCard({ r, write, costs, onClose }: { r: ImportRequest; write: bool
     });
     items.push({
       label: r.deposit_status === "confirmed" ? "Deposit confirmed" : "Record the deposit…",
-      meta: r.deposit_rule?.amount ? "rule set" : "rule not set",
+      meta: depositRuleSet(r) ? "rule set" : "rule not set",
       to: `/requests/${encodeURIComponent(r.id)}#deposit`,
       disabled: r.deposit_status === "confirmed",
       disabledReason: "The deposit is already confirmed from payment evidence.",

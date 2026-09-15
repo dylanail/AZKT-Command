@@ -5,13 +5,14 @@
    vehicles/{id}/money · sold-cohort · ledger/mappings · ledger/rows · export.csv
    Writes: every button posts a command under /api/finance/... and the CommandResult envelope is explained
    by useCommand (ok / needs review / blocked). */
+import { useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import "../../styles/finance.css";
-import { api } from "../../lib/api";
+import { api, describeError } from "../../lib/api";
 import { useAuth } from "../../lib/auth";
 import { useQuery } from "../../lib/useQuery";
 import { can } from "../../lib/perms";
-import { Button, Chip, ErrorState, GlassPanel, Loading, Menu, Notice, PageHeader, Tabs, When } from "../../ui";
+import { Button, Chip, ErrorState, GlassPanel, Loading, Menu, Notice, PageHeader, Tabs, When, useToast } from "../../ui";
 import Denied from "../auth/Denied";
 import { Amt, Kpis, MoneyMap } from "./parts";
 import { useRefs } from "./useRefs";
@@ -106,6 +107,31 @@ export default function Finance() {
     setParams(next, { replace: true });
   };
 
+  const { toast } = useToast();
+  const [exporting, setExporting] = useState<string | null>(null);
+
+  /** Fetch the CSV with the session cookie, then hand it to the browser — a failure stays a toast, not a blank page. */
+  const exportCsv = async (kind: string) => {
+    setExporting(kind);
+    try {
+      const text = await api.get<string>(`/api/finance/export.csv?kind=${encodeURIComponent(kind)}`);
+      const blob = new Blob([typeof text === "string" ? text : ""], { type: "text/csv;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `azkt-finance-${kind}.csv`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      window.setTimeout(() => URL.revokeObjectURL(url), 2000);
+      toast({ message: `Exported ${kind}. Source links travel with every row.`, tone: "ok" });
+    } catch (e) {
+      toast({ message: describeError(e), tone: "blocked", duration: 6000 });
+    } finally {
+      setExporting(null);
+    }
+  };
+
   const refs = useRefs(canCosts);
   const summaryQ = useQuery<FinanceSummary | null>(
     async (signal) => (canCosts || canStatus ? api.get<FinanceSummary>("/api/finance/summary", { signal }) : null),
@@ -138,11 +164,11 @@ export default function Finance() {
       label="Export CSV"
       align="right"
       heading="Filtered CSV with source links"
-      trigger={<Button variant="soft" size="md">Export CSV</Button>}
+      trigger={<Button variant="soft" size="md" loading={!!exporting}>Export CSV</Button>}
       items={EXPORTS.map((e) => ({
         label: e.label,
         meta: e.meta,
-        onSelect: () => { window.location.assign(`/api/finance/export.csv?kind=${e.kind}`); },
+        onSelect: () => { void exportCsv(e.kind); },
       }))}
     />
   );

@@ -211,5 +211,7 @@ a.vh-row:hover, button.vh-row:hover { background: var(--row-hover); text-decorat
 .ik-live { font-size: 13px; color: var(--t2); background: var(--sheet-soft); border: 1px solid var(--line2); border-radius: 10px; padding: 8px 10px; min-height: 40px; overflow-wrap: anywhere; }
 
 @media (max-width: 767px) {
-  .vh-header__actions .btn, .ik-photo-btn, .ik-result .btn { min-height: 44px; }
+  .vh-header__actions .btn, .ik-photo-btn, .ik-result .btn, .vh-card .btn, .vh-photo-acts .btn,
+  .ik-cand .btn, .vh-sect__head .btn { min-height: 44px; }
+  .ik-shot__acts .linklike { min-height: 32px; display: inline-flex; align-items: center; }
 }

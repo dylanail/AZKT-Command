@@ -11,6 +11,8 @@ import { TeamSection } from "./components/TeamSection";
 import { RemindersSection } from "./components/RemindersSection";
 import { AutomationSection } from "./components/AutomationSection";
 import { LaterSection } from "./components/LaterSection";
+import { ProceduresSection } from "./components/ProceduresSection";
+import { KnowledgeSection } from "./components/KnowledgeSection";
 import { RecoverySection } from "./components/RecoverySection";
 import { UsageSection } from "./components/UsageSection";
 
@@ -70,7 +72,9 @@ export default function Settings() {
         {current === "team" ? <TeamSection level={2} /> : null}
         {current === "reminders" ? <RemindersSection /> : null}
         {current === "automation" ? <AutomationSection /> : null}
-        {current === "external-agents" || current === "procedures" || current === "knowledge" ? <LaterSection id={current} /> : null}
+        {current === "external-agents" ? <LaterSection id={current} /> : null}
+        {current === "procedures" ? <ProceduresSection /> : null}
+        {current === "knowledge" ? <KnowledgeSection /> : null}
         {current === "recovery" ? <RecoverySection /> : null}
         {current === "usage" ? <UsageSection /> : null}
       </section>

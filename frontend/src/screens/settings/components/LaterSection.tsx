@@ -1,32 +1,19 @@
-/* External agents · Procedures · Knowledge: shells for sections that land in a later stage.
-   Each probes its endpoint (404 → truthful "Not available yet") and keeps the intended controls disabled with reasons. */
+/* External agents: the one Settings section whose API is not built yet.
+   It probes its endpoint (404 → truthful "Not available yet") and keeps the intended controls disabled with reasons.
+   Procedures and Knowledge are real sections now — see ProceduresSection.tsx and KnowledgeSection.tsx. */
 import { api } from "../../../lib/api";
 import { useQuery } from "../../../lib/useQuery";
 import { Button, EmptyState, ErrorState, GlassPanel, ListGroup, ListRow, Loading } from "../../../ui";
 import { JsonDetail } from "../../shared/JsonDetail";
 
 interface Spec { endpoint: string; title: string; blurb: string; emptyTitle: string; controls: { label: string; reason: string; primary?: boolean }[] }
-const SPECS: Record<"external-agents" | "procedures" | "knowledge", Spec> = {
+const SPECS: Record<"external-agents", Spec> = {
   "external-agents": {
     endpoint: "/api/external-clients",
     title: "External agents",
     blurb: "Other agents connect through the Manager with a scoped client key. They can only do what the client scope and your grants both allow; every action is recorded and, when consequential, waits for your approval.",
     emptyTitle: "No external agent clients yet",
     controls: [{ label: "Add client", reason: "External agent clients arrive in a later stage.", primary: true }, { label: "Rotate key", reason: "No client to rotate yet." }],
-  },
-  procedures: {
-    endpoint: "/api/procedures",
-    title: "Procedures / Teach",
-    blurb: "Teach AZKT how you do things: a step list with the sources it may use and the checks it must pass. Versioned; a change re-checks anything pending.",
-    emptyTitle: "No procedures recorded",
-    controls: [{ label: "New procedure", reason: "Teach arrives in a later stage.", primary: true }, { label: "Import from a demonstration", reason: "Learning from demonstrations arrives with Teach." }],
-  },
-  knowledge: {
-    endpoint: "/api/knowledge",
-    title: "Knowledge",
-    blurb: "Corpus coverage, retrieval sources and corrections. Answers cite what they used; gaps show here instead of being papered over.",
-    emptyTitle: "Knowledge index not available",
-    controls: [{ label: "Re-index", reason: "The knowledge service arrives in a later stage.", primary: true }, { label: "Export corpus", reason: "Corpus export arrives with the knowledge service." }],
   },
 };
 

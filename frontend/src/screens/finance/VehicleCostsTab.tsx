@@ -107,7 +107,7 @@ export function VehicleCostsTab({ refs }: { refs: ReturnType<typeof useRefs> }) 
   return (
     <div className="stack">
       <GlassPanel clip>
-        <Table minWidth={880} aria-label="Vehicle costs">
+        <Table minWidth={880} wrapClassName="fin-table" aria-label="Vehicle costs">
           <thead>
             <tr>
               <th>Vehicle</th><th style={{ textAlign: "right" }}>Estimated total</th>

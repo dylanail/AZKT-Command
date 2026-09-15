@@ -89,6 +89,8 @@ export function EvidenceReviewDialog({
   const [ignore, setIgnore] = useState(false);
 
   const conflict = evidence.match_state === "conflict" && !!Object.keys(evidence.discrepancy || {}).length;
+  /* The server can only restate an amount. A currency disagreement stays a conflict until the item is corrected. */
+  const currencyConflict = conflict && evidence.discrepancy.field === "currency";
   const key = `ev:${mode}:${evidence.id}`;
 
   let blocked: string | null = null;
@@ -106,7 +108,12 @@ export function EvidenceReviewDialog({
     let path = "/api/finance/costs/confirm-match";
     let body: Record<string, unknown> = { ...base, cost_item_id: costItemId, note: note.trim() || null };
     let success = "Match confirmed.";
-    if (mode === "confirm" && conflict) body.resolve_discrepancy = resolve;
+    if (mode === "confirm" && conflict) {
+      body.resolve_discrepancy = resolve;
+      success = resolve === "evidence"
+        ? "Confirmed. The cost item was restated to the evidence's amount, with a note saying why."
+        : "Confirmed. The item's value is kept and the disagreement stays on record.";
+    }
     if (mode === "correct") {
       path = "/api/finance/costs/correct-match";
       body = { ...base, cost_item_id: costItemId || null, vehicle_id: vehicleId || null, category: category || null, note: note.trim() || null };
@@ -154,7 +161,7 @@ export function EvidenceReviewDialog({
           <>
             {(evidence.candidates || []).length > 1 ? (
               <Field label="Which cost item is this?" hint="Several items share this supplier and reference. Nothing is picked for you.">
-                <div className="opts">
+                <div className="opts" role="radiogroup" aria-label="Which cost item is this?">
                   {evidence.candidates.map((c) => (
                     <button key={c.cost_item_id} type="button" role="radio" aria-checked={costItemId === c.cost_item_id} className="opt"
                       onClick={() => setCostItemId(c.cost_item_id)}>
@@ -177,13 +184,17 @@ export function EvidenceReviewDialog({
             )}
             {conflict ? (
               <Field label="Which value is right?" hint="The other value stays on record as a disagreement. Nothing is averaged.">
-                <div className="opts">
-                  {[["evidence", "The evidence", `${evidence.discrepancy.evidence ?? ""}`], ["item", "The recorded cost item", `${evidence.discrepancy.item ?? ""}`]].map(([v, label, val]) => (
-                    <button key={v} type="button" role="radio" aria-checked={resolve === v} className="opt" onClick={() => setResolve(v)}>
+                <div className="opts" role="radiogroup" aria-label="Which value is right?">
+                  {[
+                    { v: "evidence", label: "The evidence", val: String(evidence.discrepancy.evidence ?? ""), off: currencyConflict, why: "A currency disagreement can't be settled by taking this number. Correct the cost item's currency first." },
+                    { v: "item", label: "The recorded cost item", val: String(evidence.discrepancy.item ?? ""), off: false, why: "" },
+                  ].map((o) => (
+                    <button key={o.v} type="button" role="radio" aria-checked={resolve === o.v} className="opt"
+                      disabled={o.off} title={o.off ? o.why : undefined} onClick={() => setResolve(o.v)}>
                       <span className="opt__mark" aria-hidden="true" />
                       <span className="stack-sm" style={{ gap: 2 }}>
-                        <span className="opt__label">{label}</span>
-                        <span className="opt__desc">{val}</span>
+                        <span className="opt__label">{o.label}</span>
+                        <span className="opt__desc">{o.off ? o.why : o.val}</span>
                       </span>
                     </button>
                   ))}

@@ -18,7 +18,7 @@ export function PauseDialog({ open, onClose, r, onDone }: Base) {
   const mobile = useIsMobile();
   const { run, busy } = useCommand();
   const [reason, setReason] = useState("");
-  useEffect(() => { if (open) setReason(r.paused ? "" : ""); }, [open, r.paused]);
+  useEffect(() => { if (open) setReason(""); }, [open]);
   if (!open) return null;
   const resuming = r.paused;
   const submit = async (e: FormEvent) => {

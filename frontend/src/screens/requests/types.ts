@@ -349,6 +349,12 @@ export function agreementLabel(r: ImportRequest): string {
   return "Not sent";
 }
 
+/** True when the owner has recorded a deposit rule. The amount itself may be stripped for a role
+    without finance visibility, so presence is decided by the rule object, never by the amount. */
+export function depositRuleSet(r: ImportRequest): boolean {
+  return Object.keys(r.deposit_rule || {}).length > 0 || r.deposit_status !== "unset";
+}
+
 export function depositLabel(r: ImportRequest): string {
   switch (r.deposit_status) {
     case "confirmed": return "Confirmed";

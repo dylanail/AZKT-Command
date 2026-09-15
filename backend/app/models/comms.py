@@ -33,6 +33,11 @@ class Connection(Base, BusinessRow):
     connected_by: Mapped[str | None] = mapped_column(String, nullable=True)
     connected_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     disconnected_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # added by the inbox domain (add-only)
+    coverage_gaps: Mapped[list] = mapped_column(JSON, default=list)   # [{from, to, kind, detail, at, resolved_at}] (B02)
+    excluded_counts: Mapped[dict] = mapped_column(JSON, default=dict)  # {total, by_reason:{...}} — rejected personal mail (A05)
+    capabilities: Mapped[dict] = mapped_column(JSON, default=dict)     # {send, drafts, labels, watch} enabled capability flags
+    catch_up_state: Mapped[dict] = mapped_column(JSON, default=dict)   # {pending, started_at, reason, processed} (A08)
 
 
 class SyncCursor(Base, BusinessRow):
@@ -80,6 +85,16 @@ class Conversation(Base, BusinessRow):
     send_decision_version: Mapped[int] = mapped_column(Integer, default=0)  # invariant 3
     spam_reason: Mapped[str | None] = mapped_column(String, nullable=True)
     case_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    # added by the inbox domain (add-only)
+    account: Mapped[str | None] = mapped_column(String, nullable=True, index=True)  # account identity (info@… / personal)
+    prior_state: Mapped[str | None] = mapped_column(String, nullable=True)           # state before take over (resume)
+    no_reply_reason: Mapped[str | None] = mapped_column(String, nullable=True)       # suppression rule (spec §4.5)
+    match_reasons: Mapped[list] = mapped_column(JSON, default=list)
+    classification_reasons: Mapped[list] = mapped_column(JSON, default=list)
+    classification_source: Mapped[str] = mapped_column(String, default="deterministic")  # deterministic|model|human
+    triage_reason: Mapped[str | None] = mapped_column(String, nullable=True)
+    sensitivity: Mapped[str] = mapped_column(String, default="normal")  # normal|dispute|opted_out|financial
+    extra: Mapped[dict] = mapped_column(JSON, default=dict)
 
 
 class Message(Base, BusinessRow):
@@ -105,6 +120,21 @@ class Message(Base, BusinessRow):
     sent_by: Mapped[str | None] = mapped_column(String, nullable=True)  # user id or 'azkt'
     draft_id: Mapped[str | None] = mapped_column(String, nullable=True)
     receipt: Mapped[dict] = mapped_column(JSON, default=dict)
+    # added by the inbox domain (add-only)
+    provider_thread_id: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
+    rfc_message_id: Mapped[str | None] = mapped_column(String, nullable=True, index=True)  # RFC822 Message-ID header
+    in_reply_to: Mapped[str | None] = mapped_column(String, nullable=True)
+    body_html: Mapped[str] = mapped_column(Text, default="")
+    history_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    label_ids: Mapped[list] = mapped_column(JSON, default=list)
+    admitted: Mapped[bool] = mapped_column(Boolean, default=True)            # personal allowlist admission (A05)
+    admission_rule: Mapped[str | None] = mapped_column(String, nullable=True)
+    excluded_reason: Mapped[str | None] = mapped_column(String, nullable=True)
+    quarantined_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)  # A06
+    personal_allowlisted: Mapped[bool] = mapped_column(Boolean, default=False)
+    attribution: Mapped[str | None] = mapped_column(String, nullable=True)   # azkt|manual|unknown (outbound)
+    suppression: Mapped[str | None] = mapped_column(String, nullable=True)   # bounce|auto_reply|newsletter|duplicate|...
+    extra: Mapped[dict] = mapped_column(JSON, default=dict)
 
 
 class Draft(Base, BusinessRow):
@@ -132,3 +162,16 @@ class Draft(Base, BusinessRow):
     account_connection_id: Mapped[str | None] = mapped_column(String, nullable=True)
     supersedes_id: Mapped[str | None] = mapped_column(String, nullable=True)
     edit_history: Mapped[list] = mapped_column(JSON, default=list)
+    # added by the inbox domain (add-only)
+    our_message_id: Mapped[str | None] = mapped_column(String, nullable=True, index=True)  # RFC Message-ID minted BEFORE sending
+    external_action_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    provider_draft_version: Mapped[str | None] = mapped_column(String, nullable=True)
+    provider_draft_synced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    facts: Mapped[dict] = mapped_column(JSON, default=dict)          # structured facts the body was checked against
+    based_on_inbound_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    send_decision_version: Mapped[int] = mapped_column(Integer, default=0)  # invariant 3 binding
+    commitments: Mapped[list] = mapped_column(JSON, default=list)
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    receipt: Mapped[dict] = mapped_column(JSON, default=dict)
+    generator: Mapped[str] = mapped_column(String, default="scaffold")  # model|scaffold|human
+    extra: Mapped[dict] = mapped_column(JSON, default=dict)

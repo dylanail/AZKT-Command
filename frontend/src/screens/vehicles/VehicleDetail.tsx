@@ -57,7 +57,9 @@ export default function VehicleDetail() {
   const money = useVehicleMoney(id, costsRead, tick);
 
   const raw = params.get("tab");
-  const tab: Tab = (TAB_IDS as string[]).includes(raw || "") ? (raw as Tab) : "overview";
+  const wanted: Tab = (TAB_IDS as string[]).includes(raw || "") ? (raw as Tab) : "overview";
+  // A tab the role can't open falls back to Overview rather than showing an empty panel.
+  const tab: Tab = (wanted === "money" && !can(user, "costs.read")) || (wanted === "sale" && employee) ? "overview" : wanted;
   const setTab = (t: Tab) => {
     const next = new URLSearchParams(params);
     if (t === "overview") next.delete("tab"); else next.set("tab", t);
@@ -143,7 +145,7 @@ export default function VehicleDetail() {
     { id: "overview" as const, label: "Overview" },
     { id: "work" as const, label: "Work", count: tasks.filter((t) => !["completed", "cancelled"].includes(t.status)).length || undefined },
     { id: "files" as const, label: "Files", count: d.tabs.files.photos.length + d.tabs.files.documents.length || undefined },
-    { id: "sale" as const, label: "Sale" },
+    ...(employee ? [] : [{ id: "sale" as const, label: "Sale" }]),
     ...(costsRead ? [{ id: "money" as const, label: "Money" }] : []),
   ];
 
@@ -256,9 +258,12 @@ export default function VehicleDetail() {
         <FilesTab d={d} reload={reload} canWrite={canWrite || canIntake} />
       </TabPanel>
 
-      <TabPanel id="sale" idPrefix="veh" active={tab === "sale"}>
-        <SaleTab d={d} reload={reload} cmd={cmd} isOwner={user?.role === "owner"} onMoveReady={() => requestMove("ready_for_sale")} moving={cmd.busy("move")} canWrite={canWrite} />
-      </TabPanel>
+      {employee ? null : (
+        <TabPanel id="sale" idPrefix="veh" active={tab === "sale"}>
+          <SaleTab d={d} reload={reload} cmd={cmd} isOwner={user?.role === "owner"} costsRead={costsRead}
+            onMoveReady={() => requestMove("ready_for_sale")} moving={cmd.busy("move")} canWrite={canWrite} />
+        </TabPanel>
+      )}
 
       {costsRead ? (
         <TabPanel id="money" idPrefix="veh" active={tab === "money"}>
@@ -863,9 +868,9 @@ function FilesTab({ d, reload, canWrite }: { d: VehicleDetailResp; reload: () =>
 }
 
 /* ================= Sale ================= */
-function SaleTab({ d, reload, cmd, isOwner, onMoveReady, moving, canWrite }: {
+function SaleTab({ d, reload, cmd, isOwner, costsRead, onMoveReady, moving, canWrite }: {
   d: VehicleDetailResp; reload: () => void; cmd: ReturnType<typeof useVehicleCommand>;
-  isOwner: boolean; onMoveReady: () => void; moving: boolean; canWrite: boolean;
+  isOwner: boolean; costsRead: boolean; onMoveReady: () => void; moving: boolean; canWrite: boolean;
 }) {
   const v = d.vehicle;
   const s = d.tabs.sale;
@@ -936,6 +941,12 @@ function SaleTab({ d, reload, cmd, isOwner, onMoveReady, moving, canWrite }: {
         ]} />
       </section>
 
+      {!costsRead ? (
+        <section className="vh-sect">
+          <div className="vh-sect__head"><h2>Asking price</h2></div>
+          <span className="not-recorded">Hidden for your role.</span>
+        </section>
+      ) : (
       <section className="vh-sect">
         <div className="vh-sect__head">
           <h2>Asking price</h2>
@@ -950,6 +961,7 @@ function SaleTab({ d, reload, cmd, isOwner, onMoveReady, moving, canWrite }: {
           {s.price_approved_at ? <span className="fs12 t3">approved <When iso={s.price_approved_at} format="date" /></span> : <span className="fs12 t4">Not approved</span>}
         </div>
       </section>
+      )}
 
       <section className="vh-sect">
         <div className="vh-sect__head"><h2>Listing package</h2></div>

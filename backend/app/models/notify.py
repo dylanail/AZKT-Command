@@ -34,6 +34,10 @@ class ScheduledDelivery(Base, BusinessRow):
     late: Mapped[bool] = mapped_column(Boolean, default=False)
     sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     fallback_of_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    # added by the reminders domain (add-only)
+    provider_ref: Mapped[str | None] = mapped_column(String, nullable=True, index=True)  # reconcile an unknown send
+    delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    cancel_reason: Mapped[str | None] = mapped_column(String, nullable=True)  # why an obsolete delivery was suppressed
 
 
 class Notification(Base, BusinessRow):
@@ -52,6 +56,10 @@ class Notification(Base, BusinessRow):
     state: Mapped[str] = mapped_column(String, default="unread", index=True)  # unread|read|acknowledged|snoozed|resolved
     snoozed_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     acknowledged_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # added by the reminders domain (add-only): repeated facts about one problem collapse into one row
+    occurrences: Mapped[int] = mapped_column(Integer, default=1)
+    last_event_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    payload: Mapped[dict] = mapped_column(JSON, default=dict)
 
 
 class TelegramPairing(Base, BusinessRow):
@@ -72,3 +80,7 @@ class TelegramPairing(Base, BusinessRow):
     delivery_failures: Mapped[int] = mapped_column(Integer, default=0)
     blocked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     context: Mapped[dict] = mapped_column(JSON, default=dict)  # pinned vehicle/case context for the chat
+    # added by the reminders/telegram domain (add-only)
+    token_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    revoke_reason: Mapped[str | None] = mapped_column(String, nullable=True)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)

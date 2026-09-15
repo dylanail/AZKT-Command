@@ -10,6 +10,7 @@ import { routeAllowed } from "./nav";
 const Home = lazy(() => import("../screens/home/Home"));
 const Vehicles = lazy(() => import("../screens/vehicles/Vehicles"));
 const VehicleDetail = lazy(() => import("../screens/vehicles/VehicleDetail"));
+const VehicleIntake = lazy(() => import("../screens/vehicles/Intake"));
 const Sales = lazy(() => import("../screens/sales/Sales"));
 const ImportRequests = lazy(() => import("../screens/requests/ImportRequests"));
 const ImportRequestDetail = lazy(() => import("../screens/requests/ImportRequestDetail"));
@@ -29,6 +30,7 @@ const Login = lazy(() => import("../screens/auth/Login"));
 const Invite = lazy(() => import("../screens/auth/Invite"));
 const Denied = lazy(() => import("../screens/auth/Denied"));
 const Expired = lazy(() => import("../screens/auth/Expired"));
+const Shipments = lazy(() => import("../screens/shipments/Shipments"));
 const ShipmentDetail = lazy(() => import("../screens/shipments/ShipmentDetail"));
 const ListingEditor = lazy(() => import("../screens/listings/ListingEditor"));
 const CandidateDetail = lazy(() => import("../screens/candidates/CandidateDetail"));
@@ -90,7 +92,9 @@ export default function AppRoutes() {
         <Route element={<RequireAuth><Shell /></RequireAuth>}>
           <Route index element={<Guard><Suspense fallback={<PageLoading />}><RoleHome /></Suspense></Guard>} />
           <Route path="/vehicles" element={<Guard><Suspense fallback={<PageLoading title="Vehicles" />}><Vehicles /></Suspense></Guard>} />
+          <Route path="/vehicles/intake" element={<Guard><Suspense fallback={<PageLoading title="Book in vehicle" />}><VehicleIntake /></Suspense></Guard>} />
           <Route path="/vehicles/:id" element={<Guard><Suspense fallback={<PageLoading />}><VehicleDetail /></Suspense></Guard>} />
+          <Route path="/vehicles/:id/intake" element={<Guard><Suspense fallback={<PageLoading title="Add update" />}><VehicleIntake /></Suspense></Guard>} />
           <Route path="/sales" element={<Guard><Suspense fallback={<PageLoading title="Sales" />}><Sales /></Suspense></Guard>} />
           <Route path="/requests" element={<Guard><Suspense fallback={<PageLoading title="Import requests" />}><ImportRequests /></Suspense></Guard>} />
           <Route path="/requests/:id" element={<Guard><Suspense fallback={<PageLoading />}><ImportRequestDetail /></Suspense></Guard>} />
@@ -109,6 +113,7 @@ export default function AppRoutes() {
           <Route path="/settings/:section" element={<Guard><Suspense fallback={<PageLoading title="Settings" />}><Settings /></Suspense></Guard>} />
           <Route path="/approvals" element={<Guard><PermGuard perm="approve"><Suspense fallback={<PageLoading title="Approvals" />}><ApprovalsList /></Suspense></PermGuard></Guard>} />
           <Route path="/approvals/:id" element={<Guard><Suspense fallback={<PageLoading />}><ApprovalReview /></Suspense></Guard>} />
+          <Route path="/shipments" element={<Guard><Suspense fallback={<PageLoading title="Shipments" />}><Shipments /></Suspense></Guard>} />
           <Route path="/shipments/:id" element={<Guard><Suspense fallback={<PageLoading />}><ShipmentDetail /></Suspense></Guard>} />
           <Route path="/listings/:id" element={<Guard><Suspense fallback={<PageLoading />}><ListingEditor /></Suspense></Guard>} />
           <Route path="/candidates/:id" element={<Guard><Suspense fallback={<PageLoading />}><CandidateDetail /></Suspense></Guard>} />
