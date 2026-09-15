@@ -18,7 +18,7 @@ import { useCommand } from "../../../lib/useCommand";
 import { useQuery } from "../../../lib/useQuery";
 import {
   Button, Chip, EmptyState, ErrorState, Expander, Field, GlassPanel, Input, KeyValues, Loading, Notice,
-  NotRecorded, When,
+  NotRecorded, Select, When,
 } from "../../../ui";
 import type { ConnectionsResp } from "./types";
 
@@ -41,6 +41,8 @@ interface SiteProfile {
   pause_reason: string | null;
   preview: { at?: string; staging_url?: string; ok?: boolean; errors?: string[]; warnings?: string[]; written?: boolean };
   connection_id: string | null;
+  sku_strategy?: string;
+  sku_prefix?: string | null;
   validated_at: string | null; activated_at: string | null; activated_by: string | null;
   discovered_at: string | null; drift_detected_at: string | null; created_at: string | null;
 }
@@ -95,11 +97,17 @@ export function WebsiteSection() {
   const profile = q.data?.active || q.data?.versions?.[0] || null;
   const [baseUrl, setBaseUrl] = useState("");
   const [stagingUrl, setStagingUrl] = useState("");
+  const [skuStrategy, setSkuStrategy] = useState("preserve");
+  const [skuPrefix, setSkuPrefix] = useState("");
   useEffect(() => {
     if (!profile) return;
     setBaseUrl((b) => b || profile.base_url || "");
     setStagingUrl((s) => s || profile.staging_url || "");
+    setSkuStrategy(profile.sku_strategy || "preserve");
+    setSkuPrefix(profile.sku_prefix || "");
   }, [profile?.id]);  // eslint-disable-line react-hooks/exhaustive-deps
+  const skuDirty = !!profile
+    && (skuStrategy !== (profile.sku_strategy || "preserve") || skuPrefix !== (profile.sku_prefix || ""));
 
   /* Is the site connected at all? The adapter refuses with these exact reasons (adapters/wordpress.py). */
   const wp = conns.data?.items?.find((c) => c.provider === "wordpress") || null;
@@ -220,6 +228,38 @@ export function WebsiteSection() {
                       <Input type="url" value={stagingUrl} onChange={(e) => setStagingUrl(e.target.value)} placeholder="https://staging…" disabled={!manage && !draft} />
                     </Field>
                   </div>
+
+                  <div className="form-grid">
+                    <Field label="Product numbers (SKU)"
+                      hint="Your shop numbers its own products, so by default AZKT never touches that column and
+                            recognises its own listings by a hidden marker instead.">
+                      <Select value={skuStrategy} onChange={(e) => setSkuStrategy(e.target.value)} disabled={!manage}>
+                        <option value="preserve">Leave the site's SKU alone (recommended)</option>
+                        <option value="stock_no">Write the AZKT stock number as the SKU</option>
+                        <option value="prefix">Write a prefixed stock number</option>
+                      </Select>
+                    </Field>
+                    {skuStrategy === "prefix" ? (
+                      <Field label="Prefix" hint="Goes in front of the stock number, e.g. AZKT-">
+                        <Input value={skuPrefix} onChange={(e) => setSkuPrefix(e.target.value)}
+                          placeholder="AZKT-" disabled={!manage} />
+                      </Field>
+                    ) : null}
+                  </div>
+                  {skuDirty ? (
+                    <div className="row-wrap">
+                      <Button variant="soft" loading={busy("sku")} disabled={!manage} disabledReason={whyNot("connections")}
+                        onClick={() => act("sku", { profile_id: profile.id, sku_strategy: skuStrategy,
+                                                    sku_prefix: skuPrefix.trim() || null },
+                                          "Saved. It applies to the next publish.")}>
+                        Save the SKU rule
+                      </Button>
+                      <Button variant="ghost" onClick={() => {
+                        setSkuStrategy(profile.sku_strategy || "preserve");
+                        setSkuPrefix(profile.sku_prefix || "");
+                      }}>Undo</Button>
+                    </div>
+                  ) : null}
 
                   <div className="row-wrap">
                     <Button variant="soft" loading={busy("discover")} disabled={!!discoverReason} disabledReason={discoverReason}
