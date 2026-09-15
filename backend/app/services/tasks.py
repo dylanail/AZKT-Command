@@ -11,6 +11,7 @@ from sqlalchemy import select
 from ..core.errors import Blocked, Conflict, NotFound, ValidationFailed
 from ..core.ids import sha256_hex
 from ..core.time import ensure_aware, reminder_fire_at
+from ..domain.access import assert_vehicle_visible
 from ..domain.commands import CommandContext, command
 from ..models.tasks import REMINDER_KINDS, TASK_STATUSES, TASK_TYPES, Case, Commitment, Task
 
@@ -483,6 +484,19 @@ async def tasks_reopen(ctx: CommandContext, inp: TaskStatusIn) -> dict:
 
 
 # ── Cases ────────────────────────────────────────────────────────────────────
+CASE_STATUSES = ("open", "waiting", "blocked", "needs_owner", "resolved", "cancelled")
+COMMITMENT_STATUSES = ("proposed", "open", "met", "missed", "withdrawn")
+COMMITMENT_CLOSED = ("met", "missed", "withdrawn")
+
+
+def serialize_commitment(c: Commitment) -> dict:
+    return {"id": c.id, "version": c.version, "text": c.text, "status": c.status, "contact_id": c.contact_id,
+            "vehicle_id": c.vehicle_id, "opportunity_id": c.opportunity_id, "made_by": c.made_by,
+            "made_at": c.made_at.isoformat() if c.made_at else None,
+            "due_at": c.due_at.isoformat() if c.due_at else None,
+            "source_kind": c.source_kind, "source_id": c.source_id}
+
+
 def serialize_case(c: Case) -> dict:
     return {"id": c.id, "version": c.version, "title": c.title, "kind": c.kind, "status": c.status,
             "owner_role": c.owner_role, "owner_user_id": c.owner_user_id, "vehicle_id": c.vehicle_id,
@@ -544,8 +558,13 @@ async def cases_update(ctx: CommandContext, inp: CaseUpdateIn) -> dict:
     c = (await ctx.db.execute(select(Case).where(Case.id == inp.case_id).with_for_update())).scalar_one_or_none()
     if c is None:
         raise NotFound("case not found")
+    if c.vehicle_id:
+        # a case is writable on exactly the terms it is readable on (routers/tasks.list_cases)
+        await assert_vehicle_visible(ctx.db, ctx.actor, c.vehicle_id)
     if inp.expected_version is not None and c.version != inp.expected_version:
         raise Conflict("case changed", current_version=c.version)
+    if inp.status is not None and inp.status not in CASE_STATUSES:
+        raise ValidationFailed(f"status must be one of {CASE_STATUSES}")
     if inp.status == "resolved" and not (inp.evidence or c.evidence or inp.summary or c.summary):
         raise Blocked("resolving a case needs evidence or a summary")
     for f in ("status", "summary", "next_action", "next_check_at", "waiting_on", "owner_user_id"):
@@ -585,8 +604,61 @@ async def commitments_record(ctx: CommandContext, inp: CommitmentIn) -> dict:
     await ctx.db.flush()
     ctx.changed.append({"kind": "commitment", "id": c.id, "version": c.version})
     ctx.record(f"Commitment recorded: {c.text}", entity_kind="commitment", entity_id=c.id, kind="message", state=c.status)
-    return {"commitment": {"id": c.id, "text": c.text, "status": c.status, "due_at": c.due_at.isoformat() if c.due_at else None,
-                           "contact_id": c.contact_id, "vehicle_id": c.vehicle_id}}
+    ctx.emit("commitment.changed", aggregate_type="commitment", aggregate_id=c.id, aggregate_version=c.version,
+             payload={"commitment_id": c.id, "change": "recorded", "status": c.status,
+                      "contact_id": c.contact_id, "vehicle_id": c.vehicle_id})
+    return {"commitment": serialize_commitment(c)}
+
+
+class CommitmentUpdateIn(BaseModel):
+    commitment_id: str
+    expected_version: int | None = None
+    status: str | None = None          # proposed|open|met|missed|withdrawn
+    due_at: datetime | None = None
+    text: str | None = None
+    note: str | None = None            # why it was missed or withdrawn; recorded in activity
+
+
+@command("commitments.update", input=CommitmentUpdateIn, perm="tasks.write", action_class="internal",
+         summary=lambda p: f"Mark promise {p.commitment_id[:8]} {p.status or 'updated'}",
+         description="Resolve or re-date a promise made to a person: kept (met), missed, withdrawn, or reopened. "
+                     "Marking one missed or withdrawn needs a note, so the record says what happened rather than "
+                     "just closing the row.")
+async def commitments_update(ctx: CommandContext, inp: CommitmentUpdateIn) -> dict:
+    c = (await ctx.db.execute(select(Commitment).where(Commitment.id == inp.commitment_id)
+                              .with_for_update())).scalar_one_or_none()
+    if c is None:
+        raise NotFound("promise not found")
+    if c.vehicle_id:
+        # writable on exactly the terms it is readable on (routers/tasks.list_promises)
+        await assert_vehicle_visible(ctx.db, ctx.actor, c.vehicle_id)
+    if inp.expected_version is not None and c.version != inp.expected_version:
+        raise Conflict("promise changed", current_version=c.version)
+    if inp.status is not None and inp.status not in COMMITMENT_STATUSES:
+        raise ValidationFailed(f"status must be one of {COMMITMENT_STATUSES}")
+    if inp.status in ("missed", "withdrawn") and not (inp.note or "").strip():
+        raise Blocked(f"marking a promise {inp.status} needs a note saying what happened")
+    if inp.status == "met" and c.status in COMMITMENT_CLOSED and c.status != "met":
+        raise Blocked(f"this promise is already recorded as {c.status}; reopen it first",
+                      current_status=c.status)
+    before = c.status
+    if inp.status is not None:
+        c.status = inp.status
+    if inp.due_at is not None:
+        if c.status in COMMITMENT_CLOSED:
+            raise Blocked("a closed promise cannot be re-dated; reopen it first", current_status=c.status)
+        c.due_at = inp.due_at
+    if inp.text is not None:
+        c.text = inp.text.strip() or c.text
+    ctx.touch(c, "commitment")
+    detail = {"from": before, "to": c.status, "note": (inp.note or None),
+              "due_at": c.due_at.isoformat() if c.due_at else None}
+    ctx.record(f"Promise {c.status}: {c.text[:80]}", entity_kind="commitment", entity_id=c.id, kind="message",
+               state=c.status, details=detail)
+    ctx.emit("commitment.changed", aggregate_type="commitment", aggregate_id=c.id, aggregate_version=c.version,
+             payload={"commitment_id": c.id, "change": "updated", "status": c.status, "from": before,
+                      "contact_id": c.contact_id, "vehicle_id": c.vehicle_id})
+    return {"commitment": serialize_commitment(c)}
 
 
 def reminder_time(t: Task) -> datetime | None:
