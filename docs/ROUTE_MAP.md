@@ -29,7 +29,8 @@ screens below. Every record has a stable deep link; list filters live in the URL
 | Finance | `/finance` (`?tab=matching|receivables|payables|costs|sold|ledger&period=&from=&to=`) | Needs matching, Receivables, Payables, Vehicle costs, Sold cohort, Ledger mappings; export CSV. `finance.status` roles see states without amounts. |
 | Settings → Connections | `/settings/connections` | Gmail (business/personal), Drive, Sheets, Square, WordPress/WooCommerce, Telegram; freshness and coverage. |
 | Settings → Team & access / People | `/settings/team` | Owner: invitations (one-time links, reissue, revoke), roles, per-person permission overrides, cost grants. Manager: scoped People page. |
-| Settings → Reminders | `/settings/reminders` | Channel per reminder kind, quiet hours, digest, Telegram pairing, recent deliveries. |
+| Settings → Reminders | `/settings/reminders` | Channel per reminder kind, digest, business timing (read-only), recent deliveries. |
+| Settings → Telegram | `/settings/telegram` | Bot status, owner pairing (deep link or `/start <token>`), set webhook, confirm/revoke pairings. |
 | Settings → Automation & permissions | `/settings/automation` | Pause switches, spending caps, standing permissions, stage gates, model budget. |
 | Settings → External agents | `/settings/external-agents` | Register / rotate / revoke MCP+HTTP clients with scopes, record limits, quotas; connect URLs and tool catalog. |
 | Settings → Procedures / Teach | `/settings/procedures` | Teach, versions, tests, promote / roll back. |
