@@ -26,7 +26,7 @@ from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 
 from pydantic import BaseModel
-from sqlalchemy import select, update
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..core.errors import Denied, ValidationFailed
@@ -39,6 +39,7 @@ from ..domain.commands import CommandContext, command
 from ..domain.events import on_event
 from ..domain.jobs import sweep
 from ..models.finance import COST_CATEGORIES, CostItem, Payment
+from ..models.runtime import Event
 from ..models.legacy import Setting
 from ..models.reporting import MetricSnapshot
 from ..models.vehicles import Vehicle
@@ -61,6 +62,11 @@ PROFIT_CAVEAT = ("gross profit on the sold cohort only; not business net profit 
 # Canonical events that make a cached snapshot stale (spec §2.4, §12.1).
 INVALIDATING_EVENTS = ("sale.*", "cost.*", "payment.allocated", "deposit.confirmed", "intake.applied",
                        "milestone.changed", "metrics.invalidated")
+# Cash is only cash once the provider settled it. `reported` is an unverified claim, `pending` has not cleared and
+# `failed`/`cancelled` never arrived — Finance refuses to allocate any of them, so Home must not present them as
+# money received or paid out either (spec §6.3, invariant 15).
+SETTLED_PAYMENT_STATUSES = ("completed", "refunded", "partially_refunded", "disputed")
+SETTLED_REFUND_STATUSES = ("completed", "approved")
 
 
 # ── period ───────────────────────────────────────────────────────────────────
@@ -183,7 +189,6 @@ async def compute(db: AsyncSession, *, period: dict, now: datetime | None = None
     for r in sale_rows:
         lines = lines_by_vehicle.get(r["vehicle_id"], [])
         gaps = _required_gaps(lines, required)
-        v = vehicles.get(r["vehicle_id"])
         if gaps:
             missing_required.append({"vehicle_id": r["vehicle_id"], "stock_no": r["stock_no"],
                                      "sale_id": r["sale"]["id"], "gaps": gaps})
@@ -250,7 +255,9 @@ async def compute(db: AsyncSession, *, period: dict, now: datetime | None = None
             ("net vehicle sales value is unknown" if cf["unknown_net"] else "no completed sales in this period"),
             "reasons": blocking, "caveat": PROFIT_CAVEAT},
         "gross_margin": margin,
-        "days_to_sale": durations["acquisition_to_sale"],
+        "days_to_sale": {**durations["acquisition_to_sale"],
+                         "drilldown": {"received_to_ready": durations["received_to_ready"],
+                                       "listed_to_sold": durations["listed_to_sold"]}},
         "unsold_inventory_cost": {
             "label": "Unsold inventory cost", "value": unsold["total"], "currency": USD, "as_of": unsold["as_of"],
             "point_in_time": True, "vehicles": len(unsold["vehicles"]),
@@ -330,9 +337,8 @@ async def _durations(db: AsyncSession, sale_rows: list[dict], vehicles: dict) ->
         r2r.append((vid, _days(v.received_at if v else None, v.ready_at if v else None)))
         l2s.append((vid, _days(v.listed_at if v else None, completed)))
     return {
-        "acquisition_to_sale": {**_duration(acq, "Days to sale",
-                                            "median calendar days from recorded acquisition to completed sale"),
-                                "median_days_finance": None},
+        "acquisition_to_sale": _duration(acq, "Days to sale",
+                                         "median calendar days from recorded acquisition to completed sale"),
         "received_to_ready": _duration(r2r, "Received to ready",
                                        "median calendar days from received at the shop to ready for sale"),
         "listed_to_sold": _duration(l2s, "Listed to sold",
@@ -392,7 +398,13 @@ async def cash_flows(db: AsyncSession, a: datetime, b: datetime) -> dict:
     rows = (await db.execute(select(Payment).where(Payment.occurred_at.is_not(None), Payment.occurred_at >= a,
                                                    Payment.occurred_at < b))).scalars().all()
     receipts, payouts, unknown_currency, receipt_ids, payout_ids = ZERO, ZERO, [], [], []
+    unsettled: list[dict] = []
     for p in rows:
+        # a claimed, pending, failed or cancelled payment is not cash: it is disclosed, never counted
+        if p.status not in SETTLED_PAYMENT_STATUSES:
+            unsettled.append({"payment_id": p.id, "status": p.status, "is_payout": bool(p.is_payout),
+                              "reason": "not settled by the provider"})
+            continue
         if p.currency != USD:
             unknown_currency.append({"payment_id": p.id, "currency": p.currency, "amount": str(p.amount)})
             continue
@@ -410,6 +422,11 @@ async def cash_flows(db: AsyncSession, a: datetime, b: datetime) -> dict:
             at = ensure_aware(_parse(r.get("at"))) or ensure_aware(p.occurred_at)
             if at is None or not (a <= at < b):
                 continue
+            # the same settlement rule Finance uses when it totals `refunded_amount`
+            if (r.get("status") or "completed").lower() not in SETTLED_REFUND_STATUSES:
+                unsettled.append({"payment_id": p.id, "refund_id": r.get("id"), "status": r.get("status"),
+                                  "reason": "refund not settled by the provider"})
+                continue
             if (r.get("currency") or p.currency) != USD:
                 unknown_currency.append({"payment_id": p.id, "currency": r.get("currency") or p.currency,
                                          "amount": str(r.get("amount"))})
@@ -423,10 +440,13 @@ async def cash_flows(db: AsyncSession, a: datetime, b: datetime) -> dict:
         "period": {"from": a.isoformat(), "to": b.isoformat()}, "currency": USD,
         "receipts": money(quantize(receipts, USD), USD), "refunds": money(quantize(refunds, USD), USD),
         "payouts": money(quantize(payouts, USD), USD),
-        "counts": {"receipts": len(receipt_ids), "refunds": len(refund_rows), "payouts": len(payout_ids)},
+        "counts": {"receipts": len(receipt_ids), "refunds": len(refund_rows), "payouts": len(payout_ids),
+                   "unsettled_excluded": len(unsettled), "unknown_currency": len(unknown_currency)},
         "payment_ids": sorted(receipt_ids), "payout_ids": sorted(payout_ids), "refund_rows": refund_rows,
-        "unknown_currency": unknown_currency,
-        "note": "cash movement is never profit; payouts and deposits are excluded from the sold cohort",
+        "unknown_currency": unknown_currency, "unsettled": unsettled,
+        "settled_statuses": list(SETTLED_PAYMENT_STATUSES),
+        "note": "cash movement is never profit; payouts and deposits are excluded from the sold cohort, and only "
+                "provider-settled payments are counted",
     }
 
 
@@ -456,8 +476,11 @@ async def _snapshot(db: AsyncSession, key: str) -> MetricSnapshot | None:
                              .order_by(MetricSnapshot.as_of.desc()))).scalars().first()
 
 
-async def store_snapshot(db: AsyncSession, period: dict, payload: dict, *, commit: bool = True) -> MetricSnapshot:
-    """Write the rebuildable cache row. Carries no business fact — it can be dropped and recomputed."""
+async def store_snapshot(db: AsyncSession, period: dict, payload: dict, *, commit: bool = False) -> MetricSnapshot:
+    """Write the rebuildable cache row. Carries no business fact — it can be dropped and recomputed.
+
+    Never commits by default: the caller owns its transaction. A read path must not call this at all
+    (ARCHITECTURE rules 1 and 10: writes go through commands, GETs have no side effects)."""
     key = snapshot_key(period)
     row = await _snapshot(db, key)
     if row is None:
@@ -483,6 +506,22 @@ async def store_snapshot(db: AsyncSession, period: dict, payload: dict, *, commi
     return row
 
 
+async def changed_since(db: AsyncSession, as_of: datetime | None) -> bool:
+    """True when a canonical event that invalidates the cohort happened after the snapshot was computed.
+
+    The @on_event handlers below mark snapshots stale, but they only run once the worker has drained the
+    outbox. Checking the event log directly means a lagging worker can never make Home serve a silently
+    out-of-date total (spec §2.4)."""
+    if as_of is None:
+        return True
+    clauses = [Event.type.like("sale.%"), Event.type.like("cost.%"),
+               Event.type.in_(("payment.allocated", "deposit.confirmed", "intake.applied", "milestone.changed",
+                               "metrics.invalidated"))]
+    n = (await db.execute(select(func.count()).select_from(Event)
+                          .where(Event.happened_at > ensure_aware(as_of), or_(*clauses)))).scalar_one()
+    return bool(n)
+
+
 async def mark_stale(db: AsyncSession, reason: str, *, commit: bool = False) -> int:
     """Canonical change → every cached period is stale; recompute happens lazily on the next read."""
     res = await db.execute(update(MetricSnapshot).where(MetricSnapshot.stale.is_(False))
@@ -500,9 +539,22 @@ for _pattern in INVALIDATING_EVENTS:
 
 @sweep("reporting.refresh_metrics", 300)
 async def refresh_stale_snapshots(session_factory) -> dict:
-    """Recompute snapshots that events marked stale. Never creates one on its own — reads do that."""
-    refreshed, failed = 0, 0
+    """Recompute snapshots that events marked stale.
+
+    Reads never write the cache (ARCHITECTURE rule 10), so this sweep is the only background writer: it seeds the
+    current month once when no Home snapshot exists yet and then keeps every cached period fresh."""
+    refreshed, failed, seeded = 0, 0, 0
     async with session_factory() as db:
+        have = (await db.execute(select(func.count()).select_from(MetricSnapshot)
+                                 .where(MetricSnapshot.key.like(f"{SNAPSHOT_PREFIX}:%")))).scalar_one()
+        if not have:
+            try:
+                p = resolve_period("month", PHOENIX)
+                await store_snapshot(db, p, await compute(db, period=p), commit=True)
+                seeded = 1
+            except Exception as e:  # noqa: BLE001
+                await db.rollback()
+                log.warning("could not seed the Home metric snapshot: %s", e)
         rows = (await db.execute(select(MetricSnapshot).where(MetricSnapshot.stale.is_(True)).limit(20))).scalars().all()
         for row in rows:
             try:
@@ -518,7 +570,7 @@ async def refresh_stale_snapshots(session_factory) -> dict:
                 row.last_error = f"{type(e).__name__}: {e}"[:200]
                 failed += 1
         await db.commit()
-    return {"refreshed": refreshed, "failed": failed}
+    return {"refreshed": refreshed, "failed": failed, "seeded": seeded}
 
 
 # ── role safety ──────────────────────────────────────────────────────────────
@@ -558,7 +610,8 @@ def sanitize(actor: Actor, payload: dict) -> dict:
     out["values"]["gross_margin"]["available"] = False
     out["values"]["gross_margin"]["unavailable_reason"] = "amounts hidden (costs.read required)"
     out["cash_flows"] = {"label": "Cash flows", "money_hidden": True,
-                         "counts": payload["cash_flows"]["counts"], "period": payload["cash_flows"]["period"]}
+                         "counts": payload["cash_flows"]["counts"], "period": payload["cash_flows"]["period"],
+                         "unsettled": payload["cash_flows"].get("unsettled", [])}
     out["restatements"] = [{k: v for k, v in r.items() if k not in ("old", "new", "amount")} for r in payload["restatements"]]
     out["visible"] = "counts and timing only"
     return out
@@ -567,8 +620,12 @@ def sanitize(actor: Actor, payload: dict) -> dict:
 # ── public read API ──────────────────────────────────────────────────────────
 async def metrics(db: AsyncSession, actor: Actor, period: str = "month", start=None, end=None,
                   tz: str = PHOENIX, *, now: datetime | None = None, use_cache: bool = True,
-                  store: bool = True, refresh: bool = False) -> dict:
-    """Home business overview for `period`. Deterministic; no model call anywhere in this path."""
+                  store: bool = False, refresh: bool = False) -> dict:
+    """Home business overview for `period`. Deterministic; no model call anywhere in this path.
+
+    This is a pure read: it never writes and never commits (`store` stays off for every HTTP GET, Home section
+    and agent read tool). The `metric_snapshots` cache is written only by the `reporting.recompute` command and
+    the worker sweep, so a read can never commit a caller's in-flight transaction (ARCHITECTURE rules 1, 10)."""
     reason = _deny_reason(actor)
     if reason:
         raise Denied(reason)
@@ -580,7 +637,11 @@ async def metrics(db: AsyncSession, actor: Actor, period: str = "month", start=N
     p = resolve_period(period, tz, start, end, ref=now)
     key = snapshot_key(p)
     row = await _snapshot(db, key) if use_cache else None
-    if row is not None and not row.stale and not refresh and (row.computation_version or 0) == COMPUTATION_VERSION:
+    # an explicit as_of asks for the numbers at that instant (point-in-time values such as unsold inventory move
+    # with it), and the cache key cannot carry it — so a caller-supplied `now` always recomputes.
+    if (row is not None and now is None and not row.stale and not refresh
+            and (row.computation_version or 0) == COMPUTATION_VERSION
+            and not await changed_since(db, row.as_of)):
         payload = dict(row.values or {})
         if payload:
             payload["served_from"] = "snapshot"
@@ -600,11 +661,9 @@ async def metrics(db: AsyncSession, actor: Actor, period: str = "month", start=N
             return sanitize(actor, stale)
         raise
     if store:
-        try:
-            await store_snapshot(db, p, payload)
-        except Exception:  # noqa: BLE001
-            await db.rollback()
-            log.warning("could not cache metric snapshot %s", key)
+        # only a writer (the reporting.recompute command or the worker sweep) passes store=True; the row is
+        # flushed into the caller's transaction and committed by whoever owns it.
+        await store_snapshot(db, p, payload)
     return sanitize(actor, payload)
 
 
@@ -632,8 +691,10 @@ async def drilldown(db: AsyncSession, actor: Actor, metric: str, period: str = "
                      "by_category": out["values"]["vehicle_costs_sold_cohort"]["by_category"],
                      "unallocated": out["values"]["vehicle_costs_sold_cohort"]["unallocated"]})
     if metric == "days_to_sale":
+        d = out["values"]["days_to_sale"]
         body.update({"vehicle_ids": ids["vehicle_ids"], "rows": out["sales"],
-                     "durations": {"acquisition_to_sale": out["values"]["days_to_sale"]},
+                     "durations": {"acquisition_to_sale": {k: v for k, v in d.items() if k != "drilldown"},
+                                   **d["drilldown"]},
                      "excluded_vehicle_ids": ids["days_to_sale_vehicle_ids"]})
     if metric == "unsold_inventory_cost":
         body.update({"vehicle_ids": ids["unsold_vehicle_ids"], "as_of": out["values"]["unsold_inventory_cost"]["as_of"],

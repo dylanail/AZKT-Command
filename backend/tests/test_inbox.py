@@ -11,7 +11,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 
 import pytest_asyncio
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 
 from backend.app import db as dbmod
 from backend.app.adapters import gmail as gmail_mod
@@ -20,7 +20,7 @@ from backend.app.core.config import settings
 from backend.app.core.errors import Unsupported
 from backend.app.domain import jobs
 from backend.app.domain.commands import dispatch
-from backend.app.models.comms import Connection, Conversation, Message, ProviderEvent
+from backend.app.models.comms import Connection, Conversation, Draft, Message, ProviderEvent, SyncCursor
 from backend.app.models.contacts import Contact, ContactIdentity
 from backend.app.models.knowledge import CorpusChunk
 from backend.app.models.notify import Notification
@@ -66,18 +66,39 @@ async def _disconnect_gmail(db):
     await db.commit()
 
 
+async def reset_mailbox(db, conn: Connection) -> None:
+    """Start each scenario from a known mailbox: drop this connection's threads, messages, drafts and cursor.
+    There is exactly one Connection row per provider, as in production."""
+    conv_ids = (await db.execute(select(Conversation.id).where(Conversation.connection_id == conn.id))).scalars().all()
+    if conv_ids:
+        await db.execute(delete(Draft).where(Draft.conversation_id.in_(conv_ids)))
+        await db.execute(delete(Message).where(Message.conversation_id.in_(conv_ids)))
+        await db.execute(delete(Conversation).where(Conversation.id.in_(conv_ids)))
+    await db.execute(delete(Message).where(Message.connection_id == conn.id))
+    await db.execute(delete(SyncCursor).where(SyncCursor.connection_id == conn.id))
+
+
 async def make_conn(db, provider: str, identity: str, *, config: dict | None = None, caps: dict | None = None,
                     fresh_minutes: int = 1, status: str = "connected", coverage_to_days: int = 0) -> Connection:
     now = datetime.now(timezone.utc)
-    await _disconnect_gmail(db)
-    conn = Connection(provider=provider, label=conn_svc.PROVIDER_LABELS.get(provider, provider),
-                      account_identity=identity, status=status, config=config or {},
-                      capabilities=caps or {"send": True, "drafts": True, "labels": False},
-                      granted_scopes=["https://www.googleapis.com/auth/gmail.readonly"],
-                      last_attempt_at=now, last_success_at=now - timedelta(minutes=fresh_minutes),
-                      coverage_from=now - timedelta(days=60), coverage_to=now - timedelta(days=coverage_to_days),
-                      watch_expires_at=now + timedelta(days=6), environment="test")
-    db.add(conn)
+    conn = await conn_svc.get(db, provider, create=True)
+    await reset_mailbox(db, conn)
+    conn.label = conn_svc.PROVIDER_LABELS.get(provider, provider)
+    conn.account_identity = identity
+    conn.status = status
+    conn.config = config or {}
+    conn.capabilities = caps or {"send": True, "drafts": True, "labels": False}
+    conn.granted_scopes = ["https://www.googleapis.com/auth/gmail.readonly"]
+    conn.last_attempt_at = now
+    conn.last_success_at = now - timedelta(minutes=fresh_minutes)
+    conn.coverage_from = now - timedelta(days=60)
+    conn.coverage_to = now - timedelta(days=coverage_to_days)
+    conn.watch_expires_at = now + timedelta(days=6)
+    conn.coverage_gaps = []
+    conn.excluded_counts = {}
+    conn.catch_up_state = {}
+    conn.failure = {}
+    conn.environment = "test"
     await db.commit()
     return conn
 
@@ -328,7 +349,6 @@ async def test_B03_unknown_inquiry_is_provisional_and_spam_is_reversible(db, own
 
     spam = await _conv_of(db, conn, "t-spam")
     assert spam.classification == "spam" and spam.state == "no_reply_needed" and spam.spam_reason
-    from backend.app.models.comms import Draft
     assert await db.scalar(select(func.count(Draft.id))) == 0, "no unsolicited auto-reply is ever drafted"
     from backend.app.models.runtime import ExternalAction
     assert await db.scalar(select(func.count(ExternalAction.id)).where(
@@ -481,11 +501,8 @@ async def test_inbox_api_filters_apply_permissions_and_record_scope(db, owner, m
 async def test_A02_non_owner_reads_are_scoped_and_carry_no_account_detail(db, owner, manager, client):
     """A manager may work the shared inbox; personal mail, account identities and scopes stay with the owner."""
     biz = await make_conn(db, "gmail_business", "shared@azkeitrucks.com")
-    personal = Connection(provider="gmail_personal", label="Personal", account_identity="dylxnxil@gmail.com",
-                          status="connected", config=dict(fx.PERSONAL_ALLOWLIST),
-                          last_success_at=datetime.now(timezone.utc), environment="test")
-    db.add(personal)
-    await db.commit()
+    personal = await make_conn(db, "gmail_personal", "dylxnxil@gmail.com", config=dict(fx.PERSONAL_ALLOWLIST))
+    biz = await make_conn(db, "gmail_business", "shared@azkeitrucks.com")
     FAKES.clear()
     FAKES["gmail_business"] = FakeGmail(fx.business_fixture(), connection=biz)
     await conn_svc.cursor_set(db, biz, "history", {"history_id": "100"})

@@ -617,26 +617,28 @@ async def _finance_sold_cohort(ctx: CommandContext, inp: SoldCohort) -> dict:
 
 
 class HomeMetrics(BaseModel):
-    period_from: datetime | None = None
-    period_to: datetime | None = None
+    period: str = Field(default="month", description="month | quarter | year | custom (as the Home page uses)")
+    start: str | None = Field(default=None, description="ISO date for a custom period")
+    end: str | None = Field(default=None, description="ISO date for a custom period")
 
 
-@read_tool("home.metrics", input=HomeMetrics, perm="vehicles.read",
-           description="Deterministic Home aggregates (attention queue, cohort metrics, freshness). Reports "
-                       "setup_blocked when the reporting service is not installed in this build.")
+@read_tool("home.metrics", input=HomeMetrics, perm="finance.status",
+           description="The deterministic Home business overview for a period: sold cohort, cohort costs, recorded "
+                       "gross profit and margin, coverage labels and freshness. No model is involved. Requires the "
+                       "finance permission, so it is never offered to someone who may not see business money; "
+                       "reports setup_blocked when the reporting service is not part of this build.")
 async def _home_metrics(ctx: CommandContext, inp: HomeMetrics) -> dict:
     try:
         from ..services import reporting  # type: ignore
-    except Exception:  # noqa: BLE001
+    except Exception as e:  # noqa: BLE001
         return {"status": "setup_blocked",
-                "reason": "services/reporting is not part of this build; Home metrics are unavailable here",
+                "reason": f"services/reporting is not available in this build ({type(e).__name__}); "
+                          "Home metrics cannot be computed here",
                 "alternatives": ["finance.sold_cohort", "tasks.list", "approvals.list"]}
-    fn = getattr(reporting, "home_metrics", None)
+    fn = getattr(reporting, "metrics", None) or getattr(reporting, "home_metrics", None)
     if fn is None:
-        return {"status": "setup_blocked", "reason": "reporting.home_metrics is not implemented"}
-    now = datetime.now(timezone.utc)
-    return await fn(ctx.db, ctx.actor, period_from=inp.period_from or (now - timedelta(days=90)),
-                    period_to=inp.period_to or now)
+        return {"status": "setup_blocked", "reason": "the reporting service exposes no metrics() entry point"}
+    return await fn(ctx.db, ctx.actor, inp.period, inp.start, inp.end)
 
 
 class SourceSearch(BaseModel):

@@ -27,7 +27,7 @@ from sqlalchemy import select
 from ..core.errors import Denied, ValidationFailed
 from ..domain.access import can_see_costs
 from ..domain.actors import Actor
-from ..domain.commands import CommandContext, dispatch
+from ..domain.commands import CommandContext
 from ..domain.policy import has_perm
 from ..models.runtime import ChatTurn, Mission
 from . import runtime, tools
@@ -179,7 +179,7 @@ async def _vehicle_from_text(db, actor: Actor, text: str, context: dict) -> tupl
         rows = (await db.execute(select(Vehicle).where(Vehicle.archived_at.is_(None))
                                  .where((Vehicle.make.ilike(like)) | (Vehicle.model.ilike(like))
                                         | (Vehicle.title.ilike(like)) | (Vehicle.color.ilike(like)))
-                                 .limit(10))).scalars().all()
+                                 .order_by(Vehicle.created_at.desc()).limit(25))).scalars().all()
         for v in rows:
             if (limit is None or v.id in limit) and all(c.id != v.id for c in cands):
                 cands.append(v)
@@ -360,25 +360,47 @@ async def _intake(db, ctx: CommandContext, actor: Actor, text: str, *, context: 
         return _blocked("I saved your photos and notes, but could not apply them yet", applied,
                         extra={"intake_id": intake_id})
     d = applied.data or {}
+    if d.get("decision") == "Blocked":
+        # material ambiguity: the evidence is saved, but nothing is written to a truck yet (§7.4 step 4, I03)
+        choice = d.get("choice") or {}
+        options = choice.get("candidates") or choice.get("options") or []
+        listed = ", ".join(str(c.get("stock_no") or c.get("vehicle_id") or c.get("id")) for c in options[:5])
+        return {"text": ("Your photos and notes are saved. Which truck is this? "
+                         + (f"Closest matches: {listed}." if listed else
+                            (choice.get("reason") or "I could not identify the vehicle from the evidence."))
+                         + " Nothing was written to a vehicle yet."),
+                "status": "needs_information", "mission_id": None, "run_id": None, "cursor": 0,
+                "changed": applied.changed, "approvals": [], "fast_path": "intake", "wrote": False,
+                "intake_id": intake_id,
+                "needed_input": {"question": "which vehicle?", "candidates": options,
+                                 "reasons": d.get("reasons") or []},
+                "blocks": [{"type": "intake", "id": intake_id}]}
+    r = d.get("result") or {}
     vehicle = d.get("vehicle") or {}
-    bullets = d.get("condition") or d.get("bullets") or []
-    created = d.get("tasks") or d.get("tasks_created") or []
-    failed = d.get("failed_assets") or d.get("failed") or []
-    missing = vehicle.get("missing_identity_fields") or d.get("missing") or []
-    lines = [f"Saved to {vehicle.get('title') or 'the vehicle card'} · {vehicle.get('stock_no') or ''}".strip()]
-    lines.append(f"Photos saved: {d.get('assets_saved', len(attachments))}"
-                 + (f" · {len(failed)} failed (retryable)" if failed else ""))
+    bullets = r.get("condition_bullets") or []
+    created = r.get("tasks_created") or []
+    updated = r.get("tasks_updated") or []
+    failed = r.get("photos_failed") or []
+    missing = r.get("missing") or []
+    lines = [("Created " if r.get("created") else "Updated ")
+             + f"{r.get('title') or vehicle.get('title') or 'the vehicle card'} · {r.get('stock_no') or ''}".strip()]
+    lines.append(f"Photos saved: {r.get('photos_saved', 0)}"
+                 + (f" · {len(failed)} failed (still retryable)" if failed else ""))
     if bullets:
-        lines.append("Condition at intake:\n" + "\n".join(f"· {b.get('text') if isinstance(b, dict) else b}"
-                                                          for b in bullets[:8]))
-    if created:
-        lines.append("Tasks: " + "; ".join((t.get("title") if isinstance(t, dict) else str(t)) for t in created[:8]))
+        lines.append("Condition at intake:\n" + "\n".join(
+            f"· {b.get('text') if isinstance(b, dict) else b}"
+            + (f" ({b.get('source')})" if isinstance(b, dict) and b.get("source") else "") for b in bullets[:8]))
+    if created or updated:
+        lines.append("Tasks: " + "; ".join((t.get("title") if isinstance(t, dict) else str(t))
+                                           for t in [*created, *updated][:8]))
     if missing:
-        lines.append("Still missing: " + ", ".join(missing) + " (intake incomplete — nothing was invented).")
+        lines.append("Still missing: " + ", ".join(missing) + " — intake incomplete; nothing was invented.")
+    if r.get("card_path"):
+        lines.append(f"Card: {r['card_path']}")
     return {"text": "\n".join(lines), "status": "answered", "mission_id": None, "run_id": None, "cursor": 0,
-            "changed": applied.changed, "approvals": [], "fast_path": "intake", "wrote": True,
-            "intake_id": intake_id,
-            "blocks": [{"type": "record", "kind": "vehicle", "id": vehicle.get("id"), "label": vehicle.get("stock_no")},
+            "changed": applied.changed, "approvals": [], "fast_path": "intake",
+            "wrote": True, "intake_id": intake_id, "intake_result": r,
+            "blocks": [{"type": "record", "kind": "vehicle", "id": vehicle.get("id"), "label": r.get("stock_no")},
                        {"type": "intake", "id": intake_id}]}
 
 

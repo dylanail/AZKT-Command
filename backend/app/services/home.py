@@ -18,7 +18,7 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..core.errors import Denied
+from ..core.errors import Denied, ValidationFailed
 from ..core.time import PHOENIX, ensure_aware, fmt_local
 from ..domain.access import can_see_costs, can_see_finance_status, visible_vehicle_ids
 from ..domain.actors import Actor
@@ -27,7 +27,6 @@ from ..models.finance import Document, Sale
 from ..models.listings import Publication
 from ..models.runtime import ActivityEntry, Approval, Mission
 from ..models.tasks import Case, Commitment, Task
-from ..models.vehicles import Vehicle
 from . import connections as conns
 from . import reporting, timeline as tl
 
@@ -37,7 +36,12 @@ ACTIVE_TASK_STATES = ("open", "in_progress", "blocked", "waiting", "awaiting_ver
 OPEN_APPROVAL_STATES = ("pending",)
 IN_PROGRESS_MISSION_STATES = ("running", "waiting_approval", "waiting_external", "waiting_until", "needs_information", "open")
 OPEN_CASE_STATES = ("open", "waiting", "blocked", "needs_owner")
-MODEL_FREE = True   # asserted by K05: Home never depends on the model adapter
+# Sources Home depends on before it may say "nothing needs you".
+REQUIRED_CONNECTIONS = ("gmail_business", "square", "sheets", "drive")
+# `services.connections.all_clear_possible` treats only warn/expired/degraded as stale, so a required provider that
+# has never been connected at all would still allow an all-clear on a first run. Home must not claim that nothing
+# needs attention when it has never seen the data (spec §2.2, H11), so `disconnected` counts here too.
+UNHEALTHY_CONNECTION_STATES = ("warn", "expired", "degraded", "disconnected")
 
 
 def _iso(dt: datetime | None) -> str | None:
@@ -51,10 +55,18 @@ def _day_bounds(now: datetime, tz: str) -> tuple[datetime, datetime]:
 
 
 # ── 1. status ────────────────────────────────────────────────────────────────
+def unhealthy_connections(overview: list[dict]) -> list[dict]:
+    """Required connections that cannot back an all-clear: behind, expired, degraded or never connected."""
+    return [c for c in overview if c["provider"] in REQUIRED_CONNECTIONS
+            and c["freshness"]["state"] in UNHEALTHY_CONNECTION_STATES]
+
+
 async def status(db: AsyncSession, actor: Actor, *, now: datetime, tz: str, counts: dict) -> dict:
     overview = await conns.overview(db)
-    all_clear, stale = conns.all_clear_possible(overview)
-    required = [c for c in overview if c["provider"] in ("gmail_business", "square", "sheets", "drive")]
+    unhealthy = unhealthy_connections(overview)
+    stale = [c["label"] for c in unhealthy]
+    all_clear = not stale
+    required = [c for c in overview if c["provider"] in REQUIRED_CONNECTIONS]
     parts = []
     if counts["needs_decision"]:
         parts.append(f"{counts['needs_decision']} waiting for your decision")
@@ -76,8 +88,7 @@ async def status(db: AsyncSession, actor: Actor, *, now: datetime, tz: str, coun
         "stale_connections": stale, "counts": counts,
         "connections": [{"provider": c["provider"], "label": c["label"], "status": c["status"],
                          "freshness": c["freshness"], "last_success_at": c["last_success_at"],
-                         "required": c["provider"] in ("gmail_business", "square", "sheets", "drive")}
-                        for c in overview],
+                         "required": c["provider"] in REQUIRED_CONNECTIONS} for c in overview],
         "required_connections": [c["provider"] for c in required],
         "as_of": now.isoformat(), "timezone": tz, "model_used": False,
     }
@@ -251,9 +262,12 @@ async def needs_attention(db: AsyncSession, actor: Actor, *, now: datetime, tz: 
         except Exception as e:  # noqa: BLE001
             log.debug("publications unavailable: %s", e)
 
-    # stale connections (same grouping as the status line; never a separate duplicate per workflow)
+    # stale connections (same grouping and the same required-source rule as the status line, so the summary and
+    # this group can never disagree; never a separate duplicate per workflow)
     overview = await conns.overview(db)
-    stale_rows = [c for c in overview if c["freshness"]["state"] in ("warn", "expired", "degraded")]
+    stale_rows = unhealthy_connections(overview) + [
+        c for c in overview if c["provider"] not in REQUIRED_CONNECTIONS
+        and c["freshness"]["state"] in ("warn", "expired", "degraded")]
     if stale_rows:
         add("connections_stale", "stale_connection", f"{len(stale_rows)} connection(s) need attention",
             detail="; ".join(f"{c['label']}: {c['freshness']['label']}" for c in stale_rows),
@@ -291,21 +305,23 @@ async def today(db: AsyncSession, actor: Actor, *, now: datetime, tz: str) -> di
               "owner_user_id": t.owner_user_id, "vehicle_id": t.vehicle_id, "contact_id": t.contact_id,
               "opportunity_id": t.opportunity_id, "pipeline": ("sales" if t.opportunity_id else "operations"),
               "priority": t.priority} for t in rows]
-    try:
-        sales = (await db.execute(select(Sale).where(Sale.delivery_appointment_at.is_not(None),
-                                                     Sale.delivery_appointment_at >= a,
-                                                     Sale.delivery_appointment_at < b,
-                                                     Sale.status.notin_(("cancelled", "expired"))))).scalars().all()
-        for s in sales:
-            if scope is not None and s.vehicle_id not in scope:
-                continue
-            items.append({"kind": "delivery", "id": s.id, "title": "Delivery appointment", "type": "meeting",
-                          "status": s.status, "at": _iso(s.delivery_appointment_at),
-                          "at_label": fmt_local(s.delivery_appointment_at, tz), "owner_user_id": None,
-                          "vehicle_id": s.vehicle_id, "contact_id": s.buyer_contact_id, "opportunity_id": s.opportunity_id,
-                          "pipeline": "sales", "priority": "normal"})
-    except Exception as e:  # noqa: BLE001
-        log.debug("sale appointments unavailable: %s", e)
+    # a delivery appointment carries the buyer, so it belongs to the sales pipeline reader only
+    if has_perm(actor, "sales.read"):
+        try:
+            sales = (await db.execute(select(Sale).where(Sale.delivery_appointment_at.is_not(None),
+                                                         Sale.delivery_appointment_at >= a,
+                                                         Sale.delivery_appointment_at < b,
+                                                         Sale.status.notin_(("cancelled", "expired"))))).scalars().all()
+            for s in sales:
+                if scope is not None and s.vehicle_id not in scope:
+                    continue
+                items.append({"kind": "delivery", "id": s.id, "title": "Delivery appointment", "type": "meeting",
+                              "status": s.status, "at": _iso(s.delivery_appointment_at),
+                              "at_label": fmt_local(s.delivery_appointment_at, tz), "owner_user_id": None,
+                              "vehicle_id": s.vehicle_id, "contact_id": s.buyer_contact_id,
+                              "opportunity_id": s.opportunity_id, "pipeline": "sales", "priority": "normal"})
+        except Exception as e:  # noqa: BLE001
+            log.debug("sale appointments unavailable: %s", e)
     items.sort(key=lambda i: i["at"] or "")
     return {"available": True, "items": items, "total": len(items), "day": {"from": a.isoformat(), "to": b.isoformat()},
             "timezone": tz, "note": "the reporting period never filters today's work"}
@@ -320,6 +336,11 @@ async def in_progress(db: AsyncSession, actor: Actor, *, now: datetime, tz: str)
         missions = (await db.execute(select(Mission).where(Mission.status.in_(IN_PROGRESS_MISSION_STATES))
                                      .order_by(Mission.next_check_at.asc().nulls_last()).limit(25))).scalars().all()
         for m in missions:
+            # record scope: a mission about a vehicle outside the person's grant is not theirs to see
+            if scope is not None:
+                refs = [r.get("id") for r in (m.entity_refs or []) if r.get("kind") == "vehicle" and r.get("id")]
+                if refs and not (set(refs) & scope):
+                    continue
             out.append({"kind": "mission", "id": m.id, "title": m.outcome[:200], "status": m.status,
                         "waiting_on": m.waiting_on, "role": m.role,
                         "next_check_at": _iso(m.next_check_at),
@@ -364,23 +385,52 @@ async def completed(db: AsyncSession, actor: Actor, *, now: datetime, tz: str, l
 
 
 # ── the page ─────────────────────────────────────────────────────────────────
+async def _section(name: str, coro, *, empty: dict) -> dict:
+    """One failing section degrades to an explicit unavailable block instead of taking the whole page down.
+
+    A bad request (`ValidationFailed`, e.g. an impossible period) still propagates so the router answers 422
+    rather than pretending the page rendered. Nothing here is ever silently omitted: a section the person may not
+    see and a section that broke both come back as `available: false` with a reason (spec §2.2)."""
+    try:
+        return await coro
+    except ValidationFailed:
+        raise
+    except Denied as e:
+        return {**empty, "available": False, "reason": e.message}
+    except Exception as e:  # noqa: BLE001
+        log.exception("home section %s failed", name)
+        return {**empty, "available": False, "reason": f"this section could not be loaded ({type(e).__name__})",
+                "degraded": True}
+
+
 async def home(db: AsyncSession, actor: Actor, *, period: str = "month", start=None, end=None, tz: str = PHOENIX,
                now: datetime | None = None, horizon_days: int = 7) -> dict:
     now = ensure_aware(now) or datetime.now(timezone.utc)
-    decision = await needs_decision(db, actor, now=now, tz=tz)
-    attention = await needs_attention(db, actor, now=now, tz=tz)
-    todays = await today(db, actor, now=now, tz=tz)
+    decision = await _section("needs_decision", needs_decision(db, actor, now=now, tz=tz),
+                              empty={"items": [], "total": 0})
+    attention = await _section("needs_attention", needs_attention(db, actor, now=now, tz=tz),
+                               empty={"groups": [], "total": 0, "items_total": 0})
+    todays = await _section("today", today(db, actor, now=now, tz=tz), empty={"items": [], "total": 0})
     counts = {"needs_decision": decision["total"], "needs_attention": attention["total"], "today": todays["total"]}
     return {
         "as_of": now.isoformat(), "timezone": tz, "model_used": False,
-        "status": await status(db, actor, now=now, tz=tz, counts=counts),
-        "business_overview": await business_overview(db, actor, period=period, start=start, end=end, tz=tz, now=now),
+        "status": await _section("status", status(db, actor, now=now, tz=tz, counts=counts),
+                                 empty={"summary": "Connection status could not be read.", "all_clear": False,
+                                        "all_clear_possible": False, "stale_connections": [], "counts": counts,
+                                        "connections": [], "model_used": False}),
+        "business_overview": await _section(
+            "business_overview", business_overview(db, actor, period=period, start=start, end=end, tz=tz, now=now),
+            empty={"money_hidden": True}),
         "needs_decision": decision,
         "needs_attention": attention,
         "today": todays,
-        "vehicle_timeline": await tl.compact(db, actor, horizon_days=horizon_days, tz=tz, now=now),
-        "in_progress": await in_progress(db, actor, now=now, tz=tz),
-        "completed": await completed(db, actor, now=now, tz=tz),
+        "vehicle_timeline": await _section("vehicle_timeline",
+                                           tl.compact(db, actor, horizon_days=horizon_days, tz=tz, now=now),
+                                           empty={"items": [], "total": 0, "returned": 0}),
+        "in_progress": await _section("in_progress", in_progress(db, actor, now=now, tz=tz),
+                                      empty={"items": [], "total": 0}),
+        "completed": await _section("completed", completed(db, actor, now=now, tz=tz),
+                                    empty={"items": [], "total": 0, "collapsed": True}),
         "sections": ["status", "business_overview", "needs_decision", "needs_attention", "today",
                      "vehicle_timeline", "in_progress", "completed"],
     }

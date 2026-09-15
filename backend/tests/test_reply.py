@@ -12,7 +12,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 
 from backend.app import db as dbmod
 from backend.app.adapters import gmail as gmail_mod
@@ -25,6 +25,7 @@ from backend.app.models.knowledge import KnowledgeItem
 from backend.app.models.runtime import Approval, ExternalAction
 from backend.app.models.tasks import Commitment
 from backend.app.models.vehicles import Vehicle
+from backend.app.services import connections as conn_svc
 from backend.tests import fixtures_gmail as fx
 from backend.tests.conftest import ctx_for, run_worker_once
 
@@ -67,18 +68,31 @@ async def _disconnect_gmail(db):
 
 async def make_conn(db, *, identity: str, config: dict | None = None, caps: dict | None = None,
                     fresh_minutes: int = 1) -> Connection:
+    """One Connection row per provider, as in production; each scenario resets its mailbox."""
     now = datetime.now(timezone.utc)
-    await _disconnect_gmail(db)
-    conn = Connection(provider="gmail_business", label="Business email", account_identity=identity,
-                      status="connected", config=config or {},
-                      capabilities=caps or {"send": True, "drafts": True, "labels": False},
-                      granted_scopes=["https://www.googleapis.com/auth/gmail.readonly",
-                                      "https://www.googleapis.com/auth/gmail.send",
-                                      "https://www.googleapis.com/auth/gmail.compose"],
-                      last_attempt_at=now, last_success_at=now - timedelta(minutes=fresh_minutes),
-                      coverage_from=now - timedelta(days=60), coverage_to=now,
-                      watch_expires_at=now + timedelta(days=6), environment="test")
-    db.add(conn)
+    conn = await conn_svc.get(db, "gmail_business", create=True)
+    conv_ids = (await db.execute(select(Conversation.id).where(Conversation.connection_id == conn.id))).scalars().all()
+    if conv_ids:
+        await db.execute(delete(Draft).where(Draft.conversation_id.in_(conv_ids)))
+        await db.execute(delete(Message).where(Message.conversation_id.in_(conv_ids)))
+        await db.execute(delete(Conversation).where(Conversation.id.in_(conv_ids)))
+    await db.execute(delete(Message).where(Message.connection_id == conn.id))
+    conn.label = "Business email (info@azkeitrucks.com)"
+    conn.account_identity = identity
+    conn.status = "connected"
+    conn.config = config or {}
+    conn.capabilities = caps or {"send": True, "drafts": True, "labels": False}
+    conn.granted_scopes = ["https://www.googleapis.com/auth/gmail.readonly",
+                           "https://www.googleapis.com/auth/gmail.send",
+                           "https://www.googleapis.com/auth/gmail.compose"]
+    conn.last_attempt_at = now
+    conn.last_success_at = now - timedelta(minutes=fresh_minutes)
+    conn.coverage_from = now - timedelta(days=60)
+    conn.coverage_to = now
+    conn.watch_expires_at = now + timedelta(days=6)
+    conn.coverage_gaps = []
+    conn.failure = {}
+    conn.environment = "test"
     await db.commit()
     FAKES.clear()
     FAKES["gmail_business"] = FakeGmail(fx.business_fixture(), connection=conn)

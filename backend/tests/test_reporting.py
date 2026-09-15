@@ -166,7 +166,14 @@ async def test_K01_home_metrics_match_the_finance_sold_cohort(db, owner, k01):
     row = next(r for r in (await fq.unsold_inventory_cost(db))["vehicles"] if r["vehicle_id"] == k01["v3"])
     assert row["cost_usd"] == {"amount": "5800.00", "currency": USD}
     assert k01["v3"] in m["contributing_ids"]["unsold_vehicle_ids"]
-    assert k01["v3"] in v["projected_gross_profit"]["vehicle_ids"]     # 9500 asking − 5800 cost
+    assert all(r["label"] in ("Inventory", "Reserved") for r in (await fq.unsold_inventory_cost(db))["vehicles"])
+    # the projection is an estimate with disclosed coverage, never folded into recorded profit
+    pr = v["projected_gross_profit"]
+    assert k01["v3"] in pr["vehicle_ids"] and pr["state"] == "projected"     # 9500 asking − 5800 cost
+    assert pr["coverage"]["eligible_vehicles"] >= 1
+    assert pr["coverage"]["considered"] == pr["coverage"]["eligible_vehicles"] + len(pr["unknown_components"])
+    assert all(u.get("reason") for u in pr["unknown_components"])
+    assert v["gross_profit"]["value"] == {"amount": "6000.00", "currency": USD}   # projection not mixed in
     assert m["model_used"] is False
 
 
@@ -349,14 +356,17 @@ async def test_stale_snapshot_is_served_with_its_as_of_instead_of_a_false_zero(d
         await item(db, owner, category=cat, vehicle_id=v.id, vendor_name=f"{cat} {tag}", amount_invoiced=amt)
     await sell(db, owner, v, c, "5000.00", datetime(2020, 3, 10, tzinfo=timezone.utc))
     a = actor_of(owner)
-    fresh = await rep.metrics(db, a, "custom", date(2020, 3, 1), date(2020, 3, 31), PHOENIX)   # stores the snapshot
+    fresh = await rep.metrics(db, a, "custom", date(2020, 3, 1), date(2020, 3, 31), PHOENIX)
     assert fresh["served_from"] == "computed" and fresh["stale"] is False
     p = rep.resolve_period("custom", PHOENIX, date(2020, 3, 1), date(2020, 3, 31))
+    # the read wrote nothing: the cache is filled through the command (or the worker sweep), never by a GET
+    assert (await db.execute(select(MetricSnapshot).where(MetricSnapshot.key == rep.snapshot_key(p)))).scalars().first() is None
+    await cmd(db, owner, "reporting.recompute", {"period": "custom", "start": "2020-03-01", "end": "2020-03-31"})
     row = (await db.execute(select(MetricSnapshot).where(MetricSnapshot.key == rep.snapshot_key(p)))).scalars().first()
     assert row is not None and row.period_kind == "custom" and row.cohort_hash == rep.cohort_hash(p)
 
     cached = await rep.metrics(db, a, "custom", date(2020, 3, 1), date(2020, 3, 31), PHOENIX)
-    assert cached["served_from"] == "snapshot" and cached["as_of"] == fresh["as_of"]
+    assert cached["served_from"] == "snapshot" and cached["as_of"] == row.as_of.isoformat()
 
     await rep.mark_stale(db, "cost.changed test", commit=True)
 
@@ -365,13 +375,46 @@ async def test_stale_snapshot_is_served_with_its_as_of_instead_of_a_false_zero(d
     monkeypatch.setattr(fq, "sold_cohort", boom)
     stale = await rep.metrics(db, a, "custom", date(2020, 3, 1), date(2020, 3, 31), PHOENIX)
     assert stale["stale"] is True and stale["served_from"] == "stale_snapshot"
-    assert stale["as_of"] == fresh["as_of"] and "recompute failed" in stale["stale_reason"]
+    assert stale["as_of"] == row.as_of.isoformat() and "recompute failed" in stale["stale_reason"]
     assert stale["values"]["gross_profit"]["value"] == {"amount": "2500.00", "currency": USD}   # not a zero
 
 
+async def test_a_metrics_read_never_writes_or_commits(db, owner):
+    """Invariant 11 / ARCHITECTURE rule 10: the Home read path has no side effect. It must not create the cache
+    row and must never commit whatever transaction its caller (an HTTP GET, or an agent read tool inside a
+    running mission) happens to be in."""
+    v = Vehicle(stock_no=f"NOC-{_u()[:5].upper()}", title="uncommitted")
+    db.add(v)
+    await db.flush()
+    vid = v.id
+    before = (await db.execute(select(MetricSnapshot))).scalars().all()
+    await rep.metrics(db, actor_of(owner), "custom", date(2020, 5, 1), date(2020, 5, 31), PHOENIX)
+    after = (await db.execute(select(MetricSnapshot))).scalars().all()
+    assert {r.id for r in after} == {r.id for r in before}          # the read cached nothing
+    await db.rollback()
+    assert (await db.execute(select(Vehicle).where(Vehicle.id == vid))).scalars().first() is None
+
+
+async def test_unsettled_payments_are_never_counted_as_cash(db, owner):
+    """A claimed, failed or cancelled payment is not money: it is disclosed, never added to Home's cash flows."""
+    tag = _u()
+    when = datetime(2018, 5, 10, 12, 0, tzinfo=timezone.utc)
+    for pid, status in ((f"ok-{tag}", "COMPLETED"), (f"fail-{tag}", "FAILED"), (f"void-{tag}", "CANCELED")):
+        await cmd(db, owner, "payments.upsert_provider", {"provider": "square", "merchant_id": f"M{tag}",
+                                                          "provider_payment_id": pid, "provider_event_id": f"e-{pid}",
+                                                          "amount": "1000.00", "currency": USD, "status": status,
+                                                          "occurred_at": when.isoformat()})
+    p = rep.resolve_period("custom", PHOENIX, date(2018, 5, 1), date(2018, 5, 31))
+    cf = await rep.cash_flows(db, p["_a"], p["_b"])
+    assert cf["receipts"] == {"amount": "1000.00", "currency": USD}      # only the settled one
+    assert cf["counts"]["receipts"] == 1 and cf["counts"]["unsettled_excluded"] == 2
+    assert {u["status"] for u in cf["unsettled"]} == {"failed", "cancelled"}
+    m = await metrics(db, owner, 2018, 5, 31)
+    assert m["cash_flows"]["receipts"] == {"amount": "1000.00", "currency": USD}
+
+
 async def test_canonical_events_mark_the_snapshot_stale(db, owner):
-    a = actor_of(owner)
-    await rep.metrics(db, a, "custom", date(2020, 4, 1), date(2020, 4, 30), PHOENIX)
+    await cmd(db, owner, "reporting.recompute", {"period": "custom", "start": "2020-04-01", "end": "2020-04-30"})
     p = rep.resolve_period("custom", PHOENIX, date(2020, 4, 1), date(2020, 4, 30))
     key = rep.snapshot_key(p)
     row = (await db.execute(select(MetricSnapshot).where(MetricSnapshot.key == key))).scalars().first()
@@ -432,3 +475,34 @@ async def test_record_limited_actor_never_gets_a_partial_business_total(db):
     with pytest.raises(Denied) as e:
         await rep.metrics(db, a, "custom", date(2019, 5, 1), date(2019, 5, 31), PHOENIX, use_cache=False, store=False)
     assert "vehicles.all" in e.value.message
+
+
+async def test_days_to_sale_drilldown_carries_the_two_secondary_turnarounds(db, owner, k01):
+    d = (await metrics(db, owner, 2019, 5, 31))["values"]["days_to_sale"]
+    assert d["median_days"] == (70 + 44) / 2
+    r2r = d["drilldown"]["received_to_ready"]
+    l2s = d["drilldown"]["listed_to_sold"]
+    assert r2r["median_days"] == (10 + 12) / 2 and r2r["definition"].startswith("median calendar days from received")
+    assert l2s["median_days"] == (20 + 10) / 2
+    dd = await rep.drilldown(db, actor_of(owner), "days_to_sale", "custom", date(2019, 5, 1), date(2019, 5, 31), PHOENIX)
+    assert set(dd["durations"]) == {"acquisition_to_sale", "received_to_ready", "listed_to_sold"}
+
+
+async def test_required_cost_categories_are_configurable(db, owner, k01):
+    """The cost-completeness rule behind "Recorded gross profit" comes from the `reporting` settings row."""
+    from backend.app.models.legacy import Setting
+    row = Setting(key="reporting", value={"data": {"required_cost_categories": ["purchase", "import", "recon", "selling"]},
+                                          "version": 1})
+    db.add(row)
+    await db.commit()
+    try:
+        cats, source = await rep.required_cost_categories(db)
+        assert cats == ["purchase", "import", "recon", "selling"] and source == "settings"
+        m = await metrics(db, owner, 2019, 5, 31)
+        assert m["completeness"]["required_source"] == "settings"
+        assert m["values"]["gross_profit"]["state"] == "estimated"     # no selling costs recorded
+        assert m["values"]["gross_profit"]["value"] == {"amount": "6000.00", "currency": USD}   # the number is unchanged
+    finally:
+        await db.delete(row)
+        await db.commit()
+    assert (await rep.required_cost_categories(db))[1] == "default"

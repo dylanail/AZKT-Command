@@ -79,6 +79,8 @@ def _milestone_row(kind: str, m: VehicleMilestone | None, tz: str, shipment_rows
                "source": {"kind": None, "ref": None, "shipment_id": None}, "actor_id": None, "note": None,
                "milestone_id": None, "supersedes_id": None, "origin": None}
     # an open shipment notice that has not yet been bridged (planned/estimated) is shown as the shipment's own view
+    # two shipment kinds can feed one vehicle milestone (vessel_arrival + discharge -> arrived_port); the rows
+    # arrive ordered by created_at, so the most recently recorded notice is shown, deterministically.
     pending = [s for s in shipment_rows if SHIPMENT_TO_VEHICLE.get(s.kind) == kind and s.status in ("planned", "estimated")]
     if pending:
         s = pending[-1]
@@ -91,19 +93,32 @@ def _milestone_row(kind: str, m: VehicleMilestone | None, tz: str, shipment_rows
 def _stage(v: Vehicle, dimension: str, now: datetime) -> dict:
     state = {"logistics": v.logistics_state, "recon": v.recon_state, "commercial": v.commercial_state,
              "documents": v.documents_state}[dimension]
-    since, source = None, None
+    since, source, recorded = None, None, False
     for h in reversed(v.state_history or []):
         if h.get("dimension") == dimension and h.get("to") == state and h.get("at"):
             try:
                 since = ensure_aware(datetime.fromisoformat(h["at"]))
-                source = "state change"
+                source, recorded = "state change", True
             except ValueError:
                 since = None
             break
     if since is None:
         since, source = ensure_aware(v.created_at), "record created (no state change recorded)"
     return {"dimension": dimension, "state": state, "since": _iso(since), "since_source": source,
-            "days_in_stage": _days_between(since, now)}
+            "from_state_change": recorded, "days_in_stage": _days_between(since, now)}
+
+
+def _current_stage(stages: dict) -> dict:
+    """The stage the vehicle is actually in: the dimension whose latest *recorded* state change is the most
+    recent one (spec §2.4 "time in current stage" comes from the latest completed state change).
+
+    Picking one dimension up front (e.g. always recon) mislabels a truck that is still on a vessel as sitting in
+    the shop, so the recorded change wins; with no recorded change anywhere, logistics is the entry pipeline and
+    the row says so through `from_state_change: false`."""
+    recorded = [s for s in stages.values() if s["from_state_change"] and s["since"]]
+    if recorded:
+        return max(recorded, key=lambda s: (s["since"], s["dimension"]))
+    return stages["logistics"]
 
 
 async def _vehicle_item(db: AsyncSession, v: Vehicle, *, now: datetime, tz: str, horizon_days: int,
@@ -124,6 +139,7 @@ async def _vehicle_item(db: AsyncSession, v: Vehicle, *, now: datetime, tz: str,
 
     open_shipments = [s for s in shipments if s.status in OPEN_SHIPMENT_STATUSES]
     stages = {d: _stage(v, d, now) for d in STAGE_DIMENSIONS}
+    current_stage = _current_stage(stages)
 
     acquired = ensure_aware(v.acquired_at)
     sold_at = ensure_aware(sale.completed_at) if sale and sale.completed_at else ensure_aware(v.sold_at)
@@ -142,9 +158,10 @@ async def _vehicle_item(db: AsyncSession, v: Vehicle, *, now: datetime, tz: str,
         "exception_summary": v.exception_summary, "location": v.location,
         "states": {d: stages[d]["state"] for d in STAGE_DIMENSIONS},
         "stages": stages,
-        "current_stage": stages["recon"],
-        "time_in_current_stage": {"dimension": "recon", "since": stages["recon"]["since"],
-                                  "days": stages["recon"]["days_in_stage"], "source": stages["recon"]["since_source"]},
+        "current_stage": current_stage,
+        "time_in_current_stage": {"dimension": current_stage["dimension"], "since": current_stage["since"],
+                                  "days": current_stage["days_in_stage"], "source": current_stage["since_source"],
+                                  "from_state_change": current_stage["from_state_change"]},
         "milestones": rows,
         "milestone_history": history,
         "acquisition": _at(acquired, tz),
@@ -272,7 +289,9 @@ async def timeline(db: AsyncSession, actor: Actor, *, vehicle_ids: list[str] | N
             q = q.where(or_(Vehicle.recon_state == "ready_for_sale", Vehicle.commercial_state.in_(("listed", "reserved", "sold"))))
         else:
             raise ValidationFailed("view must be all|sourcing|shipping|shop|sales")
-    rows = (await db.execute(q.order_by(Vehicle.stock_no.asc().nulls_last(), Vehicle.created_at))).scalars().all()
+    # id breaks ties so the page is stable: vehicles created in one transaction share created_at exactly
+    rows = (await db.execute(q.order_by(Vehicle.stock_no.asc().nulls_last(), Vehicle.created_at,
+                                        Vehicle.id))).scalars().all()
     if owner:
         owned = {t.vehicle_id for t in (await db.execute(select(Task).where(Task.owner_user_id == owner,
                                                                             Task.vehicle_id.is_not(None),
@@ -292,7 +311,8 @@ async def timeline(db: AsyncSession, actor: Actor, *, vehicle_ids: list[str] | N
     shipments = (await db.execute(select(Shipment))).scalars().all()
     shipments = [s for s in shipments if set(s.vehicle_ids or []) & set(ids)]
     ship_ms = (await db.execute(select(ShipmentMilestone).where(
-        ShipmentMilestone.shipment_id.in_([s.id for s in shipments]), ShipmentMilestone.is_current.is_(True)))).scalars().all() if shipments else []
+        ShipmentMilestone.shipment_id.in_([s.id for s in shipments]), ShipmentMilestone.is_current.is_(True))
+        .order_by(ShipmentMilestone.created_at, ShipmentMilestone.id))).scalars().all() if shipments else []
 
     by_vehicle_ms: dict[str, list] = {}
     for m in ms:
@@ -355,7 +375,8 @@ async def compact(db: AsyncSession, actor: Actor, *, limit: int = 8, horizon_day
         items.append({
             "vehicle_id": i["vehicle_id"], "stock_no": i["stock_no"], "title": i["title"],
             "allocation": i["allocation"], "health": i["health"], "states": i["states"],
-            "current_stage": i["current_stage"]["state"], "days_in_stage": i["current_stage"]["days_in_stage"],
+            "current_stage": i["current_stage"]["state"], "current_stage_dimension": i["current_stage"]["dimension"],
+            "days_in_stage": i["current_stage"]["days_in_stage"],
             "days_since_acquisition": i["days_since_acquisition"],
             "last_milestone": ({"kind": last["kind"], "label": last["label"], "at": last["at"]} if last else None),
             "next_event": (i["upcoming"][0] if i["upcoming"] else None),

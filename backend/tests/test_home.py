@@ -16,7 +16,6 @@ from sqlalchemy import select
 
 from backend.app.core.time import PHOENIX
 from backend.app.domain.commands import dispatch
-from backend.app.models.comms import Connection
 from backend.app.models.contacts import Contact
 from backend.app.models.vehicles import MILESTONE_KINDS, Vehicle
 from backend.app.services import connections as conns
@@ -129,8 +128,14 @@ async def test_K04_timeline_shows_actual_versus_estimated_and_never_invents_a_da
     assert arrived["shipment_expectation"]["at"]
 
     assert item["days_since_acquisition"] == 60
+    # the current stage is the dimension whose latest *recorded* state change is the most recent one — never a
+    # fixed dimension, which would report a stage the truck was never observed in
+    cur = item["current_stage"]
+    assert cur["dimension"] in item["states"] and cur["state"] == item["states"][cur["dimension"]]
+    assert cur["from_state_change"] is True and cur["since_source"] == "state change"
     assert item["time_in_current_stage"]["days"] is not None
-    assert item["current_stage"]["state"] == item["states"]["recon"]
+    assert item["time_in_current_stage"]["dimension"] == cur["dimension"]
+    assert all(item["stages"][d]["state"] == item["states"][d] for d in item["states"])
     assert "no invented" in " ".join(out["notes"])
     assert all(m["at"] is None for m in item["milestones"] if m["status"] == "not_recorded")
     assert not any("percent" in str(m) for m in item["milestones"])
@@ -235,11 +240,15 @@ async def test_K05_drilldown_opens_finance_with_the_same_cohort(client, db, owne
     assert dd["finance_filters"]["path"] == "/api/finance/sold-cohort"
 
 
-async def test_K05_timeline_endpoint_applies_record_scope(client, db, owner, mechanic):
+async def test_K05_timeline_endpoint_applies_record_scope(client, db, owner, mechanic, en_route_sale):
+    from backend.app.domain.access import visible_vehicle_ids
     login(client, mechanic)
     r = await client.get("/api/home/timeline", params={"horizon_days": 7})
     assert r.status_code == 200
-    assert r.json()["items"] == []                         # nothing is assigned to this mechanic
+    assigned = await visible_vehicle_ids(db, actor_of(mechanic))
+    seen = {i["vehicle_id"] for i in r.json()["items"]}
+    assert assigned is not None and seen <= assigned       # only the mechanic's assigned vehicles
+    assert en_route_sale["vehicle_id"] not in seen         # a vehicle nobody assigned to them stays hidden
     login(client, owner)
     r = await client.get("/api/home/timeline", params={"horizon_days": 30, "compact": True, "limit": 5})
     assert r.status_code == 200 and r.json()["horizon_days"] == 30
@@ -309,6 +318,86 @@ async def test_H11_summary_counts_stay_deterministic_with_an_open_approval(clien
         assert row["targets"]["contacts"] == [a.id, b.id] and "related_record" in row
         assert page["needs_decision"]["total"] == len(page["needs_decision"]["items"])
     assert "never filtered by the reporting period" in page["needs_decision"]["note"]
+
+
+async def test_H11_a_required_source_that_never_synced_also_blocks_the_all_clear(db, owner, connection_rows):
+    """A first run where nothing has ever connected is not an all-clear either: Home has not seen the data."""
+    now = datetime.now(timezone.utc)
+    for row in connection_rows.values():
+        row.status, row.last_success_at, row.watch_expires_at = "connected", now, None
+    connection_rows["drive"].status, connection_rows["drive"].last_success_at = "disconnected", None
+    await db.commit()
+    counts = {"needs_decision": 0, "needs_attention": 0, "today": 0}
+    st = await home_svc.status(db, actor_of(owner), now=now, tz=PHOENIX, counts=counts)
+    assert st["all_clear_possible"] is False and st["all_clear"] is False
+    assert conns.PROVIDER_LABELS["drive"] in st["stale_connections"]
+    assert "needs attention" in st["summary"]
+    att = await home_svc.needs_attention(db, actor_of(owner), now=now, tz=PHOENIX)
+    group = next(g for g in att["groups"] if g["problem"] == "connections_stale")
+    assert any(i["provider"] == "drive" for i in group["items"])      # the summary and the group agree
+
+
+async def test_K05_the_timeline_route_uses_the_effective_grant_not_the_raw_permission_dict(client, app, db, owner):
+    """An external client's grant is the intersection of the owner's permission and its own scopes: reading
+    actor.perms directly would hand it the whole vehicle timeline without read:vehicles (invariant 14)."""
+    from backend.app.auth.deps import current_actor
+    from backend.app.domain.actors import Actor
+    from backend.app.domain.policy import effective_perms, has_perm
+
+    def _external(scopes):
+        a = Actor(kind="external", user_id=owner.id, role="owner", scope="all",
+                  perms=effective_perms("owner", {}), client_id="client-1", client_scopes=scopes)
+        assert a.perms["vehicles.read"] is True          # the raw dict alone would always allow it
+        return a
+
+    for scopes, expected in ((["read:tasks"], 403), (["read:vehicles"], 200)):
+        a = _external(scopes)
+        assert has_perm(a, "vehicles.read") is (expected == 200)
+        app.dependency_overrides[current_actor] = lambda a=a: a
+        try:
+            r = await client.get("/api/home/timeline", params={"horizon_days": 7})
+            assert r.status_code == expected, (scopes, r.text[:200])
+        finally:
+            app.dependency_overrides.pop(current_actor, None)
+
+
+async def test_K05_in_progress_and_today_apply_record_scope_and_money_rules(db, owner, mechanic, en_route_sale):
+    """A mechanic sees neither a mission about a vehicle outside their grant nor the buyer of a delivery."""
+    from backend.app.models.finance import Sale
+    from backend.app.models.runtime import Mission
+    m = Mission(outcome="Chase the release for the en-route truck", role="manager", status="running",
+                entity_refs=[{"kind": "vehicle", "id": en_route_sale["vehicle_id"]}])
+    db.add(m)
+    sale = await db.get(Sale, en_route_sale["sale_id"])
+    sale.delivery_appointment_at = datetime.now(timezone.utc)
+    await db.commit()
+    now = datetime.now(timezone.utc)
+    mine = await home_svc.in_progress(db, actor_of(owner), now=now, tz=PHOENIX)
+    assert m.id in {i["id"] for i in mine["items"]}
+    theirs = await home_svc.in_progress(db, actor_of(mechanic), now=now, tz=PHOENIX)
+    assert m.id not in {i["id"] for i in theirs["items"]}
+    # today: the delivery appointment belongs to the sales pipeline reader
+    tz_now = sale.delivery_appointment_at
+    owner_today = await home_svc.today(db, actor_of(owner), now=tz_now, tz=PHOENIX)
+    assert any(i["kind"] == "delivery" and i["id"] == sale.id for i in owner_today["items"])
+    mech_today = await home_svc.today(db, actor_of(mechanic), now=tz_now, tz=PHOENIX)
+    assert not any(i["kind"] == "delivery" for i in mech_today["items"])
+
+
+async def test_one_broken_section_never_hides_the_other_deterministic_lists(client, db, owner, monkeypatch):
+    """Spec §2.2: the deterministic lists are the page. A sibling domain that breaks degrades its own section
+    with a reason — it never blanks the approvals, tasks or blockers, and a bad period is still a 422."""
+    async def boom(*a, **kw):
+        raise RuntimeError("missions table changed under us")
+    monkeypatch.setattr(home_svc, "in_progress", boom)
+    login(client, owner)
+    page = (await client.get("/api/home")).json()
+    assert page["in_progress"]["available"] is False and page["in_progress"]["degraded"] is True
+    assert "RuntimeError" in page["in_progress"]["reason"]
+    assert page["needs_decision"]["available"] is True and page["today"]["available"] is True
+    assert page["status"]["summary"] and page["model_used"] is False
+    bad = await client.get("/api/home", params={"period": "quarter"})
+    assert bad.status_code == 422
 
 
 async def test_home_groups_duplicate_alerts_about_one_problem(db, owner, en_route_sale):

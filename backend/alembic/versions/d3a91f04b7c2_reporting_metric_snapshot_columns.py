@@ -1,7 +1,7 @@
 """reporting slice: additive columns on metric_snapshots
 
 Revision ID: d3a91f04b7c2
-Revises: b1d4f7a20c31
+Revises: b1d4f7a20c31, d2f18c40a7b3
 Create Date: 2026-09-15
 """
 from __future__ import annotations
@@ -10,7 +10,9 @@ from alembic import op
 import sqlalchemy as sa
 
 revision = "d3a91f04b7c2"
-down_revision = "b1d4f7a20c31"  # chained after the inbox slice so the history stays a single head
+# merge point: the inbox and agent-runtime slices both branched off b41d7e9c2a10, so this revision
+# joins them and adds the reporting columns, keeping `alembic upgrade head` on a single head.
+down_revision = ("b1d4f7a20c31", "d2f18c40a7b3")
 branch_labels = None
 depends_on = None
 

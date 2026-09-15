@@ -132,15 +132,20 @@ async def test_unknown_result_after_send_still_leaves_the_message_findable():
 
 
 async def test_build_without_a_connection_is_setup_blocked_not_a_fake_success(db):
+    """Uses the single gmail_business connection row (one per provider, as in production) and restores it."""
+    from backend.app.services import connections as conn_svc
     gmail_mod.FACTORY = None
-    conn = Connection(provider="gmail_business", label="business", status="disconnected", environment="test")
-    db.add(conn)
-    await db.commit()
-    with pytest.raises(Unsupported) as e:
-        build(db, conn)
-    assert e.value.detail.get("setup_blocked") is True
+    conn = await conn_svc.get(db, "gmail_business", create=True)
+    prior = conn.status
     conn.status = "disconnected"
     await db.commit()
+    try:
+        with pytest.raises(Unsupported) as e:
+            build(db, conn)
+        assert e.value.detail.get("setup_blocked") is True
+    finally:
+        conn.status = prior
+        await db.commit()
 
 
 def test_live_adapter_capability_map_follows_granted_scopes_and_flags():

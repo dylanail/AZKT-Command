@@ -94,6 +94,7 @@ async def _with_client(fn):
             return {"error": "access_revoked", "message": "this client's access is no longer active"}
         actor = await ec.actor_for(db, client, delegation_depth=int(caller.get("delegation_depth") or 0))
         try:
+            await ec.check_rate(db, client)      # every tool call is metered, reads included
             return await fn(db, actor, client)
         except Exception as e:  # noqa: BLE001
             await db.rollback()
@@ -166,10 +167,6 @@ def _register_tools(mcp) -> None:
 
 
 # ── ASGI mount ───────────────────────────────────────────────────────────────
-def _unauthorized(message: str, status: int = 401) -> tuple[int, dict]:
-    return status, {"jsonrpc": "2.0", "error": {"code": -32001, "message": message}, "id": None}
-
-
 class McpAuthMount:
     """ASGI middleware: authorize, then hand the raw scope to the MCP session manager.
 
@@ -200,10 +197,12 @@ class McpAuthMount:
                 caller = {"client_id": client.id, "client_name": client.name,
                           "delegation_depth": actor.delegation_depth}
         except DomainError as e:
-            await _send_json(send, e.status_code if e.status_code in (401, 403, 422, 429) else 401,
+            # A rejected or missing credential is 401 with a challenge; a malformed header is 422.
+            status = 422 if e.code == "validation_failed" else (429 if e.code == "rate_limited" else 401)
+            await _send_json(send, status,
                              {"jsonrpc": "2.0", "id": None,
                               "error": {"code": -32001, "message": e.message, "data": e.to_dict()}},
-                             extra_headers=[(b"www-authenticate", b'Bearer realm="AZKT"')] if e.status_code == 403 else None)
+                             extra_headers=[(b"www-authenticate", b'Bearer realm="AZKT"')] if status == 401 else None)
             return
         except Exception as e:  # noqa: BLE001
             log.exception("MCP auth failed")

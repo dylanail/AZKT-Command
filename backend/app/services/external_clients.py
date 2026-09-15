@@ -21,9 +21,9 @@ from __future__ import annotations
 
 import logging
 import secrets
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 
 from ..core.config import settings
@@ -41,8 +41,8 @@ log = logging.getLogger("azkt.connector")
 
 TOKEN_PREFIX = "azkt_ec_"
 DEFAULT_QUOTA = {"per_minute": 60, "concurrent": 4, "per_day": 2000}
-# Owner UI actions -> the commands they route to (consumed by agent/coverage.py, spec §10.9).
-COMMANDS_FOR_MANAGER: dict[str, str] = {}
+# This module deliberately declares no COMMANDS_FOR_MANAGER entries: connector credentials are changed by
+# the owner in Settings, never through a Manager tool (see agent/tools.EXCLUDED_COMMANDS, spec §10.8).
 
 
 class QuotaExceeded(DomainError):
@@ -107,28 +107,22 @@ class RegisterIn(BaseModel):
     expires_at: datetime | None = None
     notes: str = ""
 
-    @field_validator("scopes")
-    @classmethod
-    def _scopes(cls, v):
-        bad = [s for s in v if s not in CLIENT_SCOPES]
-        if bad:
-            raise ValueError(f"unknown scopes {bad}; allowed: {list(CLIENT_SCOPES)}")
-        return sorted(set(v))
 
-    @field_validator("transport")
-    @classmethod
-    def _transport(cls, v):
-        if v not in ("mcp", "http", "both"):
-            raise ValueError("transport must be mcp | http | both")
-        return v
-
-    @field_validator("record_scope")
-    @classmethod
-    def _record_scope(cls, v):
-        extra = set(v or {}) - {"vehicle_ids"}
-        if extra:
-            raise ValueError(f"record_scope supports vehicle_ids only (got {sorted(extra)})")
-        return {"vehicle_ids": sorted(set(v["vehicle_ids"]))} if v.get("vehicle_ids") else {}
+def _clean_grant(inp: RegisterIn) -> tuple[list[str], dict]:
+    """Validate the grant with structured, JSON-clean errors (never a raw exception in the response)."""
+    bad = [s for s in inp.scopes if s not in CLIENT_SCOPES]
+    if bad:
+        raise ValidationFailed(f"unknown scopes: {', '.join(sorted(bad))}", unknown_scopes=sorted(bad),
+                               allowed_scopes=list(CLIENT_SCOPES))
+    if inp.transport not in ("mcp", "http", "both"):
+        raise ValidationFailed("transport must be mcp | http | both", transport=inp.transport)
+    extra = set(inp.record_scope or {}) - {"vehicle_ids"}
+    if extra:
+        raise ValidationFailed("record_scope supports vehicle_ids only", unsupported_keys=sorted(extra))
+    ids = (inp.record_scope or {}).get("vehicle_ids") or []
+    if not isinstance(ids, list) or any(not isinstance(i, str) for i in ids):
+        raise ValidationFailed("record_scope.vehicle_ids must be a list of vehicle ids")
+    return sorted(set(inp.scopes)), ({"vehicle_ids": sorted(set(ids))} if ids else {})
 
 
 @command("external_clients.register", input=RegisterIn, perm="connections", action_class="owner_only",
@@ -136,11 +130,12 @@ class RegisterIn(BaseModel):
          description="Register a generic external agent client and issue its bearer token once. The token is "
                      "stored only as a sha256 hash; the plain value is returned exactly once.")
 async def register(ctx: CommandContext, inp: RegisterIn) -> dict:
+    scopes, record_scope = _clean_grant(inp)
     raw, digest, prefix = mint_token()
     quota = {**DEFAULT_QUOTA, **{k: int(v) for k, v in (inp.quota or {}).items() if str(v).isdigit()}}
     c = ExternalClient(name=inp.name, owner_user_id=ctx.actor.user_id, transport=inp.transport,
-                       token_hash=digest, token_prefix=prefix, scopes=list(inp.scopes),
-                       record_scope=dict(inp.record_scope or {}), status="active", quota=quota,
+                       token_hash=digest, token_prefix=prefix, scopes=scopes,
+                       record_scope=record_scope, status="active", quota=quota,
                        expires_at=inp.expires_at, notes=inp.notes, health={"state": "registered"},
                        usage_window={}, created_by=ctx.actor.user_id, updated_by=ctx.actor.user_id)
     ctx.db.add(c)
@@ -226,23 +221,17 @@ class CallbackIn(BaseModel):
     callback_url: str | None = None
     callback_secret: str | None = None
 
-    @field_validator("callback_url")
-    @classmethod
-    def _url(cls, v):
-        if v in (None, ""):
-            return None
-        if not v.startswith("https://"):
-            raise ValueError("callback_url must be an https URL configured by the owner")
-        return v
-
 
 @command("external_clients.set_callback", input=CallbackIn, perm="connections", action_class="owner_only",
          summary=lambda p: "Set the callback destination for an external agent client",
          description="Configure the optional signed callback destination for a client. Only the owner sets this; a "
                      "URL supplied inside a prompt or a request payload is never used (spec §10.8).")
 async def set_callback(ctx: CommandContext, inp: CallbackIn) -> dict:
+    url = (inp.callback_url or "").strip() or None
+    if url and not url.startswith("https://"):
+        raise ValidationFailed("callback_url must be an https URL configured by the owner", callback_url=url)
     c = await _load(ctx, inp.client_id, inp.expected_version)
-    c.callback_url = inp.callback_url
+    c.callback_url = url
     c.callback_secret_enc = encrypt(inp.callback_secret) if inp.callback_secret else None
     ctx.touch(c, "external_client")
     ctx.record(f"External agent callback {'set' if inp.callback_url else 'cleared'}: {c.name}",
@@ -295,8 +284,12 @@ async def authenticate(db, authorization: str | None, *, delegation_depth_header
     return client, await actor_for(db, client, delegation_depth=depth)
 
 
-async def check_quota(db, client: ExternalClient) -> None:
-    """Per-minute and concurrent limits, enforced per client (spec §10.8)."""
+async def check_rate(db, client: ExternalClient, *, commit: bool = True) -> None:
+    """Per-minute request limit, charged once per inbound request on either transport (spec §10.8).
+
+    Reads are metered too — a connector cannot poll or search without bound — but they never consume a
+    concurrency slot, which belongs to work in flight.
+    """
     quota = {**DEFAULT_QUOTA, **(client.quota or {})}
     minute = _now().strftime("%Y-%m-%dT%H:%M")
     window = dict(client.usage_window or {})
@@ -304,16 +297,24 @@ async def check_quota(db, client: ExternalClient) -> None:
     if count >= int(quota.get("per_minute") or DEFAULT_QUOTA["per_minute"]):
         raise QuotaExceeded("per-minute quota reached for this client", retry_after=60,
                             quota=quota, scope="per_minute")
-    in_flight = await db.scalar(select(func.count()).select_from(Mission).where(
-        Mission.client_id == client.id, Mission.status.in_(("open", "running"))))
-    if int(in_flight or 0) >= int(quota.get("concurrent") or DEFAULT_QUOTA["concurrent"]):
-        raise QuotaExceeded("too many concurrent missions for this client", retry_after=10,
-                            quota=quota, scope="concurrent")
     client.usage_window = {"minute": minute, "count": count + 1}
     client.last_used_at = _now()
     client.use_count = int(client.use_count or 0) + 1
     client.health = {**(client.health or {}), "state": "ok", "last_seen": _iso(client.last_used_at)}
-    await db.flush()
+    if commit:
+        await db.commit()
+    else:
+        await db.flush()
+
+
+async def check_concurrency(db, client: ExternalClient) -> None:
+    """How much work this client may have in flight at once (spec §10.8)."""
+    quota = {**DEFAULT_QUOTA, **(client.quota or {})}
+    in_flight = await db.scalar(select(func.count()).select_from(Mission).where(
+        Mission.client_id == client.id, Mission.status.in_(("open", "running"))))
+    if int(in_flight or 0) >= int(quota.get("concurrent") or DEFAULT_QUOTA["concurrent"]):
+        raise QuotaExceeded("too many concurrent missions for this client", retry_after=10,
+                            quota=quota, scope="concurrent", in_flight=int(in_flight or 0))
 
 
 # ── delegated requests ───────────────────────────────────────────────────────
@@ -382,20 +383,31 @@ async def ask(db, actor: Actor, client: ExternalClient, *, message: str, request
         raise ValidationFailed("message is required")
     if not (request_key or "").strip():
         raise ValidationFailed("request_key is required so a retry maps to the same logical request")
-    await check_quota(db, client)
     existing = (await db.execute(select(DelegatedRequest).where(
         DelegatedRequest.client_id == client.id, DelegatedRequest.request_key == request_key))).scalar_one_or_none()
     if existing is not None:
-        # a retry after a dropped connection is the SAME logical request (J02)
+        # A retry after a dropped connection is the SAME logical request (J02), so it is answered from the
+        # stored request *before* the concurrency gate: re-reading work already in flight must never be
+        # refused as "too much work in flight".
         mission = await db.get(Mission, existing.mission_id) if existing.mission_id else None
         existing.last_polled_at = _now()
         await db.commit()
         return request_envelope(existing, mission), existing.status in ("accepted", "running", "waiting", "needs_input")
 
+    await check_concurrency(db, client)          # only genuinely new work takes a concurrency slot
     depth = int(actor.delegation_depth or 0)
     if depth >= int(settings.MAX_DELEGATION_DEPTH):
         raise Denied(f"delegation depth {depth} reached the limit of {settings.MAX_DELEGATION_DEPTH}; "
                      "this chain cannot start more AZKT work", delegation_depth=depth)
+    echo = await _echo_of(db, client, message)
+    if echo is not None:
+        # An AZKT status reply fed back in is data, not a new instruction (spec §10.8 echo-loop prevention).
+        mission = await db.get(Mission, echo.mission_id) if echo.mission_id else None
+        return ({**request_envelope(echo, mission),
+                 "echo_suppressed": True,
+                 "note": ("this message repeats an AZKT status reply for request "
+                          f"{echo.id}; AZKT status replies are never re-submitted as instructions. "
+                          "Poll that request, or send a new instruction.")}, False)
     await _assert_assets(db, actor, list(asset_ids or []))
 
     req = DelegatedRequest(client_id=client.id, request_key=request_key, kind="ask", message=message[:8000],
@@ -437,6 +449,24 @@ async def ask(db, actor: Actor, client: ExternalClient, *, message: str, request
     return request_envelope(req, mission), accepted
 
 
+def _normalize(text: str) -> str:
+    return " ".join((text or "").split()).strip().lower()[:2000]
+
+
+async def _echo_of(db, client: ExternalClient, message: str) -> DelegatedRequest | None:
+    """Is this message simply an AZKT answer this client was handed back? (loop prevention, spec §10.8)."""
+    needle = _normalize(message)
+    if len(needle) < 40:
+        return None
+    rows = (await db.execute(select(DelegatedRequest).where(DelegatedRequest.client_id == client.id)
+                             .order_by(DelegatedRequest.created_at.desc()).limit(25))).scalars().all()
+    for r in rows:
+        summary = _normalize((r.result or {}).get("summary") or "")
+        if summary and summary == needle:
+            return r
+    return None
+
+
 async def _owned_request(db, client: ExternalClient, request_id: str) -> DelegatedRequest:
     """Cross-request access answers 404, never 403: an unauthorized id must not confirm it exists (J06)."""
     req = (await db.execute(select(DelegatedRequest).where(DelegatedRequest.id == request_id,
@@ -465,7 +495,7 @@ async def reply(db, actor: Actor, client: ExternalClient, request_id: str, *, me
     req = await _owned_request(db, client, request_id)
     if not (message or "").strip():
         raise ValidationFailed("message is required")
-    await check_quota(db, client)
+    await check_concurrency(db, client)
     await _assert_assets(db, actor, list(asset_ids or []))
     mission = await db.get(Mission, req.mission_id) if req.mission_id else None
     if mission is None:
@@ -512,7 +542,6 @@ async def cancel(db, actor: Actor, client: ExternalClient, request_id: str) -> d
 
 async def find_records(db, actor: Actor, q: str, *, limit: int = 10) -> dict:
     """Authorized vehicle / contact / task ids with short identifying context (spec §10.8 azkt_find_records)."""
-    from ..core.errors import Denied as _Denied  # noqa: F401
     out: dict = {"query": q, "vehicles": [], "contacts": [], "tasks": []}
     ctx = _ctx(db, actor, channel="http")
     from ..agent import tools as agent_tools

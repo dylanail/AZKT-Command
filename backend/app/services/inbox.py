@@ -468,10 +468,14 @@ async def inbox_ingest_message(ctx: CommandContext, inp: IngestIn) -> dict:
                sources=[{"kind": "message", "id": m.id, "provider_ref": inp.provider_message_id}],
                details={"classification": verdict["classification"], "suppression": verdict["suppression"],
                         "contact_match": conv.contact_match, "links": len(conv.links or []), "questions": len(questions)})
+    # Provider identity dedupe lives where the spec puts it — provider_events (uq_provider_event) and
+    # messages (uq_message_provider). The outbox row carries the identity in its payload for tracing;
+    # keying the domain event itself would make a legitimate re-index fail instead of converging.
     ctx.emit("message.ingested", aggregate_type="conversation", aggregate_id=conv.id, aggregate_version=conv.version,
-             provider=conn.provider, provider_event_id=f"{conn.id}:{inp.provider_message_id}",
              payload={"message_id": m.id, "conversation_id": conv.id, "classification": verdict["classification"],
-                      "direction": direction, "state": conv.state, "links": added_links})
+                      "direction": direction, "state": conv.state, "links": added_links,
+                      "provider": conn.provider, "provider_message_id": inp.provider_message_id,
+                      "connection_id": conn.id})
     if conv.contact_id and match is not None and match.state in ("matched", "proposed"):
         ctx.emit("identity.match_resolved", aggregate_type="conversation", aggregate_id=conv.id,
                  payload={"contact_id": conv.contact_id, "state": match.state, "reasons": conv.match_reasons})

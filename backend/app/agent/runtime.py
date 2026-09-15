@@ -14,7 +14,6 @@ the authority or the spend.
 """
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import time
@@ -216,9 +215,14 @@ async def claim_run(db, run_id: str, worker_id: str, *, lease_seconds: int = LEA
     return run, token
 
 
-async def fenced(db, run_id: str, lease_token: str, **values) -> None:
-    """Persist a change to the run only if this worker still holds the lease (H01)."""
-    res = await db.execute(update(Run).where(Run.id == run_id, Run.lease_token == lease_token).values(**values))
+async def fenced(db, run_id: str, token: str, /, **values) -> None:
+    """Persist a change to the run only if this worker still holds the lease (H01).
+
+    On a superseded lease nothing is written and `StaleLease` is raised. The rollback that discards this
+    worker's pending writes also expires every loaded object, so callers keep plain ids (not ORM handles)
+    for anything they still need afterwards.
+    """
+    res = await db.execute(update(Run).where(Run.id == run_id, Run.lease_token == token).values(**values))
     if res.rowcount != 1:
         await db.rollback()
         raise StaleLease(f"run {run_id}: lease superseded; this worker may not commit")
@@ -428,13 +432,14 @@ def _blocks(res) -> list:
 
 async def execute_run(db, mission: Mission, run: Run, lease_token: str, *, on_event_cb=None) -> RunOutcome:
     """One bounded model/tool loop. Persists a checkpoint after every completed step."""
+    mission_id, run_id = mission.id, run.id
     try:
         actor = await actor_for_mission(db, mission)
     except PermissionError as e:
         return await _finish(db, mission, run, lease_token,
                              RunOutcome("failed", "paused", f"Access changed: {e}", [], error=str(e)))
     ctx = CommandContext(db=db, actor=actor, channel=mission.channel, correlation_id=mission.correlation_id,
-                         causation_id=mission.delegated_request_id, mission_id=mission.id, run_id=run.id)
+                         causation_id=mission.delegated_request_id, mission_id=mission_id, run_id=run_id)
     budget = mission.budget or default_budget()
     deadline = time.monotonic() + float(budget.get("seconds") or settings.MODEL_RUN_TIMEOUT_SECONDS)
     max_steps = int(budget.get("steps") or settings.MODEL_MAX_TOOL_STEPS)
@@ -461,7 +466,7 @@ async def execute_run(db, mission: Mission, run: Run, lease_token: str, *, on_ev
             await on_event_cb(kind, payload)
 
     while True:
-        fresh = await _refresh_status(db, mission.id)
+        fresh = await _refresh_status(db, mission_id)
         if fresh == "cancelled":
             return await _finish(db, mission, run, lease_token,
                                  RunOutcome("cancelled", "cancelled", "Run cancelled; completed changes were kept.",
@@ -573,8 +578,18 @@ async def execute_run(db, mission: Mission, run: Run, lease_token: str, *, on_ev
         run.checkpoint = {"system": system, "messages": messages[-40:], "failures": failures,
                           "alternatives": alternatives, "approvals": approvals, "changed": changed[-100:]}
         run.steps_used, run.used_model = steps, used_model
-        await fenced(db, run.id, lease_token, checkpoint=run.checkpoint, steps_used=steps, used_model=used_model,
-                     lease_until=_now() + timedelta(seconds=LEASE_SECONDS), model=run.model)
+        try:
+            await fenced(db, run.id, lease_token, checkpoint=run.checkpoint, steps_used=steps,
+                         used_model=used_model, lease_until=_now() + timedelta(seconds=LEASE_SECONDS),
+                         model=run.model)
+        except StaleLease:
+            # cancellation (or a newer worker) took the lease between steps. Completed effects stay
+            # committed; this worker simply stops here (H05, spec §11.5 step 6).
+            if await _refresh_status(db, mission_id) == "cancelled":
+                return RunOutcome("cancelled", "cancelled", "Run cancelled; completed changes were kept.",
+                                  changed, steps=steps, used_model=used_model, approvals=approvals)
+            raise
+        mission = await db.get(Mission, mission_id)
         add_update(mission, "running", f"Step {steps}: " + ", ".join(t.get("name", "?") for t in tool_uses))
         await db.commit()
         if stop is not None:
@@ -620,11 +635,19 @@ async def _control(db, mission: Mission, run: Run, name: str, payload: dict, cha
 
 async def _finish(db, mission: Mission, run: Run, lease_token: str, out: RunOutcome) -> RunOutcome:
     now = _now()
+    run_id, mission_id = run.id, mission.id
     values = dict(status=out.run_status, finished_at=now, steps_used=out.steps or run.steps_used,
                   used_model=out.used_model or run.used_model, error=out.error, lease_token=None,
                   result=json.loads(json.dumps(out.to_dict(), default=str)), checkpoint=run.checkpoint or {})
-    await fenced(db, run.id, lease_token, **values)   # a stale worker cannot complete the run (H01)
-    m = await db.get(Mission, mission.id)
+    try:
+        await fenced(db, run_id, lease_token, **values)   # a stale worker cannot complete the run (H01)
+    except StaleLease:
+        current = await db.get(Run, run_id)
+        if current is None or current.status not in ("cancelled", "succeeded", "failed"):
+            raise                                   # a newer worker owns a still-running run: stay out of it
+        out.run_status = current.status
+        run = current
+    m = await db.get(Mission, mission_id)
     if m is not None and m.status != "cancelled":
         m.status = out.mission_status
         m.result = {**(m.result or {}), "summary": out.summary, "changed": out.changed or [],
@@ -634,17 +657,17 @@ async def _finish(db, mission: Mission, run: Run, lease_token: str, out: RunOutc
             m.finished_at = now
         if out.mission_status == "waiting_approval" and out.approvals:
             m.waiting_on = "owner approval"
-        add_update(m, out.mission_status, out.summary[:500], run_id=run.id)
+        add_update(m, out.mission_status, out.summary[:500], run_id=run_id)
         m.bump(m.responsible_user_id)
-        _emit_mission_event(db, m, run, out)
+        _emit_mission_event(db, m, run_id, out)
     await db.commit()
     return out
 
 
-def _emit_mission_event(db, m: Mission, run: Run, out: RunOutcome) -> None:
+def _emit_mission_event(db, m: Mission, run_id: str, out: RunOutcome) -> None:
     from ..models.runtime import Event
     db.add(Event(type="mission.updated", aggregate_type="mission", aggregate_id=m.id, aggregate_version=m.version,
-                 payload={"mission_id": m.id, "run_id": run.id, "status": m.status, "run_status": out.run_status,
+                 payload={"mission_id": m.id, "run_id": run_id, "status": m.status, "run_status": out.run_status,
                           "cursor": int(m.cursor or 0), "delegated_request_id": m.delegated_request_id},
                  correlation_id=m.correlation_id, causation_id=m.delegated_request_id, happened_at=_now(),
                  actor=dict(m.initiating_actor or {})))
