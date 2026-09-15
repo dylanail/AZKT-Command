@@ -171,6 +171,18 @@ async def needs_decision(db: AsyncSession, actor: Actor, *, now: datetime, tz: s
 
 
 # ── 4. needs attention ───────────────────────────────────────────────────────
+def _document_link(kind: str, eid: str) -> str:
+    """Documents hang off vehicles, shipments, requests, sales and contacts; only some of those have pages.
+    A sale's documents are reviewed on the vehicle's Sale tab; anything else lands on Finance (documents live there)."""
+    if kind == "vehicle":
+        return f"/vehicles/{eid}?tab=files"
+    if kind in ("shipment", "request", "contact"):
+        return f"/{kind}s/{eid}"
+    if kind == "sale":
+        return f"/sales?lead={eid}"
+    return "/finance?tab=needs-matching"
+
+
 async def needs_attention(db: AsyncSession, actor: Actor, *, now: datetime, tz: str) -> dict:
     """Blockers, missing documents, overdue commitments, unmatched messages/payments, failed publications and
     stale connections — grouped by the underlying problem, each with owner, next action and due/next check."""
@@ -213,7 +225,7 @@ async def needs_attention(db: AsyncSession, actor: Actor, *, now: datetime, tz: 
             add(f"documents:{kind}:{eid}", "missing_document", f"{len(rows)} document(s) {worst}",
                 detail=", ".join(sorted({d.type for d in rows})), next_action="Attach or resolve the document",
                 items=[{"kind": "document", "id": d.id, "type": d.type, "status": d.status} for d in rows],
-                link=f"/{kind}s/{eid}", severity="high" if worst == "conflicted" else "normal")
+                link=_document_link(kind, eid), severity="high" if worst == "conflicted" else "normal")
 
     # overdue commitments
     if has_perm(actor, "contacts.read") or has_perm(actor, "tasks.read"):
@@ -435,9 +447,11 @@ async def home(db: AsyncSession, actor: Actor, *, period: str = "month", start=N
         "needs_decision": decision,
         "needs_attention": attention,
         "today": todays,
-        "vehicle_timeline": await _section("vehicle_timeline",
-                                           tl.compact(db, actor, horizon_days=horizon_days, tz=tz, now=now),
-                                           empty={"items": [], "total": 0, "returned": 0}),
+        "vehicle_timeline": (await _section("vehicle_timeline",
+                                            tl.compact(db, actor, horizon_days=horizon_days, tz=tz, now=now),
+                                            empty={"items": [], "total": 0, "returned": 0})
+                             if has_perm(actor, "vehicles.read")
+                             else {"available": False, "reason": "vehicles.read required", "items": [], "total": 0}),
         "in_progress": await _section("in_progress", in_progress(db, actor, now=now, tz=tz),
                                       empty={"items": [], "total": 0}),
         "completed": await _section("completed", completed(db, actor, now=now, tz=tz),

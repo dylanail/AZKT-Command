@@ -682,7 +682,7 @@ async def _finance_sold_cohort(ctx: CommandContext, inp: SoldCohort) -> dict:
 
 
 class HomeMetrics(BaseModel):
-    period: str = Field(default="month", description="month | quarter | year | custom (as the Home page uses)")
+    period: str = Field(default="month", description="month | 7d | 30d | custom (as the Home page uses)")
     start: str | None = Field(default=None, description="ISO date for a custom period")
     end: str | None = Field(default=None, description="ISO date for a custom period")
 

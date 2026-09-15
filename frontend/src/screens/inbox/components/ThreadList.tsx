@@ -4,12 +4,19 @@
 import { useCallback, useEffect, useRef, type KeyboardEvent } from "react";
 import { Button, Chip, EmptyState, ErrorState, GlassPanel, Input, Loading, SearchIcon, SegmentedControl, Select } from "../../../ui";
 import { relativeTime } from "../../../lib/format";
+import { COUNT_LIMIT } from "../useInboxData";
 import {
   CLASSIFICATION_LABELS, FILTER_EMPTY, FILTER_LABELS, LINK_KIND_LABELS, STATE_LABELS, THREAD_FILTERS,
   accountLabel, threadTitle, threadWho, type Conversation, type ThreadFilter,
 } from "../types";
 
 export interface AccountOption { value: string; label: string }
+
+/** Counts come from one bounded page, so the cap is shown honestly rather than as an exact total. */
+function countLabel(n: number | undefined): number | string | undefined {
+  if (n === undefined) return undefined;
+  return n >= COUNT_LIMIT ? `${COUNT_LIMIT}+` : n;
+}
 
 /** State chips, in the order they matter for triage. */
 function stateChips(c: Conversation) {
@@ -136,7 +143,7 @@ export default function ThreadList({
         block
         value={filter}
         onChange={onFilter}
-        options={THREAD_FILTERS.map((f) => ({ value: f, label: FILTER_LABELS[f], count: counts[f] }))}
+        options={THREAD_FILTERS.map((f) => ({ value: f, label: FILTER_LABELS[f], count: countLabel(counts[f]) }))}
       />
       <div className="ib-list__tools">
         {accounts.length > 1 ? (

@@ -8,7 +8,7 @@ import { THREAD_FILTERS, type Conversation, type ThreadFilter, type ThreadListRe
 
 export const PAGE_SIZE = 50;
 /** The list endpoint answers with a page, not a grand total, so counts are capped and shown as "200+". */
-const COUNT_LIMIT = 200;
+export const COUNT_LIMIT = 200;
 
 /** Debounce a fast-changing value (the search box) before it reaches the API. */
 export function useDebounced<T>(value: T, ms = 300): T {
@@ -31,7 +31,7 @@ export interface ThreadsState {
 }
 
 /** Paged list. Changing filter/account/query resets to the first page. */
-export function useThreads(filter: ThreadFilter, account: string, q: string, tick: number): ThreadsState {
+export function useThreads(filter: ThreadFilter, account: string, q: string, tick: number, enabled = true): ThreadsState {
   const [pages, setPages] = useState<Conversation[][]>([]);
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
@@ -43,6 +43,7 @@ export function useThreads(filter: ThreadFilter, account: string, q: string, tic
   // First page (and every reset).
   useEffect(() => {
     ctrl.current?.abort();
+    if (!enabled) { setPages([]); setLoading(false); return; }
     const c = new AbortController();
     ctrl.current = c;
     setLoading(true);
@@ -56,7 +57,7 @@ export function useThreads(filter: ThreadFilter, account: string, q: string, tic
       })
       .catch((e) => { if (!c.signal.aborted) { setError(e); setLoading(false); } });
     return () => c.abort();
-  }, [filter, account, q, tick, localTick]);
+  }, [filter, account, q, tick, localTick, enabled]);
 
   const loadMore = useCallback(() => {
     const offset = pages.reduce((n, p) => n + p.length, 0);
@@ -82,9 +83,10 @@ export function useThreads(filter: ThreadFilter, account: string, q: string, tic
 }
 
 /** Counts for the segmented control: one bounded page per filter, refreshed with the same scope. */
-export function useFilterCounts(account: string, q: string, tick: number): Partial<Record<ThreadFilter, number>> {
+export function useFilterCounts(account: string, q: string, tick: number, enabled = true): Partial<Record<ThreadFilter, number>> {
   const [counts, setCounts] = useState<Partial<Record<ThreadFilter, number>>>({});
   useEffect(() => {
+    if (!enabled) return;
     let alive = true;
     const c = new AbortController();
     Promise.all(THREAD_FILTERS.map(async (f) => {
@@ -101,7 +103,7 @@ export function useFilterCounts(account: string, q: string, tick: number): Parti
       setCounts(next);
     });
     return () => { alive = false; c.abort(); };
-  }, [account, q, tick]);
+  }, [account, q, tick, enabled]);
   return counts;
 }
 

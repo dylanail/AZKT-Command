@@ -72,8 +72,8 @@ export default function Inbox() {
   const [tick, setTick] = useState(0);
   const reloadAll = useCallback(() => setTick((t) => t + 1), []);
 
-  const threads = useThreads(filter, account, query, tick);
-  const counts = useFilterCounts(account, query, tick);
+  const threads = useThreads(filter, account, query, tick, canRead);
+  const counts = useFilterCounts(account, query, tick, canRead);
   const contactNames = useContactNames(canRead && can(user, "contacts.read"));
 
   const coverage = useQuery<CoverageResp | null>(

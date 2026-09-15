@@ -177,7 +177,8 @@ export default function ReplyEditor({ detail, canDraft, draftReason, onChanged, 
   // A sent, declined or out-of-date draft is not the end of the thread: a new one can always be prepared.
   const finished = sendState === "sent" || sendState === "declined" || sendState === "stale";
   const againReason = prepareReason
-    || (sendState === "running" || sendState === "awaiting_approval" ? "This reply is still with the owner. Wait for the decision first." : "");
+    || (sendState === "running" || sendState === "awaiting_approval" ? "This reply is still with the owner. Wait for the decision first." : "")
+    || (dirty ? "Save or discard your changes first — drafting again replaces this wording." : "");
 
   return (
     <GlassPanel padded className="stack-sm ib-reply" aria-label="Reply">
@@ -222,8 +223,14 @@ export default function ReplyEditor({ detail, canDraft, draftReason, onChanged, 
             </Button>
             <Button variant="ghost" onClick={() => { setBody(serverBody); clearCachedBody(cacheKey); }}
               disabled={!dirty} disabledReason="Nothing has changed yet.">Discard changes</Button>
-            <Button variant="primary" size="lg" onClick={() => void submit()} loading={busy("submit")}
-              disabled={!!submitReason} disabledReason={submitReason}>Review &amp; send</Button>
+            <Button variant={finished ? "primary" : "ghost"} size={finished ? "lg" : "md"} onClick={() => void prepare()}
+              loading={busy("prepare")} disabled={!!againReason} disabledReason={againReason}>
+              {finished ? "Prepare a new reply" : "Draft it again"}
+            </Button>
+            {!finished ? (
+              <Button variant="primary" size="lg" onClick={() => void submit()} loading={busy("submit")}
+                disabled={!!submitReason} disabledReason={submitReason}>Review &amp; send</Button>
+            ) : null}
           </div>
           <p className="fs12 t4" style={{ margin: 0 }}>{SEND_COPY}</p>
 

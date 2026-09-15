@@ -90,10 +90,16 @@ class IntakeSettings(_Strict):
     require_condition_note: bool = True
 
 
+class ReportingSettings(_Strict):
+    """Cost categories that must be recorded before Home labels gross profit "Recorded" (spec §2.4)."""
+    required_cost_categories: list[str] = Field(default_factory=lambda: ["purchase", "import", "recon"])
+
+
 SETTINGS_SPEC: dict[str, type[BaseModel]] = {
     "reminders": RemindersSettings,
     "automation": AutomationSettings,
     "intake": IntakeSettings,
+    "reporting": ReportingSettings,
 }
 
 
@@ -120,6 +126,14 @@ def _validate(key: str, data: dict) -> dict:
                 raise ValidationFailed(f"unknown reminder kind {k}")
             if v not in CHANNEL_MODES:
                 raise ValidationFailed(f"channel mode must be one of {CHANNEL_MODES}")
+    if key == "reporting":
+        from ..models.finance import COST_CATEGORIES
+        rp: ReportingSettings = obj  # type: ignore[assignment]
+        bad = [c for c in rp.required_cost_categories if c not in COST_CATEGORIES]
+        if bad:
+            raise ValidationFailed(f"unknown cost categories {bad}; allowed: {sorted(COST_CATEGORIES)}")
+        if not rp.required_cost_categories:
+            raise ValidationFailed("at least one required cost category is needed")
     if key == "automation":
         a: AutomationSettings = obj  # type: ignore[assignment]
         for label, val in (("parts_cap", a.parts_cap), ("spend_caps.per_action", a.spend_caps.per_action),
