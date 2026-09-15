@@ -6,8 +6,15 @@ What is proved here:
   status and never invents an arrival date, and class gates are enforced — an unconfigured gate blocks
   publication instead of being skipped (F09);
 * publication is an exact approval bound to package hash + profile version + channel, executed once as
-  a persisted external action; an existing site listing is imported before anything is created and a
-  title-only similarity is a proposal for a person (F05);
+  a persisted external action; an existing site listing is imported before anything is created, and
+  only AZKT's own marker (or a SKU AZKT owns) binds one automatically — anything weaker is a proposal
+  a person confirms, and a listing another vehicle already owns is not offered at all (F05);
+* listing photos are uploaded into the site's own media library and referenced by media id, because a
+  live site cannot fetch an AZKT asset URL; the upload is content-addressed and reused across
+  packages, publications and vehicles, and a publish whose photos are missing fails rather than
+  writing a product without them;
+* the routine hourly scan re-reads everything live on the site, so an edit made in wp-admin after a
+  listing settled is still noticed (spec §12.3);
 * a lost response after the site accepted the write is `unknown`, reconciled **by mapping** before any
   retry, and never produces a second post (F06);
 * an API success with a stale public page is `pending_verification`, never a false `verified`, and
