@@ -217,3 +217,43 @@ async def test_external_client_task_visibility_follows_its_vehicle_grant(db, own
                       client_id=f"client-all-{tag}", client_scopes=["read:tasks"])
     rows = (await db.execute(select(Task).where(Task.title.ilike(f"%{tag}%"), *await visibility_clauses(db, unlimited, "all")))).scalars().all()
     assert len(rows) == 3
+
+
+async def test_cases_and_promises_views_are_scoped_and_name_contacts_only_with_contacts_read(client, db, owner, mechanic):
+    from backend.app.models.contacts import Contact
+    from backend.app.models.tasks import Case, Commitment
+    from backend.app.models.vehicles import Vehicle
+    mine = (await dispatch(ctx_for(db, owner), "vehicles.create", {"make": "Suzuki", "model": "Carry", "logistics_state": "received",
+                                                                   "create_missing_task": False, "stock_no": f"CP-{uuid.uuid4().hex[:6]}"})).data["vehicle"]
+    other = (await dispatch(ctx_for(db, owner), "vehicles.create", {"make": "Honda", "model": "Acty", "logistics_state": "received",
+                                                                    "create_missing_task": False, "stock_no": f"CO-{uuid.uuid4().hex[:6]}"})).data["vehicle"]
+    t = (await dispatch(ctx_for(db, owner), "tasks.create", {"title": "Inspect", "vehicle_id": mine["id"]})).data["task"]
+    await dispatch(ctx_for(db, owner), "tasks.assign", {"task_id": t["id"], "owner_user_id": mechanic.id})
+    c = Contact(name="Maria Reyes")
+    db.add(c); await db.flush()
+    past = datetime.now(timezone.utc) - timedelta(days=1)
+    db.add_all([
+        Case(title="Quote from MOL", kind="shipping_quote", status="waiting", vehicle_id=mine["id"], next_check_at=past, waiting_on="MOL"),
+        Case(title="Dispute", kind="dispute", status="open", vehicle_id=other["id"]),
+        Commitment(text="Call back with the price", contact_id=c.id, vehicle_id=mine["id"], due_at=past, status="open"),
+        Commitment(text="Send photos", contact_id=c.id, vehicle_id=other["id"], status="open"),
+    ])
+    await db.commit()
+
+    login(client, owner)
+    r = await client.get("/api/tasks/cases")
+    assert r.status_code == 200
+    titles = {i["title"]: i for i in r.json()["items"]}
+    assert "Quote from MOL" in titles and "Dispute" in titles and titles["Quote from MOL"]["overdue_check"] is True
+    r = await client.get("/api/tasks/promises")
+    texts = {i["text"]: i for i in r.json()["items"]}
+    assert texts["Call back with the price"]["overdue"] is True and texts["Call back with the price"]["contact_name"] == "Maria Reyes"
+
+    login(client, mechanic)  # assigned scope, no contacts.read
+    r = await client.get("/api/tasks/cases")
+    assert {i["title"] for i in r.json()["items"]} == {"Quote from MOL"}
+    r = await client.get("/api/tasks/promises")
+    items = r.json()["items"]
+    assert [i["text"] for i in items] == ["Call back with the price"] and items[0]["contact_name"] is None
+    # the literal path segments never resolve to a task id lookup
+    assert (await client.get("/api/tasks/cases?status=all")).status_code == 200

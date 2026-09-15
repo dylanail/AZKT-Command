@@ -797,8 +797,13 @@ async def shop_cancel_part(ctx: CommandContext, inp: PartCancelIn) -> dict:
 
 # ── reads ────────────────────────────────────────────────────────────────────
 async def board(db: AsyncSession, actor: Actor) -> dict:
+    """Shop board: the trucks physically in the shop (received, or logistics not applicable), grouped by recon state.
+    Trucks still at auction, in export or on a vessel are not in the shop and never appear as cards here; the
+    ready-for-sale column is part of the board (it is the shop's exit), while the Vehicles "Shop" saved view stops at
+    finalization and hands ready trucks to the Sales view."""
     limit = await visible_vehicle_ids(db, actor)
-    q = select(Vehicle).where(Vehicle.archived_at.is_(None), Vehicle.allocation != "candidate")
+    q = select(Vehicle).where(Vehicle.archived_at.is_(None), Vehicle.allocation != "candidate",
+                              Vehicle.logistics_state.in_(("received", "not_applicable")))
     if limit is not None:
         q = q.where(Vehicle.id.in_(list(limit)))
     rows = (await db.execute(q.order_by(Vehicle.updated_at.desc()))).scalars().all()

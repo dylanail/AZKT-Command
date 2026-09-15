@@ -18,7 +18,8 @@ from ..domain.access import visible_vehicle_ids
 from ..domain.actors import Actor
 from ..domain.commands import CommandContext, dispatch
 from ..models import User
-from ..models.tasks import TASK_STATUSES, Task
+from ..models.contacts import Contact
+from ..models.tasks import TASK_STATUSES, Case, Commitment, Task
 from ..services.tasks import serialize_task
 
 router = APIRouter(prefix="/api/tasks", tags=["tasks"])
@@ -253,6 +254,64 @@ async def schedule(from_: str | None = Query(None, alias="from"), to: str | None
         d["day"] = anchor.astimezone(zone).date().isoformat() if anchor else None
         items.append(d)
     return {"items": items, "total": len(items), "from": start.isoformat(), "to": end.isoformat(), "timezone": tz}
+
+
+@router.get("/cases")
+async def list_cases(status: str = Query("open"), limit: int = Query(100, ge=1, le=500),
+                     actor: Actor = Depends(require("tasks.read")), db: AsyncSession = Depends(get_db)):
+    """Secondary Tasks view: cases (a piece of work that waits on someone else, with a next check).
+    Record scope: cases on vehicles outside the person's visible set are hidden; cases with no vehicle are for
+    all-scope actors only."""
+    limit_ids = await visible_vehicle_ids(db, actor)
+    q = select(Case)
+    if status == "open":
+        q = q.where(Case.status.in_(("open", "waiting", "blocked", "needs_owner")))
+    elif status != "all":
+        q = q.where(Case.status == status)
+    if limit_ids is not None:
+        q = q.where(Case.vehicle_id.in_(list(limit_ids)))
+    rows = (await db.execute(q.order_by(func.coalesce(Case.next_check_at, Case.updated_at).asc(), Case.created_at).limit(limit))).scalars().all()
+    now = datetime.now(timezone.utc)
+    items = [{"id": c.id, "title": c.title, "kind": c.kind, "status": c.status, "owner_role": c.owner_role,
+              "owner_user_id": c.owner_user_id, "vehicle_id": c.vehicle_id, "contact_id": c.contact_id,
+              "opportunity_id": c.opportunity_id, "shipment_id": c.shipment_id, "import_request_id": c.import_request_id,
+              "conversation_id": c.conversation_id, "summary": c.summary, "waiting_on": c.waiting_on,
+              "next_action": c.next_action, "next_check_at": c.next_check_at.isoformat() if c.next_check_at else None,
+              "overdue_check": bool(c.next_check_at and ensure_aware(c.next_check_at) < now),
+              "resolved_at": c.resolved_at.isoformat() if c.resolved_at else None, "version": c.version} for c in rows]
+    return {"items": items, "total": len(items), "as_of": now.isoformat()}
+
+
+@router.get("/promises")
+async def list_promises(status: str = Query("open"), limit: int = Query(100, ge=1, le=500),
+                        actor: Actor = Depends(require("tasks.read")), db: AsyncSession = Depends(get_db)):
+    """Secondary Tasks view: promises made to people (commitments) with their due dates.
+    Contact names appear only with contacts.read; vehicle record scope applies."""
+    limit_ids = await visible_vehicle_ids(db, actor)
+    q = select(Commitment)
+    if status == "open":
+        q = q.where(Commitment.status.in_(("open", "proposed")))
+    elif status != "all":
+        q = q.where(Commitment.status == status)
+    if limit_ids is not None:
+        q = q.where(Commitment.vehicle_id.in_(list(limit_ids)))
+    rows = (await db.execute(q.order_by(func.coalesce(Commitment.due_at, Commitment.created_at).asc()).limit(limit))).scalars().all()
+    names: dict[str, str] = {}
+    can_names = actor.role == "owner" or bool(actor.perms.get("contacts.read"))
+    if can_names and rows:
+        cids = {r.contact_id for r in rows if r.contact_id}
+        if cids:
+            for c in (await db.execute(select(Contact).where(Contact.id.in_(list(cids))))).scalars().all():
+                names[c.id] = getattr(c, "display_name", None) or getattr(c, "name", None) or ""
+    now = datetime.now(timezone.utc)
+    items = [{"id": r.id, "text": r.text, "status": r.status, "contact_id": r.contact_id,
+              "contact_name": names.get(r.contact_id) if r.contact_id else None, "vehicle_id": r.vehicle_id,
+              "opportunity_id": r.opportunity_id, "made_by": r.made_by,
+              "made_at": r.made_at.isoformat() if r.made_at else None,
+              "due_at": r.due_at.isoformat() if r.due_at else None,
+              "overdue": bool(r.due_at and ensure_aware(r.due_at) < now and r.status in ("open", "proposed")),
+              "source_kind": r.source_kind, "source_id": r.source_id, "version": r.version} for r in rows]
+    return {"items": items, "total": len(items), "as_of": now.isoformat()}
 
 
 @router.get("/{task_id}")

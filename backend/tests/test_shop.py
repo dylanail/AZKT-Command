@@ -293,3 +293,19 @@ async def test_readiness_and_inspection_dates_cannot_bypass_the_gates(db, owner,
     await dispatch(ctx_for(db, owner), "shop.log_inspection", {"vehicle_id": v["id"], "findings": []})
     ok = await dispatch(ctx_for(db, owner), "shop.move_stage", {"vehicle_id": v["id"], "to_state": "in_recon"})
     assert ok.data["decision"] == "Allowed" and ok.data["milestone"]["kind"] == "recon_started" and ok.data["milestone"]["source_kind"] == "shop"
+
+
+# ── shop board population equals "physically in the shop", grouped by recon state ────────────────
+async def test_shop_board_only_shows_trucks_that_are_in_the_shop(client, db, owner):
+    here = await _vehicle(db, owner, stock_no=f"IN-{_u()}")
+    ready = await _vehicle(db, owner, stock_no=f"RD-{_u()}", recon_state="ready_for_sale")
+    at_auction = await _vehicle(db, owner, stock_no=f"AU-{_u()}", logistics_state="candidate", allocation="candidate")
+    on_vessel = await _vehicle(db, owner, stock_no=f"VS-{_u()}", logistics_state="on_vessel")
+    login(client, owner)
+    r = await client.get("/api/shop/board")
+    assert r.status_code == 200
+    ids = {v["id"] for col in r.json()["columns"] for v in col["vehicles"]}
+    assert here["id"] in ids and ready["id"] in ids, "received trucks (including ready-for-sale) are on the board"
+    assert at_auction["id"] not in ids and on_vessel["id"] not in ids, "trucks not yet here are never shop cards"
+    # the board's total is the number of cards it shows, so the UI subtitle and the cards agree
+    assert r.json()["total"] == sum(col["count"] for col in r.json()["columns"])
