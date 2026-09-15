@@ -17,7 +17,7 @@ screens below. Every record has a stable deep link; list filters live in the URL
 | Lead detail | `/sales?lead=:id` | Contact, inquiry, notes, correspondence, requirements, next task; deposit evidence and fulfilment hand-off. |
 | Import requests | `/requests`, `/requests/:id` | Requirement tiers, agreement/deposit, candidates, activity, linked inbox and purchased vehicle. |
 | Candidate detail | `/candidates/:id` | Auction identity/snapshot/deadline, per-request Pass/Fail/Unknown checks, translations, scoped customer draft, exact bid packet. |
-| Tasks | `/tasks` (`?view=my|all&bucket=upcoming|overdue|unassigned|blocked|waiting&secondary=cases|promises|schedule`) | One task can appear in several views without duplication. |
+| Tasks | `/tasks` (`?view=my|all&bucket=upcoming|overdue|unassigned|blocked|waiting&layout=list|schedule&secondary=cases|promises`) | One task can appear in several views without duplication; Cases and Promises are secondary views over `/api/tasks/cases` and `/api/tasks/promises`. |
 | Employee task / Task detail | `/tasks/:id` (`?action=done|snooze|reschedule|cancel` from reminder emails → confirm first, never on GET) | Complete task with evidence, I'm blocked, upload progress, recoverable draft, Awaiting verification. |
 | Inbox | `/inbox` (`?filter=needs_reply|drafts|taken_over|unmatched|all&account=&q=`), `/inbox/:threadId` | Thread, contextual records, checks, editable reply, Take over / Resume; account and recipients always visible. |
 | Contacts | `/contacts`, `/contacts/:id` | Identities, linked records, history, consent, promises, reversible audited merge. |
@@ -26,7 +26,7 @@ screens below. Every record has a stable deep link; list filters live in the URL
 | Approvals queue / Exact approval | `/approvals`, `/approvals/:id` | Same record from Home, Inbox, Ask, notifications and email deep links; approve / edit / decline; invalidated, expired, execution status and receipt. |
 | Agents / Ask | `/agents`, `/agents/:agentId` (`?context=vehicle:<id>`) and the Ask inspector on every page | Manager default, specialist roles, persistent web+Telegram thread, attachments, streamed replies, missions/runs, coverage map (owner). |
 | Activity | `/activity` (`?kind=&entity=&q=`) | Append-only business events with execution detail, versions, source/receipt, retries. |
-| Finance | `/finance` (`?tab=matching|receivables|payables|costs|sold|ledger&period=&from=&to=`) | Needs matching, Receivables, Payables, Vehicle costs, Sold cohort, Ledger mappings; export CSV. `finance.status` roles see states without amounts. |
+| Finance | `/finance` (`?tab=matching|receivables|payables|vehicles|sold|ledger&period=&from=&to=`; `tab=costs` and `tab=needs-matching` are accepted aliases) | Needs matching, Receivables, Payables, Vehicle costs, Sold cohort, Ledger mappings; export CSV. `finance.status` roles see states without amounts. |
 | Settings → Connections | `/settings/connections` | Gmail (business/personal), Drive, Sheets, Square, WordPress/WooCommerce, Telegram; freshness and coverage. |
 | Settings → Team & access / People | `/settings/team` | Owner: invitations (one-time links, reissue, revoke), roles, per-person permission overrides, cost grants. Manager: scoped People page. |
 | Settings → Reminders | `/settings/reminders` | Channel per reminder kind, digest, business timing (read-only), recent deliveries. |
@@ -48,4 +48,4 @@ Streamable HTTP, bearer token) and `/api/integrations/v1/*` (HTTP equivalent; `G
 documents it). Provider webhooks: `POST /api/webhooks/gmail`, `POST /api/webhooks/square`, `POST /api/telegram/webhook`.
 
 Route deviations from the spec text: the live ledger sync is `POST /api/finance/ledger/source/sync` (the finance router
-owns `/api/finance/ledger/{action}`); Home queue links use `/inbox?filter=unmatched` and `/tasks?secondary=promises`.
+owns `/api/finance/ledger/{action}`); Home queue links use `/inbox?filter=unmatched`, `/tasks?bucket=blocked|overdue` and `/contacts`.
