@@ -610,7 +610,12 @@ async def test_owner_sees_client_health_and_request_history(db, owner, client):
     assert row["state"] == "active" and row["requests_total"] >= 1 and row["use_count"] >= 1
     reqs = await client.get(f"/api/settings/external-clients/{c.id}/requests")
     assert reqs.status_code == 200 and reqs.json()["count"] >= 1
-    assert reqs.json()["items"][0]["status"] in ("done", "answered", "waiting", "running", "needs_input")
+    item = reqs.json()["items"][0]
+    assert item["status"] in ("done", "answered", "waiting", "running", "needs_input")
+    # the correlation id is what ties this request to its activity, run steps and receipts
+    from backend.app.models.external import DelegatedRequest
+    stored = await db.get(DelegatedRequest, item["id"])
+    assert item["correlation_id"] == stored.correlation_id and item["correlation_id"], "traceable end to end"
     client.cookies.clear()
 
 

@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import select
+from sqlalchemy import case, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..core.config import settings
@@ -23,8 +23,19 @@ PROVIDER_LABELS = {
 }
 
 
+# One row per provider is the data model (every writer goes through `get(create=True)`, and the
+# `uq_connection_provider` index enforces it). Rows predating that index are still read
+# deterministically: the live row wins, then the newest, then the highest id.
+_LIVE_RANK = case((Connection.status == "connected", 0),
+                  (Connection.status.in_(("warn", "degraded")), 1),
+                  (Connection.status.in_(("error", "expired")), 2),
+                  else_=3)
+_PICK_ORDER = (_LIVE_RANK, Connection.created_at.desc(), Connection.id.desc())
+
+
 async def get(db: AsyncSession, provider: str, *, create: bool = False) -> Connection | None:
-    row = (await db.execute(select(Connection).where(Connection.provider == provider).order_by(Connection.created_at))).scalars().first()
+    row = (await db.execute(select(Connection).where(Connection.provider == provider)
+                            .order_by(*_PICK_ORDER))).scalars().first()
     if row is None and create:
         row = Connection(provider=provider, label=PROVIDER_LABELS.get(provider, provider), status="disconnected",
                          environment=settings.ENV)
@@ -131,7 +142,9 @@ def serialize(conn: Connection | None, provider: str) -> dict:
 
 
 async def overview(db: AsyncSession) -> list[dict]:
-    rows = {c.provider: c for c in (await db.execute(select(Connection))).scalars().all()}
+    rows: dict[str, Connection] = {}
+    for c in (await db.execute(select(Connection).order_by(*_PICK_ORDER))).scalars().all():
+        rows.setdefault(c.provider, c)      # same deterministic pick as get()
     out = []
     for provider in PROVIDER_LABELS:
         out.append(serialize(rows.get(provider), provider))

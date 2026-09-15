@@ -404,6 +404,30 @@ async def test_an_album_maps_to_one_intake_session_and_retries_never_duplicate(c
     assert len(rows[0].asset_ids) == 3
 
 
+async def test_a_photo_update_survives_the_recording_transport_without_a_keyerror(client, db, owner):
+    """The recording client (token "test") returns no file_path; get_file must short-circuit before
+    reading one, or every real media update raises KeyError out of process_update and burns the job."""
+    from backend.app.models.runtime import Job
+    tg_user_id, chat_id = _uid(), _uid()
+    await pair_owner(client, db, owner, tg_user_id, chat_id)
+    before = len(sent())
+    await post_update(client, message(chat_id, tg_user_id, None,
+                                      photo=[{"file_id": f"p{_uid()}", "width": 1280, "file_size": 900}]))
+    await run_worker_once()
+
+    ev = (await db.execute(select(ProviderEvent).where(ProviderEvent.provider == "telegram")
+                           .order_by(ProviderEvent.received_at.desc())
+                           .execution_options(populate_existing=True))).scalars().first()
+    assert ev.processed_at is not None, "the update is handled, not left to crash"
+    assert "KeyError" not in (ev.error or ""), f"get_file leaked a KeyError: {ev.error}"
+    job = (await db.execute(select(Job).where(Job.kind == "telegram.process_update")
+                            .order_by(Job.created_at.desc()).execution_options(populate_existing=True))).scalars().first()
+    assert job.state == "done" and job.attempts == 1 and not (job.last_error or ""), \
+        f"job burned attempts: {job.last_error}"
+    assert any(m["method"] == "getFile" for m in telegram_bot.recorded()), "the download was attempted"
+    assert len(sent()) > before, "the chat is told what happened, truthfully"
+
+
 # ── webhook rotation ────────────────────────────────────────────────────────
 async def test_set_webhook_is_owner_only_and_runs_as_a_fenced_external_action(client, db, owner, mechanic):
     from backend.app.models.runtime import ExternalAction

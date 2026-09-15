@@ -307,6 +307,14 @@ async def check_rate(db, client: ExternalClient, *, commit: bool = True) -> None
         await db.flush()
 
 
+def role_work_cap() -> int:
+    """How much work one agent role may start in a single sweep pass (spec §10.4).
+
+    The connector's own per-client `concurrent` quota bounds one caller; this bounds the *role*, so a
+    burst of due missions is drained over successive passes instead of starting all at once."""
+    return max(1, int(settings.AGENT_ROLE_CONCURRENCY or 1))
+
+
 async def check_concurrency(db, client: ExternalClient) -> None:
     """How much work this client may have in flight at once (spec §10.8)."""
     quota = {**DEFAULT_QUOTA, **(client.quota or {})}
@@ -643,7 +651,7 @@ def openapi_lite() -> dict:
         "idempotency": "POST /ask requires request_key; the same (client, request_key) always maps to the same "
                        "request and mission. A dropped connection is not a new command.",
         "quotas": {"per_minute": DEFAULT_QUOTA["per_minute"], "concurrent": DEFAULT_QUOTA["concurrent"],
-                   "on_exceeded": "429 with Retry-After"},
+                   "role_work_per_pass": role_work_cap(), "on_exceeded": "429 with Retry-After"},
         "operations": [
             {"op": "ask", "method": "POST", "path": "/ask",
              "input": {"message": "string (required)", "entity_refs": "[{kind,id}]", "asset_ids": "[asset id]",

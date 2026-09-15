@@ -829,14 +829,27 @@ async def resume(db, mission: Mission, *, reason: str, trigger: str = "resume") 
 
 @sweep("missions.resume_due", 60)
 async def _resume_due(session_factory) -> int:
-    """Deterministic follow-through: a waiting mission whose next check is due gets a new run (spec §12.4)."""
+    """Deterministic follow-through: a waiting mission whose next check is due gets a new run (spec §12.4).
+
+    Bounded per role (`AGENT_ROLE_CONCURRENCY`): a burst of due missions for one role is drained over
+    successive passes, so one role can never take the whole worker. The missions that wait keep their
+    due `next_check_at`, so nothing is dropped — it is simply next in line.
+    """
+    from ..services.external_clients import role_work_cap
+    cap = role_work_cap()
     n = 0
     async with session_factory() as db:
         rows = (await db.execute(select(Mission).where(
             Mission.status.in_(("waiting_until", "waiting_external")),
-            Mission.next_check_at.is_not(None), Mission.next_check_at <= _now()).limit(50))).scalars().all()
+            Mission.next_check_at.is_not(None), Mission.next_check_at <= _now())
+            .order_by(Mission.next_check_at, Mission.created_at).limit(50))).scalars().all()
+        started: dict[str, int] = {}
         for m in rows:
+            role = m.role or "manager"
+            if started.get(role, 0) >= cap:
+                continue
             await resume(db, m, reason=f"next check due ({m.waiting_on or 'time'})", trigger="sweep")
+            started[role] = started.get(role, 0) + 1
             n += 1
         await db.commit()
     return n

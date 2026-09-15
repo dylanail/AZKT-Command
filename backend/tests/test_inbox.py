@@ -27,7 +27,7 @@ from backend.app.models.notify import Notification
 from backend.app.models.runtime import Job
 from backend.app.services import connections as conn_svc
 from backend.tests import fixtures_gmail as fx
-from backend.tests.conftest import ctx_for, login, run_worker_once
+from backend.tests.conftest import actor_of, ctx_for, login, run_worker_once
 
 FAKES: dict[str, FakeGmail] = {}
 NOW = datetime.now(timezone.utc)
@@ -608,3 +608,170 @@ async def _conv_of(db, conn: Connection, thread_id: str) -> Conversation:
 
 async def _notifications(db) -> list[Notification]:
     return (await db.execute(select(Notification))).scalars().all()
+
+
+# ── record scope on inbox writes ─────────────────────────────────────────────
+async def test_a_scoped_person_cannot_act_on_a_thread_outside_their_record_scope(db, owner):
+    """An assigned-scope holder of inbox.draft may only work threads whose linked vehicle is in their
+    visible set — the same rule list_threads applies on the read side."""
+    import uuid
+
+    import pytest
+
+    from backend.app.core.errors import Denied
+    from backend.app.models.tasks import Task
+    from backend.tests.conftest import make_user
+
+    tag = uuid.uuid4().hex[:6]
+    conn = await make_conn(db, "gmail_business", f"scope-{tag}@azkeitrucks.com")
+    await make_contact(db, owner, f"Buyer {tag}", f"buyer-{tag}@example.com")
+
+    async def vehicle(stock: str) -> str:
+        res = await dispatch(ctx_for(db, owner), "vehicles.create",
+                             {"title": f"Kei truck {stock}", "stock_no": stock, "make": "Honda", "model": "Acty",
+                              "model_year": 1995, "create_missing_task": False})
+        return res.data["vehicle"]["id"]
+
+    mine, theirs = await vehicle(f"STK-{tag}-A"), await vehicle(f"STK-{tag}-B")
+    sales = await make_user(db, f"sales{tag}", "sales", scope="assigned")
+    db.add(Task(title=f"Prep {tag}", owner_user_id=sales.id, vehicle_id=mine, status="open"))
+    await db.commit()
+
+    async def thread(n: int, vehicle_id: str) -> str:
+        raw = raw_from(f"m-scope-{tag}-{n}", f"t-scope-{tag}-{n}", from_addr=f"Buyer {tag} <buyer-{tag}@example.com>",
+                       to="info@azkeitrucks.com", subject=f"Question {tag}-{n}", text="Is this truck still available?")
+        res = await dispatch(ctx_for(db, owner), "inbox.ingest_message", ingest_payload(conn, raw))
+        cid = res.data["conversation"]["id"]
+        await dispatch(ctx_for(db, owner), "inbox.link_record",
+                       {"conversation_id": cid, "kind": "vehicle", "id": vehicle_id, "match": "matched"})
+        return cid
+
+    visible, hidden = await thread(1, mine), await thread(2, theirs)
+    drafts_before = await db.scalar(select(func.count()).select_from(Draft).where(Draft.conversation_id == hidden))
+
+    for command, payload in (("reply.prepare", {"conversation_id": hidden}),
+                             ("inbox.take_over", {"conversation_id": hidden}),
+                             ("inbox.archive", {"conversation_id": hidden})):
+        with pytest.raises(Denied) as e:
+            await dispatch(ctx_for(db, sales), command, payload)
+        assert "not assigned to you" in str(e.value), command
+
+    assert await db.scalar(select(func.count()).select_from(Draft).where(Draft.conversation_id == hidden)) == drafts_before, \
+        "a refused prepare leaves no draft behind"
+    c = await db.get(Conversation, hidden)
+    await db.refresh(c)
+    assert c.state != "taken_over" and c.takeover_by is None, "nothing on the thread changed"
+
+    # the same person works the thread that is in their scope
+    res = await dispatch(ctx_for(db, sales), "reply.prepare", {"conversation_id": visible})
+    assert res.status == "ok" and res.data["draft"]["id"]
+    took = await dispatch(ctx_for(db, sales), "inbox.take_over", {"conversation_id": visible})
+    assert took.status == "ok"
+
+
+async def test_thread_list_carries_a_snippet_and_a_real_total_and_counts_match(client, db, owner):
+    """`total` is the size of the scoped filter, not the size of the page, and every row carries the
+    opening of its newest message so the list is readable without opening each thread."""
+    import uuid
+
+    tag = uuid.uuid4().hex[:6]
+    account = f"counts-{tag}@azkeitrucks.com"
+    conn = await make_conn(db, "gmail_business", account)
+    await make_contact(db, owner, f"Asker {tag}", f"asker-{tag}@example.com")
+    bodies = ["First question about the Acty.", "Second question about the Carry.", "Third question about the Hijet."]
+    for i, body in enumerate(bodies):
+        raw = raw_from(f"m-count-{tag}-{i}", f"t-count-{tag}-{i}", from_addr=f"Asker {tag} <asker-{tag}@example.com>",
+                       to="info@azkeitrucks.com", subject=f"Question {tag}-{i}",
+                       text=f"{body}\n\n> quoted history that is not the new text", at=NOW + timedelta(minutes=i))
+        await dispatch(ctx_for(db, owner), "inbox.ingest_message", ingest_payload(conn, raw))
+
+    login(client, owner)
+    page = (await client.get("/api/inbox/threads", params={"filter": "needs_reply", "account": account, "limit": 1})).json()
+    assert len(page["items"]) == 1 and page["total"] == 3, "the page is one row; the total counts the filter"
+    assert page["limit"] == 1 and page["offset"] == 0
+    snippet = page["items"][0]["snippet"]
+    assert snippet and snippet in " ".join(bodies), f"unexpected snippet {snippet!r}"
+    assert "quoted history" not in snippet and len(snippet) <= 160
+    assert page["items"][0]["last_message"]["direction"] == "in"
+
+    rest = (await client.get("/api/inbox/threads", params={"filter": "needs_reply", "account": account,
+                                                           "limit": 50, "offset": 1})).json()
+    assert len(rest["items"]) == 2 and rest["total"] == 3, "paging does not change the total"
+
+    counts = (await client.get("/api/inbox/counts", params={"account": account})).json()
+    assert set(counts) == {"needs_reply", "drafts", "taken_over", "unmatched", "all"}
+    assert counts["needs_reply"] == 3 and counts["all"] == 3 and counts["taken_over"] == 0
+    await dispatch(ctx_for(db, owner), "inbox.take_over", {"conversation_id": page["items"][0]["id"]})
+    counts = (await client.get("/api/inbox/counts", params={"account": account})).json()
+    assert counts["taken_over"] == 1 and counts["needs_reply"] == 2 and counts["all"] == 3
+
+
+async def test_an_unmatched_thread_can_be_identified_by_contact_alone(db, owner):
+    """B03: a thread from a person we know, about nothing recorded yet, gets an identity link without
+    inventing a business record."""
+    import uuid
+
+    tag = uuid.uuid4().hex[:6]
+    conn = await make_conn(db, "gmail_business", f"ident-{tag}@azkeitrucks.com")
+    raw = raw_from(f"m-ident-{tag}", f"t-ident-{tag}", from_addr=f"Stranger {tag} <stranger-{tag}@example.com>",
+                   to="info@azkeitrucks.com", subject=f"Hello {tag}", text="Do you ship to Nevada?")
+    res = await dispatch(ctx_for(db, owner), "inbox.ingest_message", ingest_payload(conn, raw))
+    conv = await db.get(Conversation, res.data["conversation"]["id"])
+    assert conv.state == "unmatched" and conv.contact_match != "matched" and conv.links == []
+
+    # the person writes from an address we have never recorded; someone recognises them by hand
+    contact = await make_contact(db, owner, f"Known {tag}", f"known-{tag}@example.com")
+    out = await dispatch(ctx_for(db, owner), "inbox.link_record",
+                         {"conversation_id": conv.id, "kind": "contact", "id": contact.id,
+                          "reason": "same address, confirmed on the phone"})
+    assert out.status == "ok"
+    await db.refresh(conv)
+    assert conv.contact_id == contact.id and conv.contact_match == "matched"
+    assert conv.links == [], "an identity link never invents a business record"
+    assert conv.state == "needs_reply", "the thread is no longer unmatched"
+    assert any("same address" in r for r in conv.match_reasons), conv.match_reasons
+
+
+async def test_home_unmatched_is_scope_safe_and_capped(db, owner):
+    """Home's "not matched to a record" group reads the same scoped set as the inbox, caps the list at
+    ten and still reports the real total."""
+    import uuid
+
+    from backend.app.models.tasks import Task
+    from backend.app.services import inbox as inbox_svc
+    from backend.tests.conftest import make_user
+
+    tag = uuid.uuid4().hex[:6]
+    conn = await make_conn(db, "gmail_business", f"home-{tag}@azkeitrucks.com")
+    base = (await inbox_svc.home_unmatched(db, actor_of(owner)))["total"]
+    newest = NOW + timedelta(days=1)          # the newest threads in the database, so ordering is decidable
+    for i in range(12):
+        raw = raw_from(f"m-home-{tag}-{i}", f"t-home-{tag}-{i}",
+                       from_addr=f"Nobody{i} {tag} <nobody{i}-{tag}@example.com>", to="info@azkeitrucks.com",
+                       subject=f"Unknown {tag}-{i}", text="Who do I talk to about a truck?",
+                       at=newest + timedelta(minutes=i))
+        await dispatch(ctx_for(db, owner), "inbox.ingest_message", ingest_payload(conn, raw))
+
+    out = await inbox_svc.home_unmatched(db, actor_of(owner))
+    assert out["total"] == base + 12 and len(out["items"]) == 10, "the total is real, the list is capped"
+    first = out["items"][0]
+    assert first["kind"] == "conversation" and set(first) == {"kind", "id", "subject", "from", "at"}
+    assert first["subject"].startswith(f"Unknown {tag}") and first["from"].endswith("@example.com") and first["at"]
+
+    # a scoped person sees the unlinked threads too, but never one linked to a vehicle outside their scope
+    sales = await make_user(db, f"home{tag}", "sales", scope="assigned")
+    db.add(Task(title=f"Anything {tag}", owner_user_id=sales.id, status="open"))
+    await db.commit()
+    scoped_before = await inbox_svc.home_unmatched(db, actor_of(sales))
+    assert first["id"] in {i["id"] for i in scoped_before["items"]}
+
+    res = await dispatch(ctx_for(db, owner), "vehicles.create",
+                         {"title": f"Kei truck {tag}", "stock_no": f"STK-HOME-{tag}", "make": "Honda",
+                          "model": "Acty", "model_year": 1996, "create_missing_task": False})
+    await dispatch(ctx_for(db, owner), "inbox.link_record",
+                   {"conversation_id": first["id"], "kind": "vehicle", "id": res.data["vehicle"]["id"],
+                    "match": "proposed"})
+
+    scoped_after = await inbox_svc.home_unmatched(db, actor_of(sales))
+    assert first["id"] not in {i["id"] for i in scoped_after["items"]}, "not on their Home"
+    assert scoped_after["total"] == scoped_before["total"] - 1

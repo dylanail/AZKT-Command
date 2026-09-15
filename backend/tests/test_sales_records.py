@@ -251,12 +251,14 @@ async def test_A03_sale_reads_hide_every_money_field_from_finance_status_only(cl
     sale = body["sale"]
     assert sale["money_hidden"] is True and sale["price"] is None and sale["net_sale_value"] is None
     assert sale["status"] == "completed" and sale["terms"]["reservation_days"] == 7      # state and non-money terms stay
+    # the amounts as they are actually written (bare digits also match random ids and timestamps)
     for key in ("terms", "credits_history", "restatements", "exceptions"):
         blob = str(sale[key])
-        assert not any(tok in blob for tok in ("8000", "500.00", "1200", "250")), f"money leaked in {key}"
+        assert not any(tok in blob for tok in ("8000.00", "500.00", "1200.00", "250.00")), f"money leaked in {key}"
     assert body["invoices"] == [] and body["agreement"] is None
     row = next(x for x in (await client.get("/api/finance/sales")).json()["items"] if x["id"] == s["id"])
-    assert row["money_hidden"] is True and "250" not in str(row["credits_history"]) and "1200" not in str(row["terms"])
+    assert row["money_hidden"] is True and "250.00" not in str(row["credits_history"]) \
+        and "1200.00" not in str(row["terms"])
     login(client, owner)
     full = (await client.get(f"/api/finance/sales/{s['id']}")).json()["sale"]
     assert full["price"]["amount"] == "8000.00" and full["net_sale_value"]["amount"] == "7750.00"

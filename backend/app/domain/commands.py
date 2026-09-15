@@ -154,6 +154,56 @@ async def _assigned_sets(db, actor: Actor) -> tuple[set[str], set[str]]:
     return {v for _, v in rows if v}, {t for t, _ in rows}
 
 
+async def _expand_records(db, records: list[tuple[str, str]]) -> list[tuple[str, str]]:
+    """Some commands name an indirect record — a listing package rather than the vehicle it describes.
+    Record scope, the approval's entity binding and invalidate_for_entity all work on the business
+    record that owns it, so resolve those here, once, before any of them run."""
+    pkg_ids = [i for k, i in records if k == "listing_package"]
+    if not pkg_ids:
+        return records
+    from ..models.listings import ListingPackage
+    owner = {pid: vid for pid, vid in (await db.execute(
+        select(ListingPackage.id, ListingPackage.vehicle_id).where(ListingPackage.id.in_(pkg_ids)))).all() if vid}
+    out: list[tuple[str, str]] = []
+    for kind, rid in records:
+        if kind == "listing_package":
+            if rid in owner:
+                out.append(("vehicle", owner[rid]))
+            continue        # an unknown package is the handler's NotFound to report, not a scope refusal
+        out.append((kind, rid))
+    return out
+
+
+async def _thread_scope(db, records: list[tuple[str, str]]) -> dict[str, dict]:
+    """Resolve `conversation` / `draft` records to what record scope needs: the vehicles the thread is
+    linked to and whether it lives on the personal account. Mirrors services/inbox.list_threads.
+
+    A record id that resolves to nothing is left out, so a missing row is still reported honestly by
+    the handler (404) instead of becoming a scope refusal."""
+    by_record = {i: i for k, i in records if k == "conversation"}
+    draft_ids = {i for k, i in records if k == "draft"}
+    if not by_record and not draft_ids:
+        return {}
+    from ..models.comms import Connection, Conversation, Draft
+    if draft_ids:
+        for did, cid in (await db.execute(select(Draft.id, Draft.conversation_id)
+                                          .where(Draft.id.in_(draft_ids)))).all():
+            if cid:
+                by_record[did] = cid
+    convs = {c.id: c for c in (await db.execute(select(Conversation).where(
+        Conversation.id.in_(set(by_record.values()))))).scalars().all()}
+    personal = set((await db.execute(select(Connection.id).where(
+        Connection.provider == "gmail_personal"))).scalars().all())
+    out: dict[str, dict] = {}
+    for rid, cid in by_record.items():
+        c = convs.get(cid)
+        if c is None:
+            continue
+        out[rid] = {"vehicle_ids": [l["id"] for l in (c.links or []) if l.get("kind") == "vehicle" and l.get("id")],
+                    "personal": c.connection_id in personal}
+    return out
+
+
 async def dispatch(ctx: CommandContext, name: str, payload: dict | BaseModel, *, commit: bool = True) -> CommandResult:
     spec = spec_for(name)
     try:
@@ -176,9 +226,10 @@ async def dispatch(ctx: CommandContext, name: str, payload: dict | BaseModel, *,
 
     # record scope
     records = spec.records(inp) if spec.records else []
-    records = [(k, i) for k, i in records if i]
+    records = await _expand_records(ctx.db, [(k, i) for k, i in records if i])
     assigned_vehicles, assigned_tasks = await _assigned_sets(ctx.db, ctx.actor)
-    record_reasons = policy.check_record_scope(ctx.actor, records, assigned_vehicles, assigned_tasks)
+    threads = await _thread_scope(ctx.db, records)
+    record_reasons = policy.check_record_scope(ctx.actor, records, assigned_vehicles, assigned_tasks, threads=threads)
 
     decision = await policy.evaluate(ctx.db, ctx.actor, spec, inp, approval=ctx.approval, record_reasons=record_reasons)
 

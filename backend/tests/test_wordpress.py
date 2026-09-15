@@ -366,3 +366,55 @@ async def test_F08_a_schema_change_pauses_the_version_that_is_currently_writing(
         # the new draft is the way forward; it is not writable until it is validated and activated
         assert data["profile"]["status"] == "draft"
         assert site_svc.writable(await db.get(SiteProfile, data["profile"]["id"]))[0] is False
+
+
+# ── H08: a non-production deployment never writes to a production site ───────
+async def test_H08_staging_never_writes_to_a_production_site(monkeypatch):
+    """The delivering adapter is guarded exactly like the delivering email transport; the in-memory
+    fixture is exempt, because nothing leaves the process."""
+    from backend.app.core.config import settings
+
+    calls: list[tuple[str, str]] = []
+
+    async def request(self, method, path, *, params=None, json=None):
+        calls.append((method, path))
+        return {"id": 77, "sku": "STK-H08", "name": "Kei truck", "regular_price": "9500.00",
+                "status": (json or {}).get("status", "draft"), "permalink": f"{self.base_url}/listing/77",
+                "meta_data": [], "stock_status": "instock"}
+
+    monkeypatch.setattr(wp._HttpBase, "request", request)
+    monkeypatch.setattr(settings, "ENV", "staging")
+    monkeypatch.setattr(settings, "NON_PROD_DESTINATION_ALLOWLIST", "")
+
+    live = wp.WebsiteAdapter(wp=wp.WordPressAdapter(SITE_URL, "azkt", "app-pass"),
+                             woo=wp.WooAdapter(SITE_URL, "ck_test", "cs_test"), base_url=SITE_URL)
+    profile = {"content_type": "product"}
+    package = {"headline": "2018 Daihatsu Hijet", "body": "Runs and drives.", "price": "9500.00",
+               "sku": "STK-H08", "availability": "available", "media": [], "package_hash": "h1",
+               "vehicle_id": "veh-h08"}
+
+    for label, call in (("upsert_draft", lambda: live.upsert_draft(package, profile)),
+                        ("publish", lambda: live.publish("77", package, profile)),
+                        ("update_availability", lambda: live.update_availability("77", "sold", profile)),
+                        ("archive", lambda: live.archive("77", profile))):
+        with pytest.raises(Blocked) as ei:
+            await call()
+        assert "production site destination" in str(ei.value), label
+        assert ei.value.detail.get("status") == "destination_blocked"
+    assert calls == [], "not one request reached the production site"
+
+    # an allowlisted site is a deliberate choice and still writes
+    monkeypatch.setattr(settings, "NON_PROD_DESTINATION_ALLOWLIST", SITE_URL)
+    out = await live.upsert_draft(package, profile)
+    assert out["state"] == "accepted" and out["external_id"] == "77" and calls, "the allowlisted write goes through"
+
+    # production is not guarded at all (the allowlist is a non-production safety net)
+    monkeypatch.setattr(settings, "NON_PROD_DESTINATION_ALLOWLIST", "")
+    monkeypatch.setattr(settings, "ENV", "production")
+    assert (await live.publish("77", package, profile))["state"] == "published"
+
+    # the fixture adapter is exempt like the memory email transport: nothing is delivered
+    monkeypatch.setattr(settings, "ENV", "staging")
+    fake = wordpress_fake(with_existing=False)
+    drafted = await fake.upsert_draft(package, profile)
+    assert drafted["state"] == "accepted" and fake.calls, "tests are never blocked by the destination guard"

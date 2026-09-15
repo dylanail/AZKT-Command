@@ -56,6 +56,9 @@ class Settings(BaseSettings):
     MODEL_DAILY_BUDGET_USD: float = 0.0      # 0 = not configured -> discretionary AI work stays off
     MODEL_MONTHLY_BUDGET_USD: float = 0.0
     MAX_DELEGATION_DEPTH: int = 2
+    # how many due missions one agent role may pick up in a single missions.resume_due pass, so a
+    # burst of due work is drained over successive passes instead of all at once
+    AGENT_ROLE_CONCURRENCY: int = 3
 
     # ── email (reminders) ────────────────────────────────────────────────
     EMAIL_TRANSPORT: str = "log"             # log | smtp | gmail

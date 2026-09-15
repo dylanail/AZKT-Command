@@ -59,7 +59,39 @@ def _iso(dt: datetime | None) -> str | None:
     return dt.isoformat() if dt else None
 
 
-def serialize_draft(d: Draft, *, actor=None, include_checks: bool = True) -> dict:
+SEND_STATES = ("not_submitted", "awaiting_approval", "approved", "sending", "sent", "handed_off",
+               "failed", "result_unknown")
+# ExternalAction.state (services/approvals.py) -> what the person is looking at.
+_ACTION_SEND_STATE = {"intent": "approved", "claimed": "sending", "executing": "sending",
+                      "confirmed": "sent", "reconciled": "sent", "handed_off": "handed_off",
+                      "failed": "failed", "unknown": "result_unknown"}
+_DRAFT_SEND_STATE = {"sent": "sent", "sending": "sending", "pending_approval": "awaiting_approval",
+                     "approved": "approved"}
+
+
+def send_state(d: Draft, action: ExternalAction | None = None) -> dict:
+    """Where this reply actually is. Derived from the ExternalAction when one exists (it owns the
+    truth about the provider call) and from the draft otherwise; never a guess dressed up as a send."""
+    state = _ACTION_SEND_STATE.get(action.state) if (action is not None and action.state != "cancelled") else None
+    if state is None:
+        state = _DRAFT_SEND_STATE.get(d.status, "not_submitted")
+    receipt = dict((action.receipt if action is not None else None) or d.receipt or {})
+    provider_ref = receipt.get("provider_ref") or (action.provider_ref if action is not None else None)
+    at = _iso(action.executed_at) if (action is not None and action.executed_at) else _iso(d.sent_at)
+    return {"state": state, "external_action_id": d.external_action_id or (action.id if action is not None else None),
+            "receipt": {"provider_ref": provider_ref}, "at": at}
+
+
+async def draft_send_action(db, d: Draft) -> ExternalAction | None:
+    return await db.get(ExternalAction, d.external_action_id) if d.external_action_id else None
+
+
+async def serialize_draft_live(db, d: Draft, **kw) -> dict:
+    """serialize_draft with the send state read from the current ExternalAction."""
+    return serialize_draft(d, action=await draft_send_action(db, d), **kw)
+
+
+def serialize_draft(d: Draft, *, actor=None, include_checks: bool = True, action: ExternalAction | None = None) -> dict:
     facts = dict(d.facts or {})
     if actor is not None and not can_see_costs(actor):
         facts = {**facts, "prices": None, "money_hidden": True}
@@ -75,6 +107,7 @@ def serialize_draft(d: Draft, *, actor=None, include_checks: bool = True) -> dic
            "commitments": list(d.commitments or []), "send_decision_version": d.send_decision_version,
            "based_on_inbound_id": d.based_on_inbound_id, "receipt": dict(d.receipt or {}),
            "sent_at": _iso(d.sent_at), "created_at": _iso(d.created_at), "updated_at": _iso(d.updated_at)}
+    out["send"] = send_state(d, action)
     if include_checks:
         checks = list(d.checks or [])
         out["checks"] = sorted(checks, key=lambda c: (bool(c.get("ok")), not c.get("blocking")))
@@ -421,7 +454,7 @@ async def prepare_reply(ctx: CommandContext, *, conversation_id: str, reason: st
     ctx.emit("draft.changed", aggregate_type="conversation", aggregate_id=conv.id, aggregate_version=conv.version,
              payload={"draft_id": d.id, "version": version, "status": d.status, "generator": generator})
     await _mirror_provider_draft(ctx, conv, d)
-    return serialize_draft(d, actor=ctx.actor)
+    return await serialize_draft_live(ctx.db, d, actor=ctx.actor)
 
 
 def _mentions(body: str, item: dict) -> bool:
@@ -460,6 +493,7 @@ class PrepareIn(BaseModel):
 
 
 @command("reply.prepare", input=PrepareIn, perm="inbox.draft", action_class="internal", workflow_key=WORKFLOW_KEY,
+         records=lambda p: [("conversation", p.conversation_id)],
          description="Build the answer plan, retrieve current facts and approved policy, draft a reply and run every "
                      "material check. A draft with unresolved facts stays blocked and can never be sent.")
 async def reply_prepare(ctx: CommandContext, inp: PrepareIn) -> dict:
@@ -482,6 +516,7 @@ class EditIn(BaseModel):
 
 
 @command("reply.edit", input=EditIn, perm="inbox.draft", action_class="internal", workflow_key=WORKFLOW_KEY,
+         records=lambda p: [("draft", p.draft_id)],
          description="A person edits a draft. The edit creates a new version, supersedes the old one (and its "
                      "approval), re-runs every check and feeds the learning service scoped lessons.")
 async def reply_edit(ctx: CommandContext, inp: EditIn) -> dict:
@@ -543,7 +578,7 @@ async def reply_edit(ctx: CommandContext, inp: EditIn) -> dict:
     ctx.emit("draft.changed", aggregate_type="conversation", aggregate_id=conv.id, aggregate_version=conv.version,
              payload={"draft_id": new.id, "version": new.draft_version, "status": new.status, "change": "edited"})
     await _mirror_provider_draft(ctx, conv, new)
-    return {"draft": serialize_draft(new, actor=ctx.actor), "lessons": lessons}
+    return {"draft": await serialize_draft_live(ctx.db, new, actor=ctx.actor), "lessons": lessons}
 
 
 async def _draft(ctx: CommandContext, draft_id: str, expected_version: int | None = None) -> Draft:
@@ -563,7 +598,7 @@ class SubmitIn(BaseModel):
 
 
 @command("reply.submit_for_approval", input=SubmitIn, perm="inbox.draft", action_class="internal",
-         workflow_key=WORKFLOW_KEY,
+         workflow_key=WORKFLOW_KEY, records=lambda p: [("draft", p.draft_id)],
          description="Revalidate a draft and submit the exact send for review. Nothing leaves here: the send itself is "
                      "a separate consequential command bound to this exact draft version.")
 async def reply_submit_for_approval(ctx: CommandContext, inp: SubmitIn) -> dict:
@@ -609,7 +644,7 @@ async def reply_submit_for_approval(ctx: CommandContext, inp: SubmitIn) -> dict:
     elif res.status == "ok":
         d.status = "sending"
         d.external_action_id = (res.data or {}).get("external_action_id")
-    return {"draft": serialize_draft(d, actor=ctx.actor), "decision": res.decision, "status": res.status,
+    return {"draft": await serialize_draft_live(ctx.db, d, actor=ctx.actor), "decision": res.decision, "status": res.status,
             "approval_id": res.approval_id}
 
 

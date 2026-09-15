@@ -8,7 +8,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from backend.app.domain.actors import Actor
 from backend.app.models.notify import Notification
@@ -241,3 +241,112 @@ async def test_H11_an_unchecked_source_is_not_reported_as_all_clear(client, db, 
     login(client, owner)
     feed = (await client.get("/api/notifications")).json()
     assert feed["status"]["all_clear"] is False
+
+
+async def test_inapp_preference_switches_bell_items_per_kind(client, db, owner):
+    """The Settings UI can turn the in-app bell off entirely or one reminder kind at a time."""
+    login(client, owner)
+    r = await client.patch("/api/notifications/prefs", json={"inapp": {"task_reminder": False}})
+    assert r.status_code == 200, r.text
+    await db.refresh(owner)
+    assert (owner.notification_prefs or {}).get("inapp") == {"task_reminder": False}
+    assert reminders.inapp_enabled(owner, "task_reminder") is False
+    assert reminders.inapp_enabled(owner, "digest") is True
+
+    r = await client.patch("/api/notifications/prefs", json={"inapp": {"not_a_kind": False}})
+    assert r.status_code == 422 and "unknown reminder kind" in r.text
+
+    r = await client.patch("/api/notifications/prefs", json={"inapp": False})
+    assert r.status_code == 200
+    await db.refresh(owner)
+    assert reminders.inapp_enabled(owner) is False
+    prefs = (await client.get("/api/notifications/prefs")).json()["prefs"]["notification_prefs"]
+    assert prefs["inapp"] is False
+    await client.patch("/api/notifications/prefs", json={"inapp": True})
+    await db.refresh(owner)
+
+
+async def test_prefs_say_where_owner_reminders_go_without_exposing_the_address(client, db, owner, mechanic):
+    from backend.app.core.config import settings
+
+    login(client, owner)
+    d = (await client.get("/api/notifications/prefs")).json()["business_defaults"]
+    assert d["owner_reminder_email_configured"] is True
+    assert d["owner_reminder_email"] == settings.OWNER_REMINDER_EMAIL, "the owner sees their own address"
+    assert d["owner_reminder_email_masked"].endswith("@example.com") and "***" in d["owner_reminder_email_masked"]
+
+    login(client, mechanic)
+    d = (await client.get("/api/notifications/prefs")).json()["business_defaults"]
+    assert d["owner_reminder_email_configured"] is True
+    assert d["owner_reminder_email"] == d["owner_reminder_email_masked"]
+    assert settings.OWNER_REMINDER_EMAIL not in str(d), "the full owner address never reaches a non-owner"
+
+
+async def test_mine_deliveries_are_recipient_scoped_and_hide_other_destinations(client, db, owner, mechanic):
+    login(client, owner)
+    tag = _u()
+    mine = (await client.post("/api/tasks", json={"title": f"Mechanic reminder {tag}", "type": "call",
+                                                  "due_at": _iso(timedelta(hours=3)), "reminder_kind": "15m",
+                                                  "owner_user_id": mechanic.id, "dedupe": False})).json()["data"]["task"]
+    theirs = (await client.post("/api/tasks", json={"title": f"Owner reminder {tag}", "type": "call",
+                                                    "due_at": _iso(timedelta(hours=3)), "reminder_kind": "15m",
+                                                    "owner_user_id": owner.id, "dedupe": False})).json()["data"]["task"]
+    await run_worker_once()
+
+    login(client, mechanic)
+    body = (await client.get("/api/notifications/deliveries", params={"mine": "true"})).json()
+    assert body["mine"] is True and len(body["deliveries"]) <= 50
+    task_ids = {d["task_id"] for d in body["deliveries"]}
+    assert mine["id"] in task_ids and theirs["id"] not in task_ids, "only the caller's own rows"
+    assert all(d["recipient_user_id"] == mechanic.id for d in body["deliveries"])
+    assert all(d["destination_hidden"] is False for d in body["deliveries"]), "their own destination is theirs to see"
+    assert reminders.recipient_email(owner) not in str(body), "another person's address is never in this list"
+    assert body["deliveries"] == sorted(body["deliveries"], key=lambda d: d["deliver_at"] or "", reverse=True)
+
+
+async def test_bell_actions_work_on_derived_task_and_approval_ids(client, db, owner):
+    """The bell shows derived items (`task:<id>`); snoozing one has to stick, so the action
+    materialises a real notification row for the caller and the feed honours it."""
+    login(client, owner)
+    tag = _u()
+    t = (await client.post("/api/tasks", json={"title": f"Derived {tag}", "due_at": _iso(timedelta(hours=-3)),
+                                               "owner_user_id": owner.id, "dedupe": False})).json()["data"]["task"]
+    feed = (await client.get("/api/notifications")).json()
+    item = next(i for i in feed["high"] if i["entity_id"] == t["id"])
+    assert item["id"] == f"task:{t['id']}" and item["source"] == "derived"
+
+    r = await client.post(f"/api/notifications/{item['id']}/snooze", json={"minutes": 120})
+    assert r.status_code == 200, r.text
+    row = r.json()["data"]["notification"]
+    assert row["state"] == "snoozed" and row["derived_ref"] == f"task:{t['id']}" and row["entity_id"] == t["id"]
+    feed = (await client.get("/api/notifications")).json()
+    assert not any(i["entity_id"] == t["id"] for i in feed["high"] + feed["today"] + feed["later"]), \
+        "a snoozed bell item stays hidden until it is due again"
+    stored = (await db.execute(select(Notification).where(Notification.id == row["id"]))).scalar_one()
+    assert stored.user_id == owner.id and stored.dedupe_key.endswith(f"task:{t['id']}")
+    acts = (await client.get("/api/activity", params={"entity_kind": "notification", "entity_id": row["id"]})).json()
+    assert any("Snoozed" in a["what"] for a in acts["items"]), "the action is audited"
+
+    # dismissing the same derived id upserts the same row, it never creates a second one
+    r = await client.post(f"/api/notifications/{item['id']}/dismiss", json={})
+    assert r.json()["data"]["notification"]["id"] == row["id"]
+    assert await db.scalar(select(func.count()).select_from(Notification).where(
+        Notification.dedupe_key == stored.dedupe_key)) == 1
+
+    # an approval feed id works the same way
+    a = Approval(kind="send_message", command_name="test.send", payload={}, payload_hash=f"h{tag}",
+                 status="pending", title=f"Derived approval {tag}", approval_version=1)
+    db.add(a)
+    await db.commit()
+    r = await client.post(f"/api/notifications/approval:{a.id}/dismiss", json={})
+    assert r.status_code == 200, r.text
+    assert r.json()["data"]["notification"]["entity_kind"] == "approval"
+    feed = (await client.get("/api/notifications")).json()
+    assert not any(i["entity_id"] == a.id for i in feed["today"]), "a dismissed approval leaves the bell"
+
+    # someone else's task is not theirs to snooze
+    from backend.tests.conftest import make_user
+    other = await make_user(db, f"bell{tag}", "mechanic")
+    login(client, other)
+    r = await client.post(f"/api/notifications/task:{t['id']}/snooze", json={"minutes": 10})
+    assert r.status_code == 403

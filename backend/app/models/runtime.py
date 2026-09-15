@@ -8,8 +8,8 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from ..db import Base, BusinessRow
 
-APPROVAL_STATES = ("pending", "approved", "queued", "executing", "confirmed", "failed", "result_unknown",
-                   "declined", "expired", "invalidated", "canceled")
+APPROVAL_STATES = ("pending", "approved", "queued", "executing", "confirmed", "handed_off", "failed",
+                   "result_unknown", "declined", "expired", "invalidated", "canceled")
 RUN_STATES = ("queued", "running", "waiting_approval", "waiting_external", "waiting_until",
               "needs_information", "succeeded", "failed", "cancelled")
 ROLES = ("manager", "customer_sales", "sourcing", "logistics", "shop", "listings", "finance")
@@ -222,6 +222,7 @@ class Event(Base, BusinessRow):
     received_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     processed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
     attempts: Mapped[int] = mapped_column(Integer, default=0)
+    next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     actor: Mapped[dict] = mapped_column(JSON, default=dict)
 

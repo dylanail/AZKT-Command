@@ -43,6 +43,19 @@ if "test.note" not in REGISTRY:
     async def _exec(db, act):
         return {"provider_ref": "msg-1", "sent": True}
 
+    @command("test.handoff", input=SendIn, perm="inbox.send", action_class="consequential", approval_kind="send_message",
+             summary=lambda p: f"Hand off to {p.to}", limits=lambda p: {"recipients": [p.to]},
+             consequence=lambda p: {"targets": {"recipients": [p.to]}})
+    async def _handoff(ctx, inp):
+        act = await approvals_svc.intend_external_action(ctx, command_name="test.handoff", payload=inp.model_dump(),
+                                                         dedupe_key=f"test.handoff:{inp.to}:{inp.body}", provider="test")
+        return {"external_action_id": act.id}
+
+    @approvals_svc.executor("test.handoff")
+    async def _exec_handoff(db, act):
+        # no adapter could do it: a person has to finish the work by hand
+        return {"sent": False, "handed_off": True, "state": "manual_send_required"}
+
     @jobs.job("test.echo")
     async def _echo(jctx, payload):
         return {"echo": payload.get("x")}
@@ -134,3 +147,80 @@ async def test_external_client_cannot_exceed_scope(db, owner):
         await dispatch(CommandContext(db=db, actor=ext), "test.note", {"text": "x", "vehicle_id": "v2"})
     res = await dispatch(CommandContext(db=db, actor=ext), "test.note", {"text": "x", "vehicle_id": "v1"})
     assert res.status == "ok"
+
+
+async def test_a_failing_outbox_handler_never_commits_its_half_applied_writes(db, owner):
+    """One handler raises after writing a row: that row is rolled back and the event is retried
+    later, while a sibling handler's effect on the same event is kept."""
+    import uuid
+    from datetime import datetime, timezone
+
+    from backend.app.domain import events as events_mod
+    from backend.app import db as dbmod
+
+    tag = uuid.uuid4().hex[:8]
+    if not any(p == "test.savepoint" for p, _ in events_mod.HANDLERS):
+        @events_mod.on_event("test.savepoint")
+        async def _good(db_, ev):                     # noqa: ANN001
+            db_.add(ActivityEntry(at=datetime.now(timezone.utc), actor={}, what=f"sibling kept {ev.payload['tag']}",
+                                  kind="system"))
+            await db_.flush()
+
+        @events_mod.on_event("test.savepoint")
+        async def _bad(db_, ev):                      # noqa: ANN001
+            db_.add(ActivityEntry(at=datetime.now(timezone.utc), actor={}, what=f"partial write {ev.payload['tag']}",
+                                  kind="system"))
+            await db_.flush()
+            raise RuntimeError("handler exploded after writing")
+
+    ev = Event(type="test.savepoint", payload={"tag": tag}, happened_at=datetime.now(timezone.utc), actor={})
+    db.add(ev)
+    await db.commit()
+    ev_id = ev.id
+
+    await events_mod.dispatch_pending(dbmod.SessionLocal, limit=500)
+
+    rows = (await db.execute(select(ActivityEntry).where(ActivityEntry.what.like(f"%{tag}%")))).scalars().all()
+    whats = {r.what for r in rows}
+    assert f"partial write {tag}" not in whats, "the failing handler's write was committed"
+    assert f"sibling kept {tag}" in whats, "the healthy handler's effect was thrown away"
+
+    row = await db.get(Event, ev_id)
+    await db.refresh(row)
+    assert row.processed_at is None and row.attempts == 1, "the event stays pending for a retry"
+    assert "RuntimeError" in (row.error or "") and row.next_attempt_at is not None, "the failure is recorded with backoff"
+
+    # backed off: the next pass does not touch it again, so the sibling handler does not run twice
+    await events_mod.dispatch_pending(dbmod.SessionLocal, limit=500)
+    row = await db.get(Event, ev_id)
+    await db.refresh(row)
+    assert row.attempts == 1, "a backed-off event is not retried immediately"
+    rows = (await db.execute(select(ActivityEntry).where(ActivityEntry.what == f"sibling kept {tag}"))).scalars().all()
+    assert len(rows) == 1
+
+    # when the backoff has elapsed the event is picked up again
+    row.next_attempt_at = datetime.now(timezone.utc)
+    await db.commit()
+    await events_mod.dispatch_pending(dbmod.SessionLocal, limit=500)
+    row = await db.get(Event, ev_id)
+    await db.refresh(row)
+    assert row.attempts == 2 and row.processed_at is None
+
+
+async def test_a_handed_off_action_is_not_labelled_confirmed(db, owner):
+    """An executor that could only hand the work to a person leaves the approval in its own
+    `handed_off` status; "confirmed" is reserved for a provider-confirmed effect."""
+    from backend.app.models.runtime import APPROVAL_STATES
+    assert "handed_off" in APPROVAL_STATES
+    res = await dispatch(ctx_for(db, owner, kind="agent"), "test.handoff", {"to": "h@example.com", "body": "by hand"})
+    a = await db.get(Approval, res.approval_id)
+    await dispatch(ctx_for(db, owner), "approvals.approve", {"approval_id": a.id, "expected_version": 1})
+    await db.refresh(a)
+    assert a.status == "queued"
+    await run_worker_once()
+    await db.refresh(a)
+    act = await db.get(ExternalAction, a.external_action_id)
+    await db.refresh(act)
+    assert act.state == "handed_off" and act.receipt["sent"] is False
+    assert a.status == "handed_off", "work a person still has to finish is never shown as confirmed"
+    assert a.receipt["state"] == "manual_send_required"

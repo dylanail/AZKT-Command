@@ -743,3 +743,44 @@ async def test_permitted_scope_is_frozen_and_never_widened(db, owner):
     actor = await rt.actor_for_mission(db, await db.get(Mission, m.id))
     assert actor.kind == "agent" and actor.perms.get("costs.read") is False
     assert actor.perms.get("tasks.write") is True
+
+
+async def test_a_burst_of_due_missions_is_drained_over_passes_per_role(db, owner):
+    """One role can never take the whole worker: the sweep starts at most AGENT_ROLE_CONCURRENCY runs
+    per role per pass, and the missions that wait keep their place in line."""
+    from backend.app import db as dbmod
+    from backend.app.core.config import settings
+
+    tag = uid()
+    due = datetime.now(timezone.utc) - timedelta(minutes=5)
+    missions = []
+    for i in range(5):
+        m = await make_mission(db, owner, f"Burst {tag} {i}", role="customer_sales")
+        m.status = "waiting_until"
+        m.next_check_at = due + timedelta(seconds=i)
+        m.waiting_on = "vendor reply"
+        missions.append(m)
+    # a second role's due mission is not held back by the first role's burst
+    other = await make_mission(db, owner, f"Other role {tag}", role="logistics")
+    other.status = "waiting_until"
+    other.next_check_at = due
+    await db.commit()
+
+    async def runs_for(m) -> int:
+        return len((await db.execute(select(Run).where(Run.mission_id == m.id)
+                                     .execution_options(populate_existing=True))).scalars().all())
+
+    assert settings.AGENT_ROLE_CONCURRENCY == 3
+    await rt._resume_due(dbmod.SessionLocal)
+    started = [m for m in missions if await runs_for(m) > 0]
+    assert len(started) == 3, "only the cap starts in one pass"
+    assert [m.id for m in started] == [m.id for m in missions[:3]], "the longest-due go first"
+    assert await runs_for(other) == 1, "another role is not blocked by the burst"
+
+    # the rest are still due and drain on the next pass
+    for m in missions[3:]:
+        await db.refresh(m)
+        assert m.status == "waiting_until" and m.next_check_at is not None
+    await rt._resume_due(dbmod.SessionLocal)
+    for m in missions:
+        assert await runs_for(m) > 0, "nothing is dropped, it is only next in line"

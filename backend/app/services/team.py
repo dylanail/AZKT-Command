@@ -78,13 +78,19 @@ def default_notification_prefs() -> dict:
     conversational/case updates prefer Telegram with email fallback."""
     channels = {k: "email_only" for k in ("task_reminder", "overdue", "digest", "deposit_confirmed")}
     channels.update({"case_update": "telegram_fallback_email", "connection_issue": "telegram_fallback_email"})
-    return {"channels": channels, "quiet_hours": None, "digest_time": "08:00"}
+    # the bell is the app's own surface, not an outbound send: on until a person turns it off
+    return {"channels": channels, "inapp": True, "quiet_hours": None, "digest_time": "08:00"}
 
 
 def effective_notification_prefs(stored: dict | None) -> dict:
     base = default_notification_prefs()
     stored = stored or {}
     base["channels"].update({k: v for k, v in (stored.get("channels") or {}).items() if k in DELIVERY_KINDS})
+    inapp = stored.get("inapp")
+    if isinstance(inapp, bool):
+        base["inapp"] = inapp
+    elif isinstance(inapp, dict):
+        base["inapp"] = {k: bool(v) for k, v in inapp.items() if k in DELIVERY_KINDS}
     if stored.get("quiet_hours") is not None:
         base["quiet_hours"] = stored["quiet_hours"]
     if stored.get("digest_time"):
@@ -530,6 +536,8 @@ class QuietHours(BaseModel):
 class NotificationPrefsIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
     channels: dict[str, str] | None = None
+    # in-app bell: one switch for everything, or one per reminder kind
+    inapp: bool | dict[str, bool] | None = None
     quiet_hours: QuietHours | None = None
     clear_quiet_hours: bool = False
     digest_time: str | None = None
@@ -577,6 +585,16 @@ async def me_update_prefs(ctx: CommandContext, inp: MePrefsIn) -> dict:
                     raise ValidationFailed(f"channel mode must be one of {CHANNEL_MODES}")
                 ch[kind] = mode
             prefs["channels"] = ch
+        if np.inapp is not None:
+            if isinstance(np.inapp, bool):
+                prefs["inapp"] = np.inapp
+            else:
+                cur = dict(prefs.get("inapp")) if isinstance(prefs.get("inapp"), dict) else {}
+                for kind, on in np.inapp.items():
+                    if kind not in DELIVERY_KINDS:
+                        raise ValidationFailed(f"unknown reminder kind {kind}; expected one of {DELIVERY_KINDS}")
+                    cur[kind] = bool(on)
+                prefs["inapp"] = cur
         if np.clear_quiet_hours:
             prefs["quiet_hours"] = None
         elif np.quiet_hours is not None:

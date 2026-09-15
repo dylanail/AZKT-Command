@@ -12,8 +12,12 @@ PROVIDERS = ("gmail_business", "gmail_personal", "drive", "sheets", "square", "t
 
 
 class Connection(Base, BusinessRow):
-    """A provider account connection with freshness tracking (spec §3.1, §12.4)."""
+    """A provider account connection with freshness tracking (spec §3.1, §12.4).
+
+    Exactly one row per provider: every writer goes through services/connections.get(create=True),
+    so a second row could only come from a race and would make reads non-deterministic."""
     __tablename__ = "connections"
+    __table_args__ = (UniqueConstraint("provider", name="uq_connection_provider"),)
     provider: Mapped[str] = mapped_column(String, index=True)
     label: Mapped[str] = mapped_column(String, default="")
     account_identity: Mapped[str | None] = mapped_column(String, nullable=True)  # email / merchant id / site url

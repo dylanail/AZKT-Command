@@ -272,7 +272,10 @@ async def _execute_external_action(jctx: jobs.JobContext, payload: dict) -> dict
         return {"stale": True}
     if act.approval_id:
         a = await db.get(Approval, act.approval_id)
-        a.status = {"confirmed": "confirmed", "handed_off": "confirmed", "failed": "failed", "unknown": "result_unknown"}[outcome]
+        # "handed_off" stays its own status: a person still has to finish the work, so it is never
+        # relabelled as a provider-confirmed effect.
+        a.status = {"confirmed": "confirmed", "handed_off": "handed_off", "failed": "failed",
+                    "unknown": "result_unknown"}[outcome]
         a.receipt = receipt
     from ..models.runtime import ActivityEntry, Event
     db.add(ActivityEntry(at=now, actor=act.actor or {"kind": "system"}, what=f"External action {outcome}: {act.command_name}",

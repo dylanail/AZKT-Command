@@ -709,3 +709,81 @@ async def test_a_genuinely_late_reminder_states_the_fact_without_inventing_a_cau
     assert row.late is True
     mail = _mails(tag)[-1]
     assert "late" in mail["text"].lower() and "service interruption" not in mail["text"].lower()
+
+
+async def test_a_transient_transport_error_is_retried_with_bounded_backoff(client, db, owner, monkeypatch):
+    """Nothing was handed to the transport, so this is a retry, not a second copy — three attempts,
+    then the delivery stays failed. setup_blocked and invalid_input are never retried."""
+    from backend.app.adapters import email as email_adapter
+    from backend.app.core.errors import ProviderError, Unsupported
+
+    login(client, owner)
+    tag = _u()
+
+    async def _due(title: str) -> ScheduledDelivery:
+        t = (await client.post("/api/tasks", json={"title": f"{title} {tag}", "type": "call",
+                                                   "due_at": _iso(timedelta(hours=3)), "reminder_kind": "15m",
+                                                   "owner_user_id": owner.id, "dedupe": False})).json()["data"]["task"]
+        await run_worker_once()
+        row = [x for x in await _deliveries(db, t["id"]) if x.kind == "task_reminder"][0]
+        row.deliver_at = datetime.now(timezone.utc) - timedelta(minutes=1)
+        await db.commit()
+        return row
+
+    row = await _due("Flaky transport")
+    attempts = {"n": 0}
+
+    async def flaky(self, msg):
+        attempts["n"] += 1
+        raise ProviderError("smtp error 451: b'try later'", kind="transient", retryable=True)
+
+    monkeypatch.setattr(email_adapter.MemoryTransport, "send", flaky)
+    await run_worker_once()
+    await db.refresh(row)
+    assert row.state == "scheduled" and row.attempts == 1, "the first failure reschedules, it does not fail"
+    assert "retrying in" in (row.last_error or "") and row.deliver_at > datetime.now(timezone.utc)
+    assert not _mails(tag)
+
+    # the backoff elapses and the transport is healthy again: one delivery, never two
+    monkeypatch.undo()
+    row.deliver_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+    await db.commit()
+    await run_worker_once()
+    await db.refresh(row)
+    assert row.state == "accepted" and row.attempts == 2 and attempts["n"] == 1
+    assert len(_mails(tag)) == 1
+
+    # a transport that never recovers stops after three attempts
+    row2 = await _due("Broken transport")
+    monkeypatch.setattr(email_adapter.MemoryTransport, "send", flaky)
+    for expected in ("scheduled", "scheduled", "failed"):
+        row2.deliver_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+        await db.commit()
+        await run_worker_once()
+        await db.refresh(row2)
+        assert row2.state == expected, f"attempt {row2.attempts} -> {row2.state}"
+    assert row2.attempts == 3 and "after 3 attempts" in (row2.last_error or "")
+    monkeypatch.undo()
+
+    # setup_blocked is not a transport hiccup: no retry
+    row3 = await _due("Setup blocked")
+
+    async def unconfigured(self, msg):
+        raise Unsupported("SMTP_HOST not configured")
+
+    monkeypatch.setattr(email_adapter.MemoryTransport, "send", unconfigured)
+    await run_worker_once()
+    await db.refresh(row3)
+    assert row3.state == "failed" and "setup_blocked" in (row3.last_error or "") and row3.attempts == 1
+    monkeypatch.undo()
+
+    # invalid input is not retried either
+    row4 = await _due("Invalid input")
+
+    async def rejected(self, msg):
+        raise ProviderError("smtp error 550: b'no such mailbox'", kind="invalid_input")
+
+    monkeypatch.setattr(email_adapter.MemoryTransport, "send", rejected)
+    await run_worker_once()
+    await db.refresh(row4)
+    assert row4.state == "failed" and row4.attempts == 1 and "550" in (row4.last_error or "")

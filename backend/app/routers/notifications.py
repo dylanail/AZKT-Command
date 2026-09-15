@@ -32,11 +32,20 @@ async def feed(actor: Actor = Depends(current_actor), db: AsyncSession = Depends
 
 
 @router.get("/deliveries")
-async def deliveries(task_id: str | None = Query(default=None), actor: Actor = Depends(current_actor),
+async def deliveries(task_id: str | None = Query(default=None), mine: bool = Query(default=False),
+                     limit: int = Query(50, ge=1, le=50), actor: Actor = Depends(current_actor),
                      db: AsyncSession = Depends(get_db)):
-    """Queued / provider accepted / delivered / failed / unknown per scheduled delivery."""
+    """Queued / provider accepted / delivered / failed / unknown per scheduled delivery.
+
+    `mine=true` lists the caller's own recent deliveries instead of one task's."""
+    if mine:
+        if actor.kind != "user" or not actor.user_id:
+            raise HTTPException(403, "not allowed")
+        rows = await reminders.deliveries_for_user(db, actor.user_id, actor, limit=limit)
+        return {"mine": True, "deliveries": rows, "total": len(rows),
+                "note": "Provider acceptance is not proof the message was seen."}
     if not task_id:
-        raise HTTPException(422, "task_id is required")
+        raise HTTPException(422, "task_id or mine=true is required")
     t = await db.get(Task, task_id)
     if t is None:
         raise HTTPException(404, "task not found")
@@ -57,7 +66,8 @@ async def prefs(user: User = Depends(current_user), db: AsyncSession = Depends(g
             "business_defaults": {"channels": cfg["channels"], "digest_local_time": cfg["digest_local_time"],
                                   "late_grace_minutes": cfg["late_grace_minutes"],
                                   "obsolete_after_hours": cfg["obsolete_after_hours"],
-                                  "overdue_delay_minutes": cfg["overdue_delay_minutes"]},
+                                  "overdue_delay_minutes": cfg["overdue_delay_minutes"],
+                                  **reminders.owner_reminder_destination(reveal=user.role == "owner")},
             "telegram": await telegram_bot.serialize_pairing(db, user.id),
             "write_with": "PATCH /api/me/prefs"}
 

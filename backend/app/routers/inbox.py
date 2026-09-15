@@ -16,7 +16,7 @@ from ..domain.actors import Actor
 from ..domain.commands import CommandContext, dispatch
 from ..models.comms import Draft
 from ..services import inbox as inbox_svc
-from ..services.reply import serialize_draft
+from ..services.reply import serialize_draft_live
 
 router = APIRouter(tags=["inbox"])
 
@@ -49,6 +49,13 @@ async def list_threads(filter: str = Query("needs_reply"), account: str | None =
     return await inbox_svc.list_threads(db, actor, filter=filter, account=account, limit=limit, offset=offset, q=q)
 
 
+@router.get("/api/inbox/counts")
+async def thread_counts(account: str | None = None, q: str | None = None,
+                        actor: Actor = Depends(require("inbox.read")), db: AsyncSession = Depends(get_db)):
+    """{filter: n} for the bell/tab headers, under the caller's own record scope."""
+    return await inbox_svc.counts(db, actor, account=account, q=q)
+
+
 @router.get("/api/inbox/coverage")
 async def coverage(actor: Actor = Depends(require("inbox.read")), db: AsyncSession = Depends(get_db)):
     """Per account: connected, freshness, coverage window, unresolved gaps, excluded counts (F5/H11)."""
@@ -71,8 +78,8 @@ async def draft_versions(draft_id: str, actor: Actor = Depends(require("inbox.re
     await inbox_svc.thread_detail(db, actor, d.conversation_id)
     rows = (await db.execute(select(Draft).where(Draft.conversation_id == d.conversation_id)
                              .order_by(Draft.draft_version.desc()))).scalars().all()
-    return {"items": [serialize_draft(r, actor=actor) for r in rows], "total": len(rows),
-            "conversation_id": d.conversation_id, "current": serialize_draft(d, actor=actor)}
+    return {"items": [await serialize_draft_live(db, r, actor=actor) for r in rows], "total": len(rows),
+            "conversation_id": d.conversation_id, "current": await serialize_draft_live(db, d, actor=actor)}
 
 
 @router.post("/api/inbox/threads/{conversation_id}/{action}")

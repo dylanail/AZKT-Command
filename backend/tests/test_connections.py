@@ -63,3 +63,44 @@ async def test_secret_is_encrypted_and_never_returned(client, owner, db):
     row = (await db.execute(select(Connection).where(Connection.provider == "square"))).scalar_one()
     assert row.secret_enc and "sq0atp" not in row.secret_enc
     assert conn_svc.get_secret(row)["access_token"] == "sq0atp-secret"
+
+
+async def test_one_connection_row_per_provider_and_a_deterministic_pick(db):
+    """The data model intends exactly one row per provider; the database now enforces it, and rows
+    that predate the index are still read the same way every time."""
+    import uuid
+
+    import pytest
+    from sqlalchemy import text
+    from sqlalchemy.exc import IntegrityError
+
+    provider = f"probe_{uuid.uuid4().hex[:6]}"
+    first = await conn_svc.get(db, provider, create=True)
+    await db.commit()
+    assert (await conn_svc.get(db, provider, create=True)).id == first.id, "get() never makes a second row"
+
+    db.add(Connection(provider=provider, status="connected", environment="test"))
+    with pytest.raises(IntegrityError):
+        await db.flush()
+    await db.rollback()
+
+    # legacy duplicates (written before uq_connection_provider): the live row wins, then the newest
+    now = datetime.now(timezone.utc)
+    sp = await db.begin_nested()
+    try:
+        await db.execute(text("ALTER TABLE connections DROP CONSTRAINT uq_connection_provider"))
+        stale = Connection(provider=provider, status="expired", environment="test", created_at=now)
+        live = Connection(provider=provider, status="connected", environment="test", created_at=now - timedelta(days=1))
+        db.add_all([stale, live])
+        await db.flush()
+        picked = await conn_svc.get(db, provider)
+        assert picked.id == live.id, "a live row beats a newer dead one"
+        assert (await conn_svc.get(db, provider)).id == live.id, "and the pick does not move between calls"
+        live.status = "disconnected"
+        await db.flush()
+        assert (await conn_svc.get(db, provider)).id == stale.id, "with none live, the newest row wins"
+    finally:
+        await sp.rollback()
+
+    rows = await conn_svc.overview(db)
+    assert len(rows) == len({r["provider"] for r in rows}), "overview shows each provider exactly once"

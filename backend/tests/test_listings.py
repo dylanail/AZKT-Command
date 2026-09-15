@@ -688,3 +688,30 @@ async def test_F09_model_copy_that_states_a_date_other_than_the_sourced_one_is_r
         assert pkg["generated_by"] == "template"
         assert "2026-11-05" not in pkg["body"] and "2026-10-20" in pkg["body"]
         assert "estimated" in pkg["body"] and "exporter" in pkg["body"]
+
+
+async def test_a_pending_publish_approval_is_bound_to_its_vehicle(db, owner):
+    """The approval names the vehicle, so record scope covers it and a change to that vehicle
+    invalidates the pending publication instead of letting a stale package go live."""
+    from backend.app.services import approvals as approvals_svc
+
+    site = wordpress_fake(with_existing=False)
+    await wordpress_connections(db)
+    with install_wordpress(site):
+        await _profile(db, owner)
+        v = await _vehicle(db, owner, stock_no=f"STK-{_u()[:4].upper()}")
+        pkg = (await _build(db, owner, v["id"]))["package"]
+        await dispatch(ctx_for(db, owner), "listings.submit_for_review", {"package_id": pkg["id"]})
+        res = await dispatch(ctx_for(db, owner), "listings.publish",
+                             {"package_id": pkg["id"], "channel": "website",
+                              "expected_package_hash": pkg["package_hash"]})
+        assert res.status == "needs_review"
+        a = await db.get(Approval, res.approval_id)
+        assert (a.entity_kind, a.entity_id) == ("vehicle", v["id"]), "the approval is bound to the vehicle"
+
+        n = await approvals_svc.invalidate_for_entity(ctx_for(db, owner), "vehicle", v["id"],
+                                                      "the truck changed — review the listing again")
+        await db.commit()
+        await db.refresh(a)
+        assert n >= 1 and a.status == "invalidated" and "review the listing again" in (a.invalidated_reason or "")
+        assert not site.items, "nothing was published"

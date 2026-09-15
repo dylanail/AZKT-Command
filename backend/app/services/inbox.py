@@ -686,6 +686,7 @@ class ClassifyOverrideIn(BaseModel):
 
 
 @command("inbox.classify_override", input=ClassifyOverrideIn, perm="inbox.draft", action_class="internal",
+         records=lambda p: [("conversation", p.conversation_id)],
          description="A person corrects the classification of a thread. Reversible; the original reasons are kept.")
 async def inbox_classify_override(ctx: CommandContext, inp: ClassifyOverrideIn) -> dict:
     if inp.classification not in CLASSIFICATIONS:
@@ -719,15 +720,18 @@ class LinkIn(BaseModel):
 
 
 @command("inbox.link_record", input=LinkIn, perm="inbox.draft", action_class="internal",
-         records=lambda p: [("vehicle", p.id)] if p.kind == "vehicle" else [],
-         description="Link (or correct) the business record a thread is about. Correcting a link invalidates dependent "
-                     "drafts and approvals; already-sent messages get an exception, never an automatic resend (B06).")
+         records=lambda p: [("conversation", p.conversation_id)] + ([("vehicle", p.id)] if p.kind == "vehicle" else []),
+         description="Link (or correct) the business record a thread is about, or identify the person behind an "
+                     "unmatched thread with kind=contact. Correcting a link invalidates dependent drafts and "
+                     "approvals; already-sent messages get an exception, never an automatic resend (B06).")
 async def inbox_link_record(ctx: CommandContext, inp: LinkIn) -> dict:
-    if inp.kind not in ("vehicle", "opportunity", "import_request", "shipment", "sale", "invoice"):
-        raise ValidationFailed("kind must be vehicle|opportunity|import_request|shipment|sale|invoice")
+    if inp.kind not in ("vehicle", "opportunity", "import_request", "shipment", "sale", "invoice", "contact"):
+        raise ValidationFailed("kind must be vehicle|opportunity|import_request|shipment|sale|invoice|contact")
     if inp.match not in ("matched", "proposed"):
         raise ValidationFailed("match must be matched|proposed")
     c = await _conv(ctx, inp.conversation_id, inp.expected_version)
+    if inp.kind == "contact":
+        return await _link_contact(ctx, c, inp)
     links = [l for l in (c.links or []) if not (l.get("kind") == inp.kind and l.get("id") == inp.id)]
     changed_existing = len(links) != len(c.links or [])
     links.append({"kind": inp.kind, "id": inp.id, "match": inp.match,
@@ -768,6 +772,32 @@ async def inbox_link_record(ctx: CommandContext, inp: LinkIn) -> dict:
     return {"conversation": serialize_conversation(c), "invalidated_drafts": invalidated, "sent_exceptions": exceptions}
 
 
+async def _link_contact(ctx: CommandContext, c: Conversation, inp: LinkIn) -> dict:
+    """Identity-only link for an unmatched thread: say who this is from without claiming a business
+    record exists. The thread stops being unmatched; no `links` entry is invented."""
+    contact = await ctx.db.get(Contact, inp.id)
+    if contact is None:
+        raise NotFound("contact not found")
+    before, before_state = c.contact_id, c.state
+    reason = inp.reason or "identified by a person"
+    c.contact_id = contact.id
+    c.contact_match = "matched" if inp.match == "matched" else "proposed"
+    c.match_reasons = [f"contact linked by a person: {reason}"]
+    if c.state == "unmatched" and c.contact_match == "matched":
+        c.state = "needs_reply"
+    ctx.touch(c, "conversation")
+    invalidated: list[str] = []
+    if before and before != contact.id:
+        invalidated = await invalidate_drafts(ctx, c, "contact corrected — review again")
+    ctx.record(f"Thread identified as {contact.name}", entity_kind="conversation", entity_id=c.id, kind="message",
+               state=c.state, details={"contact_id": contact.id, "reason": reason, "from_state": before_state,
+                                       "invalidated_drafts": invalidated})
+    ctx.emit("conversation.changed", aggregate_type="conversation", aggregate_id=c.id, aggregate_version=c.version,
+             payload={"change": "contact_linked", "contact_id": contact.id, "match": c.contact_match,
+                      "invalidated_drafts": invalidated})
+    return {"conversation": serialize_conversation(c), "invalidated_drafts": invalidated, "sent_exceptions": []}
+
+
 class UnlinkIn(BaseModel):
     conversation_id: str
     kind: str
@@ -777,6 +807,7 @@ class UnlinkIn(BaseModel):
 
 
 @command("inbox.unlink_record", input=UnlinkIn, perm="inbox.draft", action_class="internal",
+         records=lambda p: [("conversation", p.conversation_id)],
          description="Remove a wrong record link. Dependent unsent drafts and approvals are invalidated.")
 async def inbox_unlink_record(ctx: CommandContext, inp: UnlinkIn) -> dict:
     c = await _conv(ctx, inp.conversation_id, inp.expected_version)
@@ -800,6 +831,7 @@ class SpamIn(BaseModel):
 
 
 @command("inbox.mark_spam", input=SpamIn, perm="inbox.draft", action_class="internal",
+         records=lambda p: [("conversation", p.conversation_id)],
          description="Mark a thread as suspected spam. Reversible and inspectable; nothing is deleted from Gmail.")
 async def inbox_mark_spam(ctx: CommandContext, inp: SpamIn) -> dict:
     c = await _conv(ctx, inp.conversation_id, inp.expected_version)
@@ -818,6 +850,7 @@ async def inbox_mark_spam(ctx: CommandContext, inp: SpamIn) -> dict:
 
 
 @command("inbox.not_spam", input=SpamIn, perm="inbox.draft", action_class="internal",
+         records=lambda p: [("conversation", p.conversation_id)],
          description="Reverse a spam decision and restore the previous classification/state.")
 async def inbox_not_spam(ctx: CommandContext, inp: SpamIn) -> dict:
     c = await _conv(ctx, inp.conversation_id, inp.expected_version)
@@ -847,6 +880,7 @@ class ArchiveIn(BaseModel):
 
 
 @command("inbox.archive", input=ArchiveIn, perm="inbox.draft", action_class="internal",
+         records=lambda p: [("conversation", p.conversation_id)],
          description="Archive a thread inside AZKT. Changing Gmail labels/archive is a separate enabled capability "
                      "and is reported as unsupported until it is granted; mail is never deleted.")
 async def inbox_archive(ctx: CommandContext, inp: ArchiveIn) -> dict:
@@ -879,6 +913,7 @@ class TakeOverIn(BaseModel):
 
 
 @command("inbox.take_over", input=TakeOverIn, perm="inbox.draft", action_class="internal",
+         records=lambda p: [("conversation", p.conversation_id)],
          description="A person takes the thread. Automated outbound work pauses (WorkflowControl thread:<id>), unsent "
                      "drafts and their approvals are invalidated, and nothing queued is released (spec §4.3, B10).")
 async def inbox_take_over(ctx: CommandContext, inp: TakeOverIn) -> dict:
@@ -907,6 +942,7 @@ class ResumeIn(BaseModel):
 
 
 @command("inbox.resume", input=ResumeIn, perm="inbox.draft", action_class="internal",
+         records=lambda p: [("conversation", p.conversation_id)],
          description="Resume automation for a thread: reload intervening mail, regenerate and revalidate a draft. "
                      "Old drafts and approvals are never released (spec §4.3, B10, H05).")
 async def inbox_resume(ctx: CommandContext, inp: ResumeIn) -> dict:
@@ -956,6 +992,7 @@ class ManualReplyIn(BaseModel):
 
 
 @command("inbox.manual_reply_recorded", input=ManualReplyIn, perm="inbox.draft", action_class="internal",
+         records=lambda p: [("conversation", p.conversation_id)],
          description="Record that a person replied from Gmail (or elsewhere). Attribution is manual; this records what "
                      "happened and never establishes a new automation permission (spec §4.4, B11).")
 async def inbox_manual_reply_recorded(ctx: CommandContext, inp: ManualReplyIn) -> dict:
@@ -1391,9 +1428,13 @@ async def gmail_watch_renew(session_factory) -> dict:
 FILTERS = ("needs_reply", "drafts", "taken_over", "unmatched", "all")
 
 
-async def list_threads(db, actor, *, filter: str = "needs_reply", account: str | None = None,
-                       limit: int = 50, offset: int = 0, q: str | None = None) -> dict:
-    from ..domain.access import visible_vehicle_ids
+SNIPPET_CHARS = 160
+_THREAD_ORDER = (Conversation.last_inbound_at.desc().nulls_last(), Conversation.created_at.desc())
+
+
+def _threads_query(actor, *, filter: str, account: str | None, q: str | None):
+    """The filtered thread query, before record scope. Shared by list_threads and counts so a count
+    can never describe a different set than the list."""
     if filter not in FILTERS:
         raise ValidationFailed(f"filter must be one of {FILTERS}")
     stmt = select(Conversation)
@@ -1413,19 +1454,110 @@ async def list_threads(db, actor, *, filter: str = "needs_reply", account: str |
     if not _can_see_personal(actor):
         personal_ids = select(Connection.id).where(Connection.provider == "gmail_personal")
         stmt = stmt.where(or_(Conversation.connection_id.is_(None), Conversation.connection_id.notin_(personal_ids)))
-    rows = (await db.execute(stmt.order_by(Conversation.last_inbound_at.desc().nulls_last(),
-                                           Conversation.created_at.desc()).limit(limit).offset(offset))).scalars().all()
+    return stmt
+
+
+def _in_record_scope(links, allowed: set[str] | None) -> bool:
+    """A thread linked to no vehicle stays visible; one linked only to vehicles outside the actor's
+    visible set does not (the same rule thread_detail applies)."""
+    if allowed is None:
+        return True
+    vids = [l["id"] for l in (links or []) if l.get("kind") == "vehicle" and l.get("id")]
+    return (not vids) or bool(set(vids) & allowed)
+
+
+async def _scoped_ids(db, stmt, allowed: set[str] | None) -> list[str]:
+    rows = (await db.execute(stmt.with_only_columns(Conversation.id, Conversation.links)
+                             .order_by(*_THREAD_ORDER))).all()
+    return [cid for cid, links in rows if _in_record_scope(links, allowed)]
+
+
+async def _snippets(db, conversation_ids: list[str]) -> dict[str, dict]:
+    """Newest message per thread: its stripped body opening, direction and time."""
+    if not conversation_ids:
+        return {}
+    rows = (await db.execute(select(Message).where(Message.conversation_id.in_(conversation_ids))
+                             .order_by(Message.sent_at.asc().nulls_first(), Message.created_at.asc()))).scalars().all()
+    out: dict[str, dict] = {}
+    for m in rows:                      # ascending, so the last write per thread is the newest message
+        body = (m.body_new_text or m.body_text or m.snippet or "").strip()
+        out[m.conversation_id] = {"snippet": " ".join(body.split())[:SNIPPET_CHARS],
+                                  "direction": m.direction, "at": _iso(m.sent_at or m.created_at)}
+    return out
+
+
+async def list_threads(db, actor, *, filter: str = "needs_reply", account: str | None = None,
+                       limit: int = 50, offset: int = 0, q: str | None = None) -> dict:
+    from ..domain.access import visible_vehicle_ids
+    stmt = _threads_query(actor, filter=filter, account=account, q=q)
     allowed = await visible_vehicle_ids(db, actor)
+    if allowed is None:
+        total = int(await db.scalar(select(func.count()).select_from(stmt.subquery())) or 0)
+        rows = (await db.execute(stmt.order_by(*_THREAD_ORDER).limit(limit).offset(offset))).scalars().all()
+    else:
+        ids = await _scoped_ids(db, stmt, allowed)          # count over the same scoped query
+        total = len(ids)
+        page = ids[offset:offset + limit]
+        by_id = {c.id: c for c in (await db.execute(select(Conversation).where(
+            Conversation.id.in_(page)))).scalars().all()} if page else {}
+        rows = [by_id[i] for i in page if i in by_id]
+    last = await _snippets(db, [c.id for c in rows])
     items = []
     for c in rows:
-        if allowed is not None:
-            vids = [l["id"] for l in (c.links or []) if l.get("kind") == "vehicle"]
-            if vids and not set(vids) & allowed:
-                continue
         counts = {"messages": await db.scalar(select(func.count(Message.id)).where(Message.conversation_id == c.id)),
                   "drafts": await db.scalar(select(func.count(Draft.id)).where(Draft.conversation_id == c.id))}
-        items.append(serialize_conversation(c, counts=counts))
-    return {"items": items, "total": len(items), "filter": filter, "account": account}
+        item = serialize_conversation(c, counts=counts)
+        item["snippet"] = (last.get(c.id) or {}).get("snippet", "")
+        item["last_message"] = last.get(c.id) or {"snippet": "", "direction": None, "at": None}
+        items.append(item)
+    return {"items": items, "total": total, "filter": filter, "account": account,
+            "limit": limit, "offset": offset}
+
+
+HOME_UNMATCHED_CAP = 10
+
+
+async def home_unmatched(db, actor) -> dict:
+    """Home's "not matched to a record" group: the caller's own unmatched threads, newest first.
+
+    Scope-safe (the same filter list_threads applies) and capped; `total` is the real count so Home
+    never understates the backlog because the list is short."""
+    from ..domain.access import visible_vehicle_ids
+    stmt = _threads_query(actor, filter="unmatched", account=None, q=None)
+    allowed = await visible_vehicle_ids(db, actor)
+    ids = await _scoped_ids(db, stmt, allowed)
+    page = ids[:HOME_UNMATCHED_CAP]
+    rows = {c.id: c for c in (await db.execute(select(Conversation).where(
+        Conversation.id.in_(page)))).scalars().all()} if page else {}
+    senders: dict[str, str | None] = {}
+    if page:
+        for m in (await db.execute(select(Message).where(Message.conversation_id.in_(page),
+                                                         Message.direction == "in")
+                                   .order_by(Message.sent_at.asc().nulls_first(),
+                                             Message.created_at.asc()))).scalars().all():
+            senders[m.conversation_id] = m.from_addr      # ascending: the newest inbound wins
+    items = []
+    for cid in page:
+        c = rows.get(cid)
+        if c is None:
+            continue
+        items.append({"kind": "conversation", "id": c.id, "subject": c.subject or "(no subject)",
+                      "from": senders.get(c.id), "at": _iso(c.last_inbound_at or c.created_at)})
+    return {"total": len(ids), "items": items}
+
+
+async def counts(db, actor, *, account: str | None = None, q: str | None = None) -> dict:
+    """{filter: n} over exactly the scope and filters list_threads uses (spec §2.3 Inbox)."""
+    from ..domain.access import visible_vehicle_ids
+    allowed = await visible_vehicle_ids(db, actor)
+    out: dict[str, int] = {}
+    for f in FILTERS:
+        stmt = _threads_query(actor, filter=f, account=account, q=q)
+        if allowed is None:
+            out[f] = int(await db.scalar(select(func.count()).select_from(stmt.subquery())) or 0)
+        else:
+            out[f] = len(await _scoped_ids(db, stmt, allowed))
+    return out
 
 
 def _can_see_personal(actor) -> bool:
@@ -1434,7 +1566,7 @@ def _can_see_personal(actor) -> bool:
 
 async def thread_detail(db, actor, conversation_id: str) -> dict:
     from ..domain.access import visible_vehicle_ids
-    from .reply import serialize_draft
+    from .reply import serialize_draft_live
     c = await db.get(Conversation, conversation_id)
     if c is None:
         raise NotFound("conversation not found")
@@ -1460,7 +1592,7 @@ async def thread_detail(db, actor, conversation_id: str) -> dict:
                              "allocation": v.allocation, "match": l.get("match"), "evidence": l.get("evidence")})
     return {"conversation": serialize_conversation(c, counts={"messages": len(msgs), "drafts": len(drafts)}),
             "messages": [serialize_message(m) for m in msgs],
-            "drafts": [serialize_draft(d, actor=actor) for d in drafts],
+            "drafts": [await serialize_draft_live(db, d, actor=actor) for d in drafts],
             "context": {"contact": {"id": contact.id, "name": contact.name, "status": contact.status,
                                     "consent": contact.consent} if contact else None,
                         "vehicles": vehicles, "links": list(c.links or [])},

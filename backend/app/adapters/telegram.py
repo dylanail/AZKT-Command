@@ -71,9 +71,11 @@ class TelegramClient:
 
     async def get_file(self, file_id: str) -> bytes:
         info = await self.call("getFile", file_id=file_id)
-        path = info["result"]["file_path"]
         if self.token == "test":
-            return b""
+            return b""          # recording transport: short-circuit before reading a file_path it never returns
+        path = ((info.get("result") or {}).get("file_path") or "")
+        if not path:
+            raise ProviderError("telegram getFile returned no file_path", kind="invalid_input")
         async with httpx.AsyncClient(timeout=60) as c:
             r = await c.get(f"{API}/file/bot{self.token}/{path}")
             r.raise_for_status()

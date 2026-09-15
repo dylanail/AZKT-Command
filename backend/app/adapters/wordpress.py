@@ -25,6 +25,7 @@ import base64
 import re
 from typing import Any
 
+from ..core.destinations import assert_destination_allowed
 from ..core.errors import ProviderError, Unsupported
 
 WP_NAMESPACE = "wp/v2"
@@ -395,7 +396,16 @@ class WebsiteAdapter:
                 "target": (profile or {}).get("staging_url") or self.base_url, "written": False}
 
     # ── writes ───────────────────────────────────────────────────────────
+    def _assert_writable(self, op: str) -> None:
+        """H08: this adapter really delivers, so outside production it may only write to an
+        allowlisted site. Every write goes through here — listing media travel inside these payloads
+        as URLs, so there is no separate upload path to leave unguarded. `FakeWordPress` never comes
+        here: nothing leaves the process, exactly like the memory email transport."""
+        targets = {self.base_url, self.public_base_url} - {""}
+        assert_destination_allowed("site", *sorted(targets))
+
     async def upsert_draft(self, package: dict, profile: dict | None, external_id: str | None = None) -> dict:
+        self._assert_writable("upsert_draft")
         payload = {**render_payload(package, profile), "status": "draft"}
         if content_shape(profile) == "product":
             if self.woo is None:
@@ -412,6 +422,7 @@ class WebsiteAdapter:
                 "status": norm.get("status"), "payload": payload}
 
     async def publish(self, external_id: str, package: dict, profile: dict | None) -> dict:
+        self._assert_writable("publish")
         payload = {**render_payload(package, profile), "status": "publish"}
         if content_shape(profile) == "product":
             row = await self.woo.upsert_product(payload, external_id)
@@ -424,6 +435,7 @@ class WebsiteAdapter:
                 "status": norm.get("status")}
 
     async def update_availability(self, external_id: str, availability: str, profile: dict | None) -> dict:
+        self._assert_writable("update_availability")
         mapping = availability_map_for(profile).get(availability)
         if mapping is None:
             raise Unsupported(f"the active site profile has no availability mapping for {availability!r}")
@@ -461,6 +473,7 @@ class WebsiteAdapter:
         return {"api": api, "public": public}
 
     async def archive(self, external_id: str, profile: dict | None = None) -> dict:
+        self._assert_writable("archive")
         payload = ({"status": "draft", "catalog_visibility": "hidden"} if content_shape(profile) == "product"
                    else {"status": "draft"})
         if content_shape(profile) == "product":

@@ -1,8 +1,8 @@
 /* Shapes from backend/app/routers/approvals.py (_row / _detail) and services/approvals.py (_brief). */
 import type { Health } from "../../ui";
 
-export type ApprovalStatus = "pending" | "approved" | "queued" | "executing" | "confirmed" | "failed" | "result_unknown" | "declined" | "expired" | "invalidated" | "canceled";
-export const APPROVAL_STATES: ApprovalStatus[] = ["pending", "approved", "queued", "executing", "confirmed", "failed", "result_unknown", "declined", "expired", "invalidated", "canceled"];
+export type ApprovalStatus = "pending" | "approved" | "queued" | "executing" | "confirmed" | "handed_off" | "failed" | "result_unknown" | "declined" | "expired" | "invalidated" | "canceled";
+export const APPROVAL_STATES: ApprovalStatus[] = ["pending", "approved", "queued", "executing", "confirmed", "handed_off", "failed", "result_unknown", "declined", "expired", "invalidated", "canceled"];
 export const IN_FLIGHT: ReadonlySet<string> = new Set(["approved", "queued", "executing"]);
 
 export interface ActorRef { kind?: string; user_id?: string | null; display_name?: string | null; role?: string | null; client_name?: string | null; agent_role?: string | null }
@@ -46,6 +46,7 @@ export function statusView(status: string): { label: string; health: Health | nu
     case "queued": return { label: "Approved · queued", health: "wait" };
     case "executing": return { label: "Executing", health: "wait" };
     case "confirmed": return { label: "Confirmed", health: "ok" };
+    case "handed_off": return { label: "Handed off · a person finishes it", health: "wait" };
     case "failed": return { label: "Failed", health: "blocked" };
     case "result_unknown": return { label: "Result unknown", health: "risk" };
     case "declined": return { label: "Declined", health: null };

@@ -176,22 +176,44 @@ async def _find_standing_permission(db, actor: Actor, spec, payload) -> tuple[Pe
     return None, reasons
 
 
+def _can_see_personal(actor: Actor) -> bool:
+    """Same rule as services/inbox._can_see_personal on the read side."""
+    return actor.kind == "system" or (actor.kind in ("user", "agent") and actor.role == "owner")
+
+
 def check_record_scope(actor: Actor, records: list[tuple[str, str]], assigned_vehicle_ids: set[str] | None,
-                       assigned_task_ids: set[str] | None) -> list[str]:
-    """Record-level access for scope=assigned users and record-limited external clients."""
+                       assigned_task_ids: set[str] | None, threads: dict[str, dict] | None = None) -> list[str]:
+    """Record-level access for scope=assigned users and record-limited external clients.
+
+    `threads` carries the resolved shape of `conversation` / `draft` records
+    ({record_id: {vehicle_ids, personal}}); a thread is writable on exactly the terms it is readable
+    on (services/inbox.list_threads): linked to a vehicle in the actor's visible set, or unlinked."""
     reasons: list[str] = []
+    threads = threads or {}
     if actor.kind == "external":
         limit = (actor.client_record_scope or {}).get("vehicle_ids")
         if limit:
             for kind, rid in records:
                 if kind == "vehicle" and rid not in limit:
                     reasons.append(f"vehicle {rid} outside client record scope")
+                if kind in ("conversation", "draft") and rid in threads:
+                    vids = threads[rid]["vehicle_ids"]
+                    if vids and not set(vids) & set(limit):
+                        reasons.append(f"{kind} {rid} is linked to a vehicle outside client record scope")
     if actor.kind in ("user", "agent") and (actor.scope == "assigned" or not actor.perms.get("vehicles.all", False)):
         for kind, rid in records:
             if kind == "vehicle" and rid not in (assigned_vehicle_ids or set()):
                 reasons.append(f"vehicle {rid} not assigned to you")
             if kind == "task" and rid not in (assigned_task_ids or set()):
                 reasons.append(f"task {rid} not assigned to you")
+            if kind in ("conversation", "draft") and rid in threads:
+                vids = threads[rid]["vehicle_ids"]
+                if vids and not set(vids) & (assigned_vehicle_ids or set()):
+                    reasons.append(f"{kind} {rid} is linked to a vehicle not assigned to you")
+    if not _can_see_personal(actor):
+        for kind, rid in records:
+            if kind in ("conversation", "draft") and (threads.get(rid) or {}).get("personal"):
+                reasons.append(f"{kind} {rid} is on the personal account")
     return reasons
 
 

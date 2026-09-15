@@ -61,7 +61,7 @@ async def client_requests(client_id: str, limit: int = Query(25, ge=1, le=200),
     return {"client": svc.serialize_client(c),
             "items": [{"id": r.id, "request_key": r.request_key, "kind": r.kind, "status": r.status,
                        "mission_id": r.mission_id, "message": (r.message or "")[:400], "cursor": r.cursor,
-                       "depth": r.depth, "error": r.error,
+                       "depth": r.depth, "error": r.error, "correlation_id": r.correlation_id,
                        "created_at": r.created_at.isoformat() if r.created_at else None} for r in rows],
             "count": len(rows)}
 

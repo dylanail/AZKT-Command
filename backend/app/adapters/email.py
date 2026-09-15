@@ -73,7 +73,10 @@ class SmtpTransport:
         try:
             await asyncio.to_thread(_send)
         except smtplib.SMTPResponseException as e:
-            raise ProviderError(f"smtp error {e.smtp_code}: {e.smtp_error!r}", kind="transient" if e.smtp_code >= 400 else "invalid_input")
+            # a 4xx means the server refused this attempt and holds nothing: safe to try again.
+            raise ProviderError(f"smtp error {e.smtp_code}: {e.smtp_error!r}",
+                                kind="transient" if e.smtp_code >= 400 else "invalid_input",
+                                retryable=e.smtp_code >= 400)
         except (smtplib.SMTPException, OSError) as e:
             raise ProviderError(f"smtp failure: {e}", kind="transient")
         return {"provider": "smtp", "provider_ref": mid, "accepted": True}

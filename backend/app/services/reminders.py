@@ -47,6 +47,8 @@ DIGEST_STATE_KEY = "reminders.digest_state"
 CLAIM_BATCH = 50
 LEASE_SECONDS = 120
 MAX_SEND_ATTEMPTS = 5                 # a rate-limited channel falls back instead of retrying for ever
+MAX_TRANSIENT_ATTEMPTS = 3            # a transport that was momentarily unreachable gets three tries
+TRANSIENT_BACKOFF_SECONDS = (30, 120, 600)
 
 
 def now() -> datetime:
@@ -503,14 +505,20 @@ async def deliver_due(session_factory) -> dict:
             except Exception as e:  # noqa: BLE001
                 await db.rollback()
                 log.exception("delivery %s failed", rid)
+                res = "failed"
                 async with session_factory() as db2:
                     row = await db2.get(ScheduledDelivery, rid)
                     if row is not None and row.state == "claimed":
-                        row.state = "failed"
-                        row.last_error = f"{type(e).__name__}: {e}"[:1000]
-                        row.lease_token = None
+                        transient = (isinstance(e, ProviderError)
+                                     and (getattr(e, "detail", {}) or {}).get("kind") == "transient")
+                        retried = _retry_transient(row, f"{type(e).__name__}: {e}") if transient else None
+                        if retried:
+                            res = retried
+                        else:
+                            row.state = "failed"
+                            row.last_error = f"{type(e).__name__}: {e}"[:1000]
+                            row.lease_token = None
                         await db2.commit()
-                res = "failed"
             out[res] = out.get(res, 0) + 1
     return out
 
@@ -585,6 +593,21 @@ def _fail(row: ScheduledDelivery, reason: str) -> str:
     row.last_error = reason[:1000]
     row.lease_token = None
     return "failed"
+
+
+def _retry_transient(row: ScheduledDelivery, reason: str) -> str | None:
+    """A transport that was momentarily unreachable is tried again with bounded backoff — nothing was
+    delivered, so this is a retry, not a second copy. Returns None once the attempts are used up;
+    setup_blocked and invalid_input never come here, because trying again cannot change them."""
+    attempts = row.attempts or 0
+    if attempts >= MAX_TRANSIENT_ATTEMPTS:
+        return None
+    delay = TRANSIENT_BACKOFF_SECONDS[min(attempts, len(TRANSIENT_BACKOFF_SECONDS)) - 1]
+    row.state = "scheduled"
+    row.deliver_at = now() + timedelta(seconds=delay)
+    row.last_error = f"{reason}; retrying in {delay}s (attempt {attempts} of {MAX_TRANSIENT_ATTEMPTS})"[:1000]
+    row.lease_token = None
+    return "rescheduled"
 
 
 # ── rendering context ───────────────────────────────────────────────────────
@@ -695,7 +718,14 @@ async def _send_email(db: AsyncSession, row: ScheduledDelivery, user: User, ctx:
     except Unsupported as e:
         return _fail(row, f"setup_blocked: {e}")
     except ProviderError as e:
-        if getattr(e, "detail", {}).get("kind") == "transient" or "transient" in str(e):
+        detail = getattr(e, "detail", {}) or {}
+        transient = detail.get("kind") == "transient" or "transient" in str(e)
+        if transient and detail.get("retryable"):
+            # the transport was never handed the message (refused connection, "try later"): retry it
+            retried = _retry_transient(row, f"transient transport error: {e}")
+            return retried or _fail(row, f"transient transport error after {row.attempts} attempts: {e}")
+        if transient:
+            # it may have been accepted before the connection broke: never a blind second copy
             row.state = "unknown"
             row.last_error = f"send result unknown: {e}"[:1000]
             row.lease_token = None
@@ -750,6 +780,10 @@ async def _send_telegram(db: AsyncSession, row: ScheduledDelivery, user: User, c
             # a delivery that retries for ever
             await _telegram_fallback(db, row, user, f"telegram rate limited after {row.attempts} attempts", cfg)
             return _fail(row, f"telegram rate limited after {row.attempts} attempts")
+        if kind == "transient":
+            retried = _retry_transient(row, f"telegram transient error: {e}")
+            if retried:
+                return retried
         await _telegram_fallback(db, row, user, f"telegram {kind}: {e}", cfg)
         return _fail(row, f"telegram {kind}: {e}")
     except Unsupported as e:
@@ -968,6 +1002,24 @@ async def _on_connection_degraded(db: AsyncSession, ev) -> None:
 DESTINATION_KEYS = ("to", "chat_id")
 
 
+def mask_email(addr: str | None) -> str | None:
+    """d***@azkeitrucks.com — enough to recognise the destination, not enough to reuse it."""
+    if not addr:
+        return None
+    local, _, domain = str(addr).partition("@")
+    if not domain:
+        return "***"
+    return f"{local[:1]}***@{domain}" if local else f"***@{domain}"
+
+
+def owner_reminder_destination(*, reveal: bool) -> dict:
+    """Where owner reminders go. Non-owners see that it is configured and a masked address (spec §11.1)."""
+    addr = (settings.OWNER_REMINDER_EMAIL or "").strip() or None
+    return {"owner_reminder_email_configured": bool(addr),
+            "owner_reminder_email": (addr if reveal else mask_email(addr)),
+            "owner_reminder_email_masked": mask_email(addr)}
+
+
 def serialize_delivery(r: ScheduledDelivery, *, reveal_destination: bool = True) -> dict:
     receipt = {k: v for k, v in (r.receipt or {}).items() if k not in ("text", "html")}
     if not reveal_destination:
@@ -992,6 +1044,18 @@ STATE_LABELS = {
     "delivered": "Delivered", "failed": "Failed", "unknown": "Result unknown — not retried",
     "cancelled": "Cancelled", "superseded": "Superseded by a newer revision", "expired": "Collapsed into the digest",
 }
+
+
+async def deliveries_for_user(db: AsyncSession, user_id: str, actor=None, limit: int = 50) -> list[dict]:
+    """The caller's own recent deliveries (task reminders, digests, deposit confirmations), newest
+    first. Recipient-scoped: another person's row is never in this list, so its destination cannot
+    leak through it either."""
+    rows = (await db.execute(select(ScheduledDelivery).where(ScheduledDelivery.recipient_user_id == user_id)
+                             .order_by(ScheduledDelivery.deliver_at.desc().nulls_last(),
+                                       ScheduledDelivery.created_at.desc())
+                             .limit(max(1, min(limit, 50))))).scalars().all()
+    viewer = getattr(actor, "user_id", None)
+    return [serialize_delivery(r, reveal_destination=(actor is None or r.recipient_user_id == viewer)) for r in rows]
 
 
 async def deliveries_for_task(db: AsyncSession, task_id: str, actor=None) -> list[dict]:

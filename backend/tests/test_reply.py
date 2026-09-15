@@ -699,3 +699,43 @@ async def test_F10_reservation_cancels_a_queued_availability_reply(db, owner):
     # regenerating now tells the truth
     fresh = await prepare(db, owner, conv)
     assert "reserved" in fresh["body"].lower()
+
+
+async def test_the_draft_send_state_is_truthful_at_every_step(db, owner):
+    """serialize_draft reports where the reply actually is, not just the draft status: a lost result
+    reads `result_unknown` until reconciliation proves the message was delivered."""
+    from backend.app.services.reply import serialize_draft_live
+
+    async def state(draft_id: str) -> dict:
+        row = await db.get(Draft, draft_id)
+        await db.refresh(row)
+        return (await serialize_draft_live(db, row, actor=None))["send"]
+
+    conn, contact, vehicle, conv = await setup_thread(db, owner, msg_id="sendstate-1", thread_id="sendstate-t",
+                                                      identity="sendstate@azkeitrucks.com", stock="STK-0461")
+    draft = await prepare(db, owner, conv)
+    assert draft["send"]["state"] == "not_submitted" and draft["send"]["external_action_id"] is None
+    assert draft["send"]["receipt"] == {"provider_ref": None} and draft["send"]["at"] is None
+
+    submitted = await dispatch(ctx_for(db, owner), "reply.submit_for_approval", {"draft_id": draft["id"]})
+    assert (await state(draft["id"]))["state"] == "awaiting_approval"
+    approval_id = submitted.data["approval_id"]
+    approval = await db.get(Approval, approval_id)
+    await dispatch(ctx_for(db, owner), "approvals.approve",
+                   {"approval_id": approval_id, "expected_version": approval.approval_version})
+    s = await state(draft["id"])
+    assert s["state"] == "approved" and s["external_action_id"], "approved and queued, nothing sent yet"
+
+    fake = FAKES["gmail_business"]
+    fake.send_then_lose_result = True
+    await run_worker_once()
+    s = await state(draft["id"])
+    assert s["state"] == "result_unknown", "a lost result is never shown as sent"
+    assert s["receipt"]["provider_ref"] == draft["our_message_id"]
+    assert len(fake.sent) == 1
+
+    res = await dispatch(ctx_for(db, owner), "reply.reconcile_unknown", {"draft_id": draft["id"]})
+    assert res.data["reconciled"] is True
+    s = await state(draft["id"])
+    assert s["state"] == "sent" and s["at"] and len(fake.sent) == 1, "reconciliation clears it without resending"
+    assert set(s["receipt"]) == {"provider_ref"}, "the send block never leaks the whole receipt"

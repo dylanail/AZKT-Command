@@ -628,7 +628,8 @@ def _history(pub: Publication, state: str, detail: str = "", **extra) -> None:
 
 
 @command("listings.publish", input=PublishIn, perm="listings.publish", action_class="consequential",
-         approval_kind="publish", records=lambda p: [], summary=_publish_summary, consequence=_publish_consequence,
+         approval_kind="publish", records=lambda p: [("listing_package", p.package_id)],
+         summary=_publish_summary, consequence=_publish_consequence,
          limits=lambda p: {"records": [p.package_id], "fields": ["listing"]}, revalidate=publish_revalidate,
          description="Publish an approved package to a channel. The approval binds package hash + site profile "
                      "version + channel. The effect is a persisted external action executed exactly once; "
