@@ -71,6 +71,18 @@ def money(amount_minor: int, currency: str = "USD") -> dict:
     return {"amount": amount_minor, "currency": currency}
 
 
+def _ago(hours: float) -> str:
+    """A Square timestamp that many hours before now, in Square's own format.
+
+    These used to be fixed dates in September 2026. `square_sync.reconcile` looks back
+    `RECONCILE_WINDOW_HOURS` (24) from *now*, so the fixtures aged out of their own window and E09
+    began failing on every run once the clock passed that point — a time bomb, not a flake. Recent
+    activity is what the scenarios mean, so they say that instead of naming a date.
+    """
+    t = datetime.now(timezone.utc) - timedelta(hours=hours)
+    return t.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+
 def square_payment(payment_id: str, *, amount_minor: int = 250000, status: str = "COMPLETED",
                    created_at: str | None = None, order_id: str | None = None, invoice_id: str | None = None,
                    customer_id: str | None = None, buyer_email: str | None = None, fee_minor: int = 7500,
@@ -78,7 +90,7 @@ def square_payment(payment_id: str, *, amount_minor: int = 250000, status: str =
                    version: int = 1) -> dict:
     out = {"id": payment_id, "status": status, "amount_money": money(amount_minor),
            "processing_fee": [{"amount_money": money(fee_minor)}],
-           "created_at": created_at or "2026-09-14T17:00:00.000Z", "updated_at": "2026-09-14T17:05:00.000Z",
+           "created_at": created_at or _ago(8), "updated_at": _ago(7.9),
            "location_id": LOCATION, "version": version, "source_type": "CARD"}
     if order_id:
         out["order_id"] = order_id
@@ -98,25 +110,25 @@ def square_payment(payment_id: str, *, amount_minor: int = 250000, status: str =
 def square_refund(refund_id: str, payment_id: str, *, amount_minor: int, status: str = "COMPLETED",
                   reason: str = "customer changed the spec") -> dict:
     return {"id": refund_id, "payment_id": payment_id, "status": status, "amount_money": money(amount_minor),
-            "created_at": "2026-09-14T19:00:00.000Z", "reason": reason, "location_id": LOCATION}
+            "created_at": _ago(6), "reason": reason, "location_id": LOCATION}
 
 
 def square_dispute(dispute_id: str, payment_id: str, *, amount_minor: int, state: str = "EVIDENCE_REQUIRED") -> dict:
     return {"id": dispute_id, "state": state, "amount_money": money(amount_minor),
             "disputed_payment": {"payment_id": payment_id}, "reason": "NO_KNOWLEDGE",
-            "created_at": "2026-09-14T20:00:00.000Z"}
+            "created_at": _ago(5)}
 
 
 def square_payout(payout_id: str, *, amount_minor: int = 240000, status: str = "PAID") -> dict:
     return {"id": payout_id, "status": status, "amount_money": money(amount_minor),
-            "created_at": "2026-09-15T02:00:00.000Z", "destination": {"type": "BANK_ACCOUNT"},
+            "created_at": _ago(3), "destination": {"type": "BANK_ACCOUNT"},
             "location_id": LOCATION, "version": 1}
 
 
 def square_event(event_id: str, event_type: str, object_type: str, obj: dict, *, merchant_id: str = MERCHANT) -> dict:
     """The exact envelope Square posts (object nested under its own key)."""
     return {"merchant_id": merchant_id, "type": event_type, "event_id": event_id,
-            "created_at": "2026-09-14T17:05:01Z", "data": {"type": object_type, "id": obj.get("id"),
+            "created_at": _ago(7.9), "data": {"type": object_type, "id": obj.get("id"),
                                                            "object": {object_type: obj}}}
 
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -120,6 +121,26 @@ class Settings(BaseSettings):
     OPENCLAW_CLI: str = "openclaw"
     OPENCLAW_HOME: str = "~/.openclaw"
     LEGACY_BACKGROUND_LOOP: bool = False     # Notion/OpenClaw polling inside the API process
+
+    @field_validator("DATABASE_URL", "TEST_DATABASE_URL", mode="after")
+    @classmethod
+    def _async_driver(cls, value: str) -> str:
+        """Every database URL reaches SQLAlchemy with the asyncpg driver on it.
+
+        Managed Postgres add-ons hand out `postgresql://…` (Railway) or `postgres://…` (Heroku-style),
+        which SQLAlchemy reads as a *synchronous* driver and `create_async_engine` then refuses. Pasting
+        the provider's own variable is the obvious thing to do and used to fail the first deploy, so the
+        scheme is normalised here rather than in a note somebody has to read. A URL that already names a
+        driver (`+asyncpg`, or `+psycopg` for a tool that wants one) is left exactly as it is.
+        """
+        if "://" not in value:
+            return value
+        scheme, rest = value.split("://", 1)
+        if "+" in scheme:
+            return value
+        if scheme in ("postgres", "postgresql"):
+            return f"postgresql+asyncpg://{rest}"
+        return value
 
     @property
     def is_production(self) -> bool:
