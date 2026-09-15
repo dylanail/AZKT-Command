@@ -1,0 +1,49 @@
+/* Finance screen layout. Loaded with the /finance chunk (imported by screens/finance/Finance.tsx).
+   Primitives live in ui.css; shared screen pieces (.kpis, .set-row, .apv-facts, .opts) in screens.css. */
+
+.fin-row {
+  display: flex; flex-direction: column; gap: 10px; min-width: 0;
+  padding: 14px 16px; border-bottom: 1px solid var(--line2);
+}
+.fin-row:last-child { border-bottom: 0; }
+
+.fin-row__head { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; flex-wrap: wrap; min-width: 0; }
+.fin-row__main { flex: 1 1 240px; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.fin-row__title { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; min-width: 0; font-weight: 500; }
+.fin-row__meta {
+  display: flex; align-items: center; gap: 4px; flex-wrap: wrap; min-width: 0;
+  color: var(--t3); font-size: 13px; font-variant-numeric: tabular-nums;
+}
+.fin-row__amount { flex: none; font-size: 16px; font-weight: 600; font-variant-numeric: tabular-nums; text-align: right; }
+.fin-row__chips { display: flex; gap: 6px; flex-wrap: wrap; min-width: 0; }
+.fin-row__actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; min-width: 0; }
+
+/* A disagreement between the evidence and the recorded item. Visible, never averaged away. */
+.fin-conflict {
+  display: flex; flex-direction: column; gap: 6px; min-width: 0;
+  border: 1px solid var(--blocked); border-radius: 14px; padding: 10px 12px; background: var(--sheet-soft);
+}
+.fin-conflict__title { font-size: 13px; font-weight: 600; color: var(--blocked); }
+
+/* Scrollable single-choice list (cost items, procedures). */
+.fin-picker {
+  display: flex; flex-direction: column; min-width: 0;
+  border: 1px solid var(--line2); border-radius: 12px; max-height: 230px; overflow: auto;
+}
+.fin-picker__item {
+  display: flex; justify-content: space-between; align-items: center; gap: 10px;
+  width: 100%; min-height: 44px; padding: 8px 12px; text-align: left;
+  border: 0; border-bottom: 1px solid var(--line2); background: transparent; color: inherit;
+  font: inherit; font-size: 13px; min-width: 0;
+}
+.fin-picker__item:last-child { border-bottom: 0; }
+.fin-picker__item:hover { background: var(--row-hover); }
+.fin-picker__item[aria-selected="true"] { background: var(--soft); font-weight: 500; }
+
+@media (max-width: 767px) {
+  .fin-row { padding: 14px; }
+  .fin-row__actions .btn { min-height: 44px; }
+  .fin-row__amount { font-size: 15px; }
+  /* Row actions inside a finance table stay thumb-sized. */
+  .fin-table td.actions .btn { min-height: 44px; padding: 0 14px; }
+}

@@ -1,0 +1,122 @@
+/* Home (screens/home). Layout only — every colour comes from tokens.css so dark and the reduced-transparency
+   ("glass off") mode read correctly without a second palette. Numbers are tabular everywhere. */
+
+.hm-page { gap: 22px; }
+
+/* ---------- header ---------- */
+.hm-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; flex-wrap: wrap; min-width: 0; }
+.hm-head__actions { display: flex; gap: 8px; align-items: center; flex: none; }
+.hm-status-meta { display: flex; flex-wrap: wrap; gap: 6px; align-items: baseline; min-width: 0; }
+.hm-conns { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; min-width: 0; }
+.hm-stale-note {
+  display: flex; flex-wrap: wrap; gap: 4px; align-items: baseline;
+  border-left: 3px solid var(--risk); padding: 2px 0 2px 10px; line-height: 1.5;
+}
+
+/* ---------- mobile jump bar: decisions and today stay within one screen ---------- */
+.hm-jump {
+  display: flex; gap: 8px; overflow-x: auto; scrollbar-width: none;
+  -webkit-overflow-scrolling: touch; max-width: 100%; padding-bottom: 2px;
+}
+.hm-jump::-webkit-scrollbar { display: none; }
+.hm-jump__item {
+  display: inline-flex; align-items: center; gap: 6px; flex: none;
+  min-height: 44px; padding: 0 14px; border-radius: 999px;
+  background: var(--glass); border: 1px solid var(--gl); box-shadow: var(--gs);
+  color: var(--text); font-size: 14px; font-weight: 500; text-decoration: none; white-space: nowrap;
+}
+.hm-jump__item:hover { text-decoration: none; background: var(--surface2); }
+.hm-jump__count { color: var(--t3); font-weight: 400; }
+
+/* ---------- sections ---------- */
+.hm-section { min-width: 0; }
+.hm-section .section-title h2 { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; min-width: 0; }
+.hm-expander-title { font-size: 15px; font-weight: 600; color: var(--text); }
+.hm-unavailable { padding: 18px 16px; color: var(--t3); font-size: 14px; line-height: 1.55; }
+.hm-explain { display: block; font-size: 12px; color: var(--t3); line-height: 1.45; overflow-wrap: anywhere; }
+
+/* ---------- period / horizon controls ---------- */
+.hm-period { display: flex; flex-wrap: wrap; gap: 10px 14px; align-items: center; min-width: 0; }
+.hm-range { display: flex; flex-wrap: wrap; gap: 10px 12px; align-items: flex-end; min-width: 0; }
+.hm-range .field { min-width: 150px; }
+
+/* ---------- metric tiles ---------- */
+.hm-tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 10px; min-width: 0; }
+.hm-tiles + .hm-tiles { margin-top: 10px; }
+.hm-tile {
+  display: flex; flex-direction: column; gap: 3px; min-width: 0;
+  border: 1px solid var(--line2); border-radius: 16px; padding: 12px 14px;
+  background: transparent; color: inherit; text-align: left; white-space: normal;
+  font: inherit; transition: background .15s ease, border-color .15s ease;
+}
+button.hm-tile:hover { background: var(--row-hover); border-color: var(--line); }
+button.hm-tile:active { transform: translateY(1px); }
+.hm-tile--static { cursor: default; }
+.hm-tile__label { font-size: 12px; color: var(--t3); }
+.hm-tile__value {
+  font-size: 21px; font-weight: 600; letter-spacing: -.01em;
+  font-variant-numeric: tabular-nums; overflow-wrap: anywhere; line-height: 1.25;
+}
+.hm-tile__sub { font-size: 12px; color: var(--t4); line-height: 1.45; overflow-wrap: anywhere; }
+.hm-tile--ok .hm-tile__value { color: var(--ok); }
+.hm-tile--risk .hm-tile__sub { color: var(--risk); }
+.hm-tile--blocked .hm-tile__value { color: var(--blocked); }
+.hm-tile--wait .hm-tile__label { color: var(--wait); }
+.hm-tile--ghost { min-height: 92px; background: var(--soft); border-style: dashed; }
+.hm-tiles--secondary .hm-tile__value { font-size: 18px; }
+
+/* ---------- completeness ---------- */
+.hm-complete { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.hm-reasons { margin: 0; padding-left: 18px; font-size: 13px; color: var(--t2); line-height: 1.55; }
+.hm-reasons li { overflow-wrap: anywhere; }
+
+/* ---------- rows ---------- */
+.hm-row {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 12px 16px;
+  padding: 13px 16px; border-bottom: 1px solid var(--line2); align-items: center; min-width: 0;
+}
+.hm-row:last-child { border-bottom: 0; }
+.hm-row--today { grid-template-columns: 88px minmax(0, 1fr); align-items: start; }
+.hm-row--completed { grid-template-columns: 108px minmax(0, 1fr); align-items: start; }
+.hm-row__when { display: flex; flex-direction: column; gap: 2px; font-size: 13px; font-variant-numeric: tabular-nums; min-width: 0; }
+.hm-row__main { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.hm-row__title { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; font-weight: 500; min-width: 0; }
+.hm-row__title > .chip, .hm-row__title > .health { flex: none; }
+.hm-row__facts { display: flex; flex-direction: column; gap: 2px; color: var(--t2); min-width: 0; overflow-wrap: anywhere; }
+.hm-row__right { display: flex; gap: 8px; align-items: center; flex: none; flex-wrap: wrap; justify-content: flex-end; }
+.hm-overdue { color: var(--blocked); }
+.hm-items { margin: 0; padding-left: 18px; font-size: 13px; line-height: 1.6; color: var(--t2); }
+.hm-items li { overflow-wrap: anywhere; }
+
+/* ---------- drill-down ---------- */
+.hm-drill-head { display: flex; flex-wrap: wrap; gap: 6px 12px; align-items: center; min-width: 0; }
+.hm-durations { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 10px; min-width: 0; }
+.hm-duration {
+  display: flex; flex-direction: column; gap: 3px; min-width: 0;
+  border: 1px solid var(--line2); border-radius: 16px; padding: 12px 14px;
+}
+.hm-duration__value { font-size: 19px; font-weight: 600; font-variant-numeric: tabular-nums; }
+
+/* ---------- phone ---------- */
+@media (max-width: 767px) {
+  .hm-page { gap: 20px; }
+  .hm-head__actions .btn { min-height: 44px; }
+  /* two readable columns, never a wide chart as the only way to read a number */
+  .hm-tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+  .hm-tile { padding: 11px 12px; }
+  .hm-tile__value { font-size: 19px; }
+  /* rows stack: the action sits under the facts, still a 44px target */
+  .hm-row { grid-template-columns: minmax(0, 1fr); padding: 14px 16px; }
+  .hm-row--today { grid-template-columns: 76px minmax(0, 1fr); }
+  .hm-row--completed { grid-template-columns: 96px minmax(0, 1fr); }
+  .hm-row__when { font-size: 12px; }
+  .hm-row__right { justify-content: flex-start; }
+  .hm-row__right .btn { min-height: 44px; }
+  .hm-range .field { min-width: 100%; }
+  .hm-range .btn { min-height: 44px; }
+}
+
+/* Narrow desktop: keep four tiles readable rather than squeezing them. */
+@media (min-width: 768px) and (max-width: 1023px) {
+  .hm-tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}

@@ -1,127 +1,152 @@
+"""Vehicles API (spec §2.3 Vehicles / Vehicle detail). Reads apply record scope and money permissions;
+every write dispatches a services/vehicles.py (or shop / intake) command."""
 from __future__ import annotations
 
-from datetime import datetime, timezone
-
-from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import select
+from fastapi import APIRouter, Body, Depends, HTTPException, Query
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..auth.passkey import current_user
+from ..auth.deps import command_context, require
+from ..core.errors import NotFound
 from ..db import get_db
-from ..models import IRQ, StageTransition, Vehicle
-from ..services import notion_sync
+from ..domain.access import assert_vehicle_visible, visible_vehicle_ids
+from ..domain.actors import Actor
+from ..domain.commands import CommandContext, dispatch
+from ..models.vehicles import HEALTH, RECON_STATES, Vehicle
+from ..services import vehicles as svc
 
-router = APIRouter(prefix="/api/vehicles", tags=["vehicles"], dependencies=[Depends(current_user)])
+router = APIRouter(prefix="/api/vehicles", tags=["vehicles"])
 
-STAGES = ["sourced", "bid", "won", "in_transit_japan", "customs",
-          "arrived", "reconditioning", "ready_for_sale", "sold"]
+COMMANDS = {
+    "update": "vehicles.update", "states": "vehicles.set_states", "milestone": "vehicles.record_milestone",
+    "propose_fact": "vehicles.propose_fact", "confirm_fact": "vehicles.confirm_fact", "condition": "vehicles.set_condition",
+    "condition_bullet": "vehicles.edit_condition_bullet", "archive": "vehicles.archive", "restore": "vehicles.restore",
+    "price": "vehicles.set_asking_price", "move_stage": "shop.move_stage", "inspection": "shop.log_inspection",
+    "issue": "shop.create_issue", "part": "shop.request_part",
+}
+SEARCHABLE = (Vehicle.stock_no, Vehicle.frame_no_raw, Vehicle.frame_no_norm, Vehicle.title, Vehicle.make, Vehicle.model, Vehicle.color)
 
 
-def _ser(v: Vehicle) -> dict:
-    return {
-        "id": v.id, "business_id": v.business_id, "title": v.title, "stage": v.stage,
-        "auction_url": v.auction_url, "sold_price_usd": v.sold_price_usd,
-        "landed_cost_usd": v.landed_cost_usd,
-        "won_date": v.won_date.isoformat() if v.won_date else None,
-        "sold_date": v.sold_date.isoformat() if v.sold_date else None,
-        "days_on_market": v.days_on_market, "customer_id": v.customer_id,
-        "stage_timestamps": v.stage_timestamps or {}, "notion_page_id": v.notion_page_id,
-    }
+def _sanitize_result(actor: Actor, d: dict) -> dict:
+    return svc.sanitize_command_result(actor, d)
+
+
+async def _base_query(db: AsyncSession, actor: Actor, *, include_archived: bool):
+    q = select(Vehicle)
+    if not include_archived:
+        q = q.where(Vehicle.archived_at.is_(None))
+    limit = await visible_vehicle_ids(db, actor)
+    if limit is not None:
+        q = q.where(Vehicle.id.in_(list(limit)) if limit else Vehicle.id.is_(None))
+    return q
 
 
 @router.get("")
-async def list_vehicles(db: AsyncSession = Depends(get_db)):
-    rows = (await db.execute(select(Vehicle))).scalars().all()
-    return [_ser(v) for v in rows]
+async def list_vehicles(view: str = Query("all"), q: str | None = None, health: str | None = None, recon_state: str | None = None,
+                        include_archived: bool = False, limit: int = Query(100, ge=1, le=500), offset: int = Query(0, ge=0),
+                        actor: Actor = Depends(require("vehicles.read")), db: AsyncSession = Depends(get_db)):
+    if view not in svc.VIEWS:
+        raise HTTPException(422, f"view must be one of {svc.VIEWS}")
+    if health and health not in HEALTH:
+        raise HTTPException(422, f"health must be one of {HEALTH}")
+    if recon_state and recon_state not in RECON_STATES:
+        raise HTTPException(422, f"recon_state must be one of {RECON_STATES}")
+    base = await _base_query(db, actor, include_archived=include_archived)
+    clause = svc.view_clause(view)
+    if clause is not None:
+        base = base.where(clause)
+    if health:
+        base = base.where(Vehicle.health == health)
+    if recon_state:
+        base = base.where(Vehicle.recon_state == recon_state)
+    if q:
+        term = q.strip()
+        needle = f"%{term}%"
+        ors = [c.ilike(needle) for c in SEARCHABLE]
+        norm = svc.normalize_frame(term)
+        if norm:
+            ors.append(Vehicle.frame_no_norm.ilike(f"%{norm}%"))
+        stock = svc.normalize_stock_no(term)
+        if stock:
+            ors.append(Vehicle.stock_no == stock)
+        base = base.where(or_(*ors))
+    total = await db.scalar(select(func.count()).select_from(base.subquery()))
+    rows = (await db.execute(base.order_by(Vehicle.updated_at.desc()).limit(limit).offset(offset))).scalars().all()
+    return {"items": [svc.serialize_list_item(v) for v in rows], "total": int(total or 0), "view": view, "views": list(svc.VIEWS),
+            "empty_state": None if rows else ("No vehicles yet" if view == "all" else f"No vehicles in {view}")}
 
 
-@router.get("/kanban")
-async def kanban(db: AsyncSession = Depends(get_db)):
-    rows = (await db.execute(select(Vehicle))).scalars().all()
-    board = {s: [] for s in STAGES}
-    for v in rows:
-        board.setdefault(v.stage, []).append(_ser(v))
-    return {"stages": STAGES, "board": board}
+@router.get("/views")
+async def view_counts(actor: Actor = Depends(require("vehicles.read")), db: AsyncSession = Depends(get_db)):
+    out = {}
+    for view in svc.VIEWS:
+        base = await _base_query(db, actor, include_archived=False)
+        clause = svc.view_clause(view)
+        if clause is not None:
+            base = base.where(clause)
+        out[view] = int(await db.scalar(select(func.count()).select_from(base.subquery())) or 0)
+    return {"counts": out}
+
+
+async def _load(db: AsyncSession, actor: Actor, vehicle_id: str) -> Vehicle:
+    v = await db.get(Vehicle, vehicle_id)
+    if v is None:
+        raise NotFound("vehicle not found")
+    await assert_vehicle_visible(db, actor, v.id)
+    return v
+
+
+@router.get("/{vehicle_id}")
+async def get_vehicle(vehicle_id: str, actor: Actor = Depends(require("vehicles.read")), db: AsyncSession = Depends(get_db)):
+    v = await _load(db, actor, vehicle_id)
+    return await svc.vehicle_detail(db, actor, v)
+
+
+@router.get("/{vehicle_id}/timeline")
+async def get_timeline(vehicle_id: str, actor: Actor = Depends(require("vehicles.read")), db: AsyncSession = Depends(get_db)):
+    """Milestone projection for the card / Home timeline (planned / estimated / completed with sources)."""
+    v = await _load(db, actor, vehicle_id)
+    return await svc.timeline(db, v)
+
+
+@router.get("/{vehicle_id}/facts")
+async def get_facts(vehicle_id: str, history: bool = False, actor: Actor = Depends(require("vehicles.read")),
+                    db: AsyncSession = Depends(get_db)):
+    v = await _load(db, actor, vehicle_id)
+    facts = [svc.serialize_fact(f) for f in await svc.facts_of(db, v.id, include_history=history)]
+    if not svc.can_see_costs(actor):
+        facts = [f for f in facts if f["key"] not in ("purchase_amount", "asking_price") and f["visibility"] != "owner"]
+    return {"items": facts, "total": len(facts)}
+
+
+@router.get("/{vehicle_id}/milestones")
+async def get_milestones(vehicle_id: str, history: bool = False, actor: Actor = Depends(require("vehicles.read")),
+                         db: AsyncSession = Depends(get_db)):
+    v = await _load(db, actor, vehicle_id)
+    items = [svc.serialize_milestone(m) for m in await svc.milestones_of(db, v.id, include_history=history)]
+    return {"items": items, "total": len(items)}
+
+
+@router.get("/{vehicle_id}/photos")
+async def get_photos(vehicle_id: str, actor: Actor = Depends(require("vehicles.read")), db: AsyncSession = Depends(get_db)):
+    v = await _load(db, actor, vehicle_id)
+    links = await svc.photo_links(db, v.id)
+    items = [svc.serialize_asset_brief(a, l) for l, a in links if a.kind == "photo" and not a.sensitive]
+    return {"items": items, "total": len(items), "hero_asset_id": v.hero_asset_id, "empty_state": None if items else "No photo yet"}
 
 
 @router.post("")
-async def create_vehicle(body: dict, db: AsyncSession = Depends(get_db)):
-    v = Vehicle(title=body.get("title", ""), auction_url=body.get("auction_url"),
-                stage=body.get("stage", "sourced"))
-    v.stage_timestamps = {f"{v.stage}_at": datetime.now(timezone.utc).isoformat()}
-    db.add(v)
-    await db.commit()
-    await notion_sync.push_vehicle(v)  # Postgres is truth; mirror immediately
-    await db.commit()
-    return _ser(v)
+async def create_vehicle(payload: dict = Body(...), ctx: CommandContext = Depends(command_context)):
+    res = await dispatch(ctx, "vehicles.create", payload)
+    return _sanitize_result(ctx.actor, res.to_dict())
 
 
-@router.patch("/{vid}")
-async def update_vehicle(vid: str, body: dict, db: AsyncSession = Depends(get_db)):
-    v = await db.get(Vehicle, vid)
-    if not v:
-        raise HTTPException(404, "not found")
-    for f in ("title", "auction_url", "sold_price_usd", "landed_cost_usd"):
-        if f in body:
-            setattr(v, f, body[f])
-    await db.commit()
-    await notion_sync.push_vehicle(v)
-    await db.commit()
-    return _ser(v)
-
-
-@router.post("/{vid}/stage")
-async def move_stage(vid: str, body: dict, db: AsyncSession = Depends(get_db)):
-    """Kanban drag / one-tap flip. Writes back to Notion + logs the transition
-    with a discrete timestamp so duration analytics never parse edit history."""
-    v = await db.get(Vehicle, vid)
-    if not v:
-        raise HTTPException(404, "not found")
-    to = body.get("stage")
-    if to not in STAGES:
-        raise HTTPException(400, f"stage must be one of {STAGES}")
-    now = datetime.now(timezone.utc)
-    db.add(StageTransition(vehicle_id=v.id, from_stage=v.stage, to_stage=to, at=now,
-                           source=body.get("source", "dashboard")))
-    ts = dict(v.stage_timestamps or {})
-    ts[f"{to}_at"] = now.isoformat()
-    v.stage_timestamps = ts
-    v.stage = to
-    if to == "won" and not v.won_date:
-        v.won_date = now
-    if to == "sold" and not v.sold_date:
-        v.sold_date = now
-    await db.commit()
-    await notion_sync.push_vehicle(v)
-    await db.commit()
-    return _ser(v)
-
-
-@router.get("/widgets/home")
-async def home_widgets(db: AsyncSession = Depends(get_db)):
-    """The things currently dug for by hand."""
-    vehicles = (await db.execute(select(Vehicle))).scalars().all()
-    irqs = (await db.execute(select(IRQ))).scalars().all()
-    now = datetime.now(timezone.utc)
-
-    def age_days(dt):
-        return (now - dt).days if dt else None
-
-    return {
-        "won_awaiting_decision": [_ser(v) for v in vehicles if v.stage == "won"],
-        "new_irqs_24h": [
-            {"id": i.id, "title": i.title}
-            for i in irqs
-            if i.received_at and age_days(i.received_at) == 0
-        ],
-        "stale_irqs_7d": [
-            {"id": i.id, "title": i.title, "age_days": age_days(i.received_at)}
-            for i in irqs
-            if i.received_at and (age_days(i.received_at) or 0) > 7 and i.status == "open"
-        ],
-        "listings_days_on_market": [
-            {"id": v.id, "title": v.title, "days_on_market": v.days_on_market}
-            for v in vehicles
-            if v.stage in ("ready_for_sale",) and v.days_on_market is not None
-        ],
-    }
+@router.post("/{vehicle_id}/{action}")
+async def vehicle_action(vehicle_id: str, action: str, payload: dict = Body(default={}), ctx: CommandContext = Depends(command_context)):
+    name = COMMANDS.get(action)
+    if name is None:
+        raise HTTPException(404, f"unknown vehicle action {action!r}")
+    body = dict(payload or {})
+    body["vehicle_id"] = vehicle_id
+    res = await dispatch(ctx, name, body)
+    return _sanitize_result(ctx.actor, res.to_dict())

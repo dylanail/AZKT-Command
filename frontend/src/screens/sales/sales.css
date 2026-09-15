@@ -1,0 +1,83 @@
+/* Sales board · lead pane · sales task view. Values mirror the Liquid Glass II prototype. */
+
+.sb-toolbar { display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap; align-items: center; min-width: 0; }
+/* auto-fit keeps the fixed column order, wraps on narrow desktops, and never clips the Move popover. */
+.sb-board { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 14px; align-items: start; padding-bottom: 8px; min-width: 0; }
+.sb-col {
+  display: flex; flex-direction: column; gap: 10px; min-height: 260px; border-radius: 22px; padding: 8px; min-width: 0;
+  background: rgba(255, 255, 255, .12); outline: 2px dashed transparent; outline-offset: -2px; transition: background .15s ease, outline-color .15s ease;
+}
+[data-theme="dark"] .sb-col { background: rgba(255, 255, 255, .04); }
+.sb-col--over { background: rgba(10, 122, 255, .08); outline-color: var(--act); }
+.sb-col--lost { background: rgba(255, 255, 255, .06); }
+.sb-col--lost.sb-col--over { background: rgba(215, 0, 21, .06); outline-color: var(--blocked); }
+.sb-col__head { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 4px 8px 0; font-size: 13px; font-weight: 600; color: var(--t2); min-width: 0; }
+.sb-col--lost .sb-col__head { color: var(--t3); }
+.sb-col__label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sb-col__count { font-size: 12px; color: var(--t4); font-weight: 400; font-variant-numeric: tabular-nums; flex: none; }
+.sb-col__empty { border: 1px dashed var(--line); border-radius: 16px; padding: 18px 12px; text-align: center; font-size: 13px; color: var(--t4); }
+.sb-col__note { font-size: 12px; color: var(--t4); padding: 4px 8px; line-height: 1.4; }
+
+.sb-card {
+  background: var(--surface); backdrop-filter: var(--blur); -webkit-backdrop-filter: var(--blur);
+  border: 1px solid var(--gl); box-shadow: var(--gs); border-radius: 18px; padding: 12px 14px;
+  display: flex; flex-direction: column; gap: 6px; cursor: grab; font-size: 14px; min-width: 0; width: 100%;
+  text-align: left; color: inherit; white-space: normal; transition: background .15s ease, opacity .15s ease;
+}
+.sb-card:hover { background: var(--surface2); }
+.sb-card:active { cursor: grabbing; }
+.sb-card--dragging { opacity: .5; }
+.sb-card--lost { opacity: .8; }
+.sb-card__top { display: flex; justify-content: space-between; gap: 8px; align-items: baseline; min-width: 0; }
+.sb-card__name { font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sb-card__age { font-size: 12px; color: var(--t4); white-space: nowrap; flex: none; }
+.sb-card__subject { color: var(--t2); font-size: 13px; line-height: 1.4; overflow-wrap: anywhere; }
+.sb-card__task { display: flex; gap: 4px 6px; align-items: center; flex-wrap: wrap; font-size: 13px; color: var(--t2); font-variant-numeric: tabular-nums; }
+.sb-card__task--overdue { color: var(--blocked); }
+.sb-card__task--overdue .when { color: var(--blocked); }
+.sb-card__dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; flex: none; }
+.sb-card__none { font-size: 13px; color: var(--t4); }
+.sb-card__foot { display: flex; justify-content: space-between; align-items: center; gap: 6px; margin-top: 2px; min-width: 0; }
+.sb-card__owner { font-size: 12px; color: var(--t4); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sb-foot { display: flex; gap: 16px; align-items: center; font-size: 13px; color: var(--t3); flex-wrap: wrap; }
+
+/* lead pane (inspector + mobile sheet) */
+.lp { display: flex; flex-direction: column; gap: 16px; font-size: 14px; min-width: 0; }
+.lp__name { font-size: 18px; font-weight: 600; overflow-wrap: anywhere; }
+.lp__sub { font-size: 13px; color: var(--t3); }
+.lp__label { font-size: 12px; color: var(--t3); text-transform: uppercase; letter-spacing: .04em; margin-bottom: 6px; display: flex; justify-content: space-between; gap: 8px; align-items: baseline; }
+.lp__stages { display: flex; gap: 6px; flex-wrap: wrap; }
+.lp__task { display: flex; flex-direction: column; gap: 6px; padding: 10px 12px; border-radius: 14px; border: 1px solid var(--line2); min-width: 0; }
+.lp__task--overdue { background: rgba(215, 0, 21, .06); }
+.lp__task-top { display: flex; justify-content: space-between; gap: 8px; align-items: baseline; min-width: 0; }
+.lp__task-when { font-size: 13px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.lp__task-when--overdue { color: var(--blocked); font-weight: 500; }
+.lp__task-when--overdue .when { color: var(--blocked); }
+.lp__task-foot { display: flex; justify-content: space-between; gap: 8px; align-items: center; flex-wrap: wrap; }
+.lp__form { display: flex; flex-direction: column; gap: 10px; padding: 12px; border-radius: 16px; background: var(--soft); border: 1px solid var(--line2); }
+.lp__adds { display: flex; gap: 6px; flex-wrap: wrap; }
+.lp__links { display: flex; gap: 12px; flex-wrap: wrap; font-size: 13px; }
+
+/* sales task view */
+.st-row { display: grid; grid-template-columns: 170px minmax(0, 1fr) auto; gap: 12px; align-items: center; padding: 12px 16px; border-bottom: 1px solid var(--line2); min-width: 0; }
+.st-row:last-child { border-bottom: 0; }
+.st-row__when { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.st-row__when strong { font-weight: 500; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.st-row__when--overdue strong, .st-row__when--overdue .when { color: var(--blocked); }
+.st-row__main { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.st-row__main a { white-space: normal; flex: initial; }
+.st-row__meta { font-size: 13px; color: var(--t3); overflow-wrap: anywhere; }
+.st-row__actions { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
+@media (max-width: 767px) {
+  .st-row { grid-template-columns: minmax(0, 1fr); }
+  .st-row__actions { justify-content: flex-start; }
+  .st-row .btn { min-height: 44px; }
+}
+
+/* mobile board */
+.sb-mchips { display: flex; gap: 8px; overflow-x: auto; flex-wrap: nowrap; scrollbar-width: none; padding-bottom: 2px; max-width: 100%; -webkit-overflow-scrolling: touch; }
+.sb-mchips::-webkit-scrollbar { display: none; }
+.sb-mcard { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 12px; align-items: center; padding: 14px 16px; min-height: 64px; border-bottom: 1px solid var(--line2); width: 100%; text-align: left; background: transparent; border-left: 0; border-right: 0; border-top: 0; color: inherit; white-space: normal; }
+.sb-mcard:last-child { border-bottom: 0; }
+.sb-mcard:hover { background: var(--row-hover); }
+.sb-mcard__main { display: flex; flex-direction: column; gap: 3px; min-width: 0; }

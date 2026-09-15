@@ -1,117 +1,119 @@
+"""AZKT web/API service. Routers are auto-discovered from backend/app/routers/*.py
+(each exposing `router`). The worker process is backend/worker.py."""
 from __future__ import annotations
 
 import asyncio
 import contextlib
+import importlib
+import logging
+import pkgutil
 from datetime import datetime, timezone
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from .auth.passkey import router as auth_router
 from .core.config import settings
-from .db import Base, SessionLocal, engine
-from .models import AgentState  # noqa: F401  (ensure metadata import)
-from .routers.agents import router as agents_router
-from .routers.chat import router as chat_router
-from .routers.enroll import router as enroll_router
-from .routers.misc import router as misc_router
-from .routers.notion import router as notion_router
-from .routers.vehicles import router as vehicles_router
-from .services import agents as agent_svc
-from .services import notifications, notion_sync
-from .services.usage_ingest import ingest as ingest_usage
+from .core.errors import DomainError
+from .db import SessionLocal, engine
 
-app = FastAPI(title="AZKT Command API")
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=[settings.PUBLIC_ORIGIN],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-app.include_router(auth_router)
-app.include_router(enroll_router)
-app.include_router(agents_router)
-app.include_router(vehicles_router)
-app.include_router(misc_router)
-app.include_router(chat_router)
-app.include_router(notion_router)
+log = logging.getLogger("azkt")
+logging.basicConfig(level=getattr(logging, settings.LOG_LEVEL.upper(), logging.INFO))
 
 
-@app.get("/healthz")
-async def healthz():
-    return {"ok": True, "ts": datetime.now(timezone.utc).isoformat()}
-
-
-async def _background():
-    """Single loop: Notion reflection, usage ingest, notif eval, agent health.
-
-    Each step is independently guarded so one failing integration (e.g. Notion
-    not yet configured) never stalls the others.
-    """
-    while True:
-        async with SessionLocal() as db:
-            for step in (
-                lambda: notion_sync.poll_once(db),
-                lambda: ingest_usage(db),
-                lambda: notifications.evaluate(db),
-                lambda: _refresh_agent_health(db),
-            ):
-                with contextlib.suppress(Exception):
-                    await step()
-        await asyncio.sleep(settings.NOTION_POLL_SECONDS)
-
-
-async def _refresh_agent_health(db):
-    from sqlalchemy import select
-    for a in agent_svc.configured():
-        if not a["configured"]:
+def _include_routers(app: FastAPI) -> None:
+    from . import routers as pkg
+    for m in sorted(pkgutil.iter_modules(pkg.__path__), key=lambda x: x.name):
+        if m.name.startswith("_"):
             continue
-        st = (await db.execute(
-            select(AgentState).where(AgentState.agent_key == a["key"])
-        )).scalar_one_or_none()
-        if st is None:
-            st = AgentState(agent_key=a["key"])
-            db.add(st)
         try:
-            h = (await agent_svc.call(a["key"], "GET", "/health"))["body"]
-            st.last_health = h
-            st.status = h.get("status", "unknown")
-            now = datetime.now(timezone.utc)
-            if st.status == "ok":
-                st.last_ok_at = now
-                st.error_since = None
-            elif st.error_since is None:
-                st.error_since = now  # start the "erroring > N min" clock
+            mod = importlib.import_module(f"{pkg.__name__}.{m.name}")
         except Exception as e:  # noqa: BLE001
-            st.status = "unreachable"
-            if st.error_since is None:
-                st.error_since = datetime.now(timezone.utc)
-            st.last_health = {"error": str(e)}
-    await db.commit()
+            if settings.is_production:
+                raise
+            log.warning("skipping router %s: %s: %s", m.name, type(e).__name__, e)
+            continue
+        r = getattr(mod, "router", None)
+        if r is not None:
+            app.include_router(r)
 
 
-@app.on_event("startup")
-async def _startup():
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    app.state.bg = asyncio.create_task(_background())
+def _import_commands() -> None:
+    """Import every module that registers commands / jobs / event handlers."""
+    for pkg_name in ("backend.app.services", "backend.app.adapters", "backend.app.agent"):
+        try:
+            pkg = importlib.import_module(pkg_name)
+        except ModuleNotFoundError:
+            continue
+        for m in pkgutil.iter_modules(pkg.__path__):
+            if m.name.startswith("_"):
+                continue
+            try:
+                importlib.import_module(f"{pkg_name}.{m.name}")
+            except Exception as e:  # noqa: BLE001
+                if settings.is_production:
+                    raise
+                log.warning("skipping module %s.%s: %s: %s", pkg_name, m.name, type(e).__name__, e)
 
 
-@app.on_event("shutdown")
-async def _shutdown():
-    task = getattr(app.state, "bg", None)
-    if task:
-        task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await task
+def create_app() -> FastAPI:
+    app = FastAPI(title="AZKT API", version="4.0")
+    app.add_middleware(CORSMiddleware, allow_origins=[settings.PUBLIC_ORIGIN], allow_credentials=True,
+                       allow_methods=["*"], allow_headers=["*"])
+
+    @app.exception_handler(DomainError)
+    async def _domain_error(request: Request, exc: DomainError):
+        return JSONResponse(status_code=exc.status_code, content=exc.to_dict())
+
+    _import_commands()
+    app.include_router(auth_router)
+    _include_routers(app)
+
+    with contextlib.suppress(Exception):
+        from .agent.mcp_server import mount_mcp
+        mount_mcp(app)
+
+    @app.get("/healthz")
+    async def healthz():
+        return {"ok": True, "service": "api", "ts": datetime.now(timezone.utc).isoformat()}
+
+    @app.get("/readyz")
+    async def readyz():
+        from sqlalchemy import text
+        try:
+            async with SessionLocal() as db:
+                await db.execute(text("select 1"))
+            return {"ok": True}
+        except Exception as e:  # noqa: BLE001
+            return JSONResponse(status_code=503, content={"ok": False, "error": str(e)})
+
+    @app.on_event("startup")
+    async def _startup():
+        if settings.ENV == "development":
+            from .models import Base
+            async with engine.begin() as conn:
+                await conn.run_sync(Base.metadata.create_all)
+        if settings.LEGACY_BACKGROUND_LOOP:
+            from .services import legacy_loop
+            app.state.bg = asyncio.create_task(legacy_loop.run(SessionLocal))
+
+    @app.on_event("shutdown")
+    async def _shutdown():
+        task = getattr(app.state, "bg", None)
+        if task:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
+    return app
+
+
+app = create_app()
 
 
 def main() -> None:
     import uvicorn
-    # LOOPBACK ONLY — public access exclusively via the reverse proxy.
     uvicorn.run(app, host=settings.API_HOST, port=settings.API_PORT)
 
 

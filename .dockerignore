@@ -1,0 +1,11 @@
+.git
+.venv
+node_modules
+frontend/node_modules
+frontend/dist
+data
+usage/*.jsonl
+*.pyc
+__pycache__
+.pytest_cache
+docs/handoff/reference/design-v2/*.dc.html

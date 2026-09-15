@@ -1,66 +1,64 @@
-# AZKT Command
+# AZKT — Arizona Kei Trucks operations app
 
-Personal command center for Arizona Kei Trucks. Single user. Postgres is the
-source of truth; Notion is a bidirectional mirror. Backend + OpenClaw agents
-stay on loopback — only the reverse proxy is public.
+Desktop and mobile web app that runs AZKT's daily operations: inquiries, vehicles, import
+requests, tasks and reminders, evidence, costs and payments, listings — with an AI Manager that
+Dylan directs from the app, Telegram or an authorized external agent. Built from the v4 handoff in
+[`docs/handoff/`](docs/handoff/) (full spec, acceptance tests, decisions, design references).
 
-> **Status: full stack built** — backend + agent shims + token-usage
-> retrofit + installable iPhone PWA (Face ID, pull-to-refresh, quick-add,
-> Kanban, per-agent chat with persistent history). One-command deploy:
-> `scripts/deploy.sh`.
+- Architecture and conventions: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
+- Operations runbook (run, deploy, migrate, back up, restore, connection setup): [`docs/RUNBOOK.md`](docs/RUNBOOK.md)
+- Railway topology: [`deploy/railway/README.md`](deploy/railway/README.md)
+- Acceptance results: [`docs/RESULTS.md`](docs/RESULTS.md) · Route map (prototype screens → routes): [`docs/ROUTE_MAP.md`](docs/ROUTE_MAP.md)
 
-## You must fill these before it works (nothing is guessed)
+## Stack
 
-| File | What goes in it | Source |
-|---|---|---|
-| `.env` | secrets, DB URL, Notion token + DB ids, setup token | copy `.env.example` |
-| `config/agents.yaml` | each agent's `agent_id`, `workspace`, loopback `port` | context doc |
-| `config/notion_schema.json` | **exact** Notion property names, char-for-char | copy from Notion |
-| `config/notifications.yaml` | notification tiers + thresholds | context doc |
-| `config/pricing.json` | per-model $ rates (defaults provided, verify) | Anthropic pricing |
+| Layer | Technology |
+|---|---|
+| API / web | Python 3.11, FastAPI, SQLAlchemy 2 (async), Postgres 16, Alembic |
+| Worker | `backend/worker.py` — Postgres job queue with leases + fencing, outbox, sweeps |
+| Agent runtime | Anthropic SDK (`claude-opus-5` default), typed tools over the command layer, MCP server at `/mcp` |
+| Frontend | React 18 + TypeScript + Vite PWA, "Liquid Glass II" design tokens |
+| Auth | Passkeys only (WebAuthn), roles owner / manager / mechanic (+ presets), per-person overrides |
 
-The code refuses to start an unconfigured agent and reports every unfilled
-Notion mapping on the health page rather than syncing wrong data silently.
+Every business write goes through one command layer (`backend/app/domain/commands.py`) with
+server-side policy decisions (Allowed / Needs review / Blocked), idempotency, versions, activity and
+an event outbox. Customer sends, publication, bids, payments and terms changes require Dylan's
+exact approval; routine internal work runs automatically.
 
-## Architecture
-
-- **Shims** (`shim/`): one loopback FastAPI sidecar per OpenClaw agent —
-  `/health` `/state` `/run` `/chat` and git-versioned `SOUL.md` editing with
-  rollback. Drives OpenClaw via its CLI + loopback Gateway (`:18789`).
-- **Usage retrofit** (`shim/usage_ledger.py`, `usage/collector.py`):
-  crash-safe append-only JSONL. The collector backfills from OpenClaw session
-  transcripts since the agents don't self-report tokens.
-- **Backend** (`backend/`): FastAPI + Postgres. Passkey-only auth (first
-  registration gated by `SETUP_TOKEN`). Every business row carries
-  `business_id` (default `AZKT`). `shipping_events` table exists but empty.
-  `forbidden_recipient` validator enforced now.
-
-## Run (dev)
+## Quick start (development)
 
 ```bash
-python -m venv .venv && . .venv/bin/activate
-pip install -r backend/requirements.txt
-cp .env.example .env   # then edit
-createdb azkt_command
-PYTHONPATH=. python -m backend.app.main          # api on 127.0.0.1:8787
-PYTHONPATH=. python -m shim.run_shim watcher     # once agents.yaml is filled
-PYTHONPATH=. python -m usage.collector --watch
+python3 -m venv .venv && . .venv/bin/activate
+pip install -r backend/requirements-dev.txt
+cp .env.example .env                      # set DATABASE_URL, SETUP_TOKEN, SESSION_SECRET, ENCRYPTION_KEY
+createdb azkt_command && createdb azkt_test
+scripts/migrate.sh
+PYTHONPATH=. python -m backend.app.main   # API (dev mode also serves /enroll for the first passkey)
+PYTHONPATH=. python -m backend.worker     # durable worker (reminders, jobs, sync)
+cd frontend && npm ci && npm run dev
+PYTHONPATH=. pytest -q                    # tests run against a real Postgres (TEST_DATABASE_URL)
 ```
 
-Frontend (dev): `cd frontend && npm install && npm run dev` (proxies to the
-loopback API). Production build: `npm run build` → `frontend/dist` served by
-nginx at `dash.arizonakeitrucks.com`.
+## Repository layout
 
-Production deploy/reload (run on the droplet, or have your agent run it):
-
-```bash
-ROOT=/opt/azkt-command scripts/deploy.sh   # pull, build, restart, reload nginx
+```
+backend/app/core        settings, time, money, errors, crypto
+backend/app/db.py       engine + BusinessRow mixin (id, business_id, version, audit)
+backend/app/models      one module per domain (auto-imported)
+backend/app/domain      commands (single write path), policy, access, jobs, events, actors
+backend/app/services    domain services and commands per area
+backend/app/adapters    provider clients: model, google_oauth, gmail, drive, sheets, square, telegram, wordpress, email
+backend/app/agent       agent runtime, tools, Manager chat, MCP server
+backend/app/routers     HTTP API (auto-discovered), webhooks
+backend/worker.py       always-on worker
+backend/alembic         migrations
+frontend/src            PWA (app shell, ui kit, screens, lib)
+deploy/, Dockerfile     Railway services; legacy droplet units kept under deploy/systemd
+docs/                   handoff spec, architecture, runbook, results
+shim/, usage/, config/  legacy OpenClaw shims and token ledger (retained as legacy adapters)
 ```
 
-Units: `deploy/systemd/*` + `deploy/nginx.conf.example`.
+## Legacy (droplet era)
 
-## Out of scope for v1 (by design)
-
-Customs/transport email parsing (manual stage flips; `shipping_events` left
-empty for the future parser), GoHighLevel/Twilio/Square (shown "Not connected",
-form to add later), historical backfill, photo/VIN/pricing/sourcing agents.
+The Notion mirror, OpenClaw shims and token-usage ledger from the previous build are retained under
+`/api/legacy/*`, `shim/` and `usage/` and are off by default (`LEGACY_BACKGROUND_LOOP=false`).

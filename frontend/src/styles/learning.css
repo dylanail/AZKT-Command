@@ -1,0 +1,44 @@
+/* Settings › Procedures and Knowledge. Loaded with those sections' chunk.
+   Primitives live in ui.css; shared screen pieces (.set-row, .kpis, .opts, .form-grid) in screens.css. */
+
+.lrn-row {
+  display: flex; flex-direction: column; gap: 10px; min-width: 0;
+  padding: 14px 16px; border-bottom: 1px solid var(--line2);
+}
+.lrn-row:last-child { border-bottom: 0; }
+.lrn-row__head { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; flex-wrap: wrap; min-width: 0; }
+.lrn-row__main { flex: 1 1 260px; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.lrn-row__title { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; min-width: 0; font-weight: 500; }
+.lrn-row__meta { color: var(--t3); font-size: 13px; overflow-wrap: anywhere; }
+.lrn-row__actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; min-width: 0; }
+
+/* Promotion ladder: proposed → offline tested → shadow → supervised → bounded automatic. */
+.ladder { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; min-width: 0; }
+.ladder__step {
+  display: inline-flex; align-items: center; gap: 6px; flex: none; white-space: nowrap;
+  font-size: 12px; padding: 3px 9px; border-radius: 999px;
+  border: 1px solid var(--line2); color: var(--t3); background: transparent;
+}
+.ladder__step--done { color: var(--t2); border-color: var(--line); background: var(--soft); }
+.ladder__step--current { color: var(--act-fg); background: var(--act); border-color: var(--act); font-weight: 600; }
+.ladder__step--withdrawn { color: var(--blocked); border-color: var(--blocked); }
+.ladder__arrow { color: var(--t4); font-size: 11px; flex: none; }
+
+/* Spec sections inside the version drawer. */
+.spec-block { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.spec-block__title { font-size: 12px; color: var(--t3); letter-spacing: .04em; text-transform: uppercase; }
+.spec-block ol, .spec-block ul { margin: 0; padding-left: 18px; font-size: 14px; line-height: 1.55; }
+.spec-block__empty { font-size: 13px; color: var(--t4); }
+
+/* Retrieval results: trust and historical labels travel with the text. */
+.kn-hit {
+  display: flex; flex-direction: column; gap: 6px; min-width: 0;
+  border: 1px solid var(--line2); border-radius: 14px; padding: 10px 12px; background: var(--sheet-soft);
+}
+.kn-hit__text { font-size: 13px; line-height: 1.55; overflow-wrap: anywhere; white-space: pre-wrap; }
+.kn-hit__meta { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; font-size: 12px; color: var(--t3); }
+
+@media (max-width: 767px) {
+  .lrn-row { padding: 14px; }
+  .lrn-row__actions .btn { min-height: 44px; }
+}

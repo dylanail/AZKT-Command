@@ -1,0 +1,75 @@
+/* Notifications, reminder deliveries, Telegram pairing and the reminder-email action card.
+   Containers (.notif-pop, .notif__head/list/foot) live in shell.css; only the pieces this
+   scope owns are here. Colours come from tokens.css so dark and glass-off both read. */
+
+/* ---------- bell: status line + rows ---------- */
+.nf-status {
+  display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px;
+  padding: 10px 16px; border-bottom: 1px solid var(--line2);
+  font-size: 13px; color: var(--t2);
+}
+.nf-status--attn { color: var(--risk); }
+.nf-status a { font-size: 13px; }
+
+.nf-list { list-style: none; margin: 0; padding: 0; }
+.nf-group {
+  padding: 10px 16px 4px; font-size: 12px; letter-spacing: .04em;
+  text-transform: uppercase; font-weight: 600;
+}
+.nf-item {
+  display: grid; grid-template-columns: 10px minmax(0, 1fr); gap: 12px; align-items: start;
+  padding: 10px 16px; border-bottom: 1px solid var(--line2);
+}
+.nf-item:last-child { border-bottom: 0; }
+.nf-item__dot { width: 10px; height: 10px; border-radius: 50%; margin-top: 6px; flex: none; }
+.nf-item__main { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.nf-open {
+  display: block; width: 100%; text-align: left; border: 0; background: transparent; padding: 0;
+  font: inherit; color: inherit; font-weight: 500; cursor: pointer; overflow-wrap: anywhere;
+}
+.nf-open:hover { text-decoration: underline; }
+.nf-open[disabled] { cursor: default; }
+.nf-open[disabled]:hover { text-decoration: none; }
+.nf-item__body { font-size: 13px; color: var(--t3); overflow-wrap: anywhere; }
+.nf-item__meta { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: 12px; color: var(--t4); }
+.nf-item__acts { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 2px; }
+
+/* ---------- deliveries ---------- */
+.nf-del, .nf-row {
+  display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 10px;
+  padding: 10px 0; border-bottom: 1px solid var(--line2);
+}
+.nf-del:last-child, .nf-row:last-child { border-bottom: 0; }
+.nf-del__task, .nf-row__name { font-weight: 500; min-width: 0; overflow-wrap: anywhere; }
+.nf-del__meta, .nf-row__meta { font-size: 13px; color: var(--t3); font-variant-numeric: tabular-nums; }
+.nf-del__why, .nf-row__why { flex-basis: 100%; font-size: 12px; color: var(--risk); overflow-wrap: anywhere; }
+
+/* ---------- telegram pairing ---------- */
+.tg-token {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 8px;
+  border: 1px solid var(--line); border-radius: 14px; padding: 10px 12px;
+  background: var(--soft);
+}
+.tg-token code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px;
+  overflow-wrap: anywhere; min-width: 0;
+}
+.tg-facts { display: flex; flex-direction: column; gap: 2px; font-size: 13px; color: var(--t3); }
+
+/* ---------- reminder-email action card ---------- */
+.nf-action { border-left: 3px solid var(--act); }
+.nf-action--unknown { border-left-color: var(--t4); }
+.nf-action__body { display: flex; flex-direction: column; gap: 12px; padding: 14px 16px; }
+.nf-action__title { font-weight: 600; }
+.nf-action__foot { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.nf-action__picks { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+
+/* Inside the mobile sheet the container already supplies the side padding. */
+.sheet__body .nf-status,
+.sheet__body .nf-group,
+.sheet__body .nf-item { padding-left: 0; padding-right: 0; }
+
+@media (max-width: 767px) {
+  .nf-item__acts .btn, .nf-action__foot .btn, .tg-token .btn, .nf-btnrow .btn { min-height: 44px; }
+  .nf-open { min-height: 24px; }
+}

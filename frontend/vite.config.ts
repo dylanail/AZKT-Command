@@ -9,13 +9,14 @@ export default defineConfig({
     react(),
     VitePWA({
       registerType: "autoUpdate",
-      includeAssets: ["icons/apple-touch-icon.png"],
+      includeAssets: ["icons/apple-touch-icon.png", "gen/*.png"],
       manifest: {
-        name: "AZKT Command",
+        name: "AZKT",
         short_name: "AZKT",
-        description: "Arizona Kei Trucks command center",
-        theme_color: "#0b0f14",
-        background_color: "#0b0f14",
+        description: "Arizona Kei Trucks operations",
+        // Light canvas is the default theme; dark is a persisted toggle (#07080d) applied at runtime.
+        theme_color: "#dfe6f3",
+        background_color: "#dfe6f3",
         display: "standalone",
         orientation: "portrait",
         start_url: "/",
@@ -27,6 +28,7 @@ export default defineConfig({
       },
       workbox: {
         navigateFallback: "/index.html",
+        navigateFallbackDenylist: [/^\/api\//, /^\/auth\//],
         runtimeCaching: [
           {
             urlPattern: ({ url }) => url.pathname.startsWith("/api"),

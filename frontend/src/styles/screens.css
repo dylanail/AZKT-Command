@@ -1,0 +1,114 @@
+/* Screen-specific layout for Settings, Team, Activity and Approvals. Primitives live in ui.css. */
+
+/* ---------- Option rows (role picker, channel choice) ---------- */
+.opts { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.opt {
+  display: flex; gap: 10px; align-items: flex-start;
+  width: 100%; text-align: left; padding: 9px 12px;
+  border: 1px solid var(--line2); border-radius: 12px;
+  background: transparent; color: var(--text); font-size: 14px;
+  white-space: normal; min-height: 44px;
+}
+.opt:hover:not(:disabled) { background: var(--soft); }
+.opt[aria-checked="true"] { border-color: var(--text); background: var(--soft); }
+.opt:disabled { opacity: .55; cursor: not-allowed; }
+.opt__mark { width: 16px; height: 16px; border-radius: 50%; border: 1.5px solid var(--t4); flex: none; margin-top: 2px; position: relative; }
+.opt[aria-checked="true"] .opt__mark { border-color: var(--act); }
+.opt[aria-checked="true"] .opt__mark::after { content: ""; position: absolute; inset: 3px; border-radius: 50%; background: var(--act); }
+.opt__label { font-weight: 500; }
+.opt__desc { color: var(--t3); font-size: 13px; }
+
+/* ---------- Settings sections ---------- */
+.set-row {
+  display: flex; justify-content: space-between; align-items: center; gap: 12px;
+  padding: 12px 16px; border-bottom: 1px solid var(--line2); min-width: 0; flex-wrap: wrap;
+}
+.set-row:last-child { border-bottom: 0; }
+.set-row__main { min-width: 0; flex: 1 1 220px; display: flex; flex-direction: column; gap: 2px; }
+.set-row__title { font-weight: 500; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.set-row__meta { color: var(--t3); font-size: 13px; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.set-row__right { display: flex; gap: 8px; align-items: center; flex: none; flex-wrap: wrap; justify-content: flex-end; }
+.set-row__right .select, .set-row__right .input { width: auto; min-width: 150px; }
+.set-foot { font-size: 12px; color: var(--t4); padding: 0 4px; line-height: 1.5; }
+.form-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px 14px; min-width: 0; }
+.perm-groups { display: flex; flex-direction: column; gap: 10px; }
+.perm-group__title { font-size: 12px; color: var(--t3); letter-spacing: .04em; text-transform: uppercase; padding: 2px 10px; }
+.copybox {
+  display: flex; gap: 8px; align-items: center; min-width: 0;
+  border: 1px solid var(--amber); border-radius: 14px; padding: 10px 12px; background: var(--sheet-soft);
+}
+.copybox code { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
+.kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; }
+.kpi { border: 1px solid var(--line2); border-radius: 14px; padding: 12px 14px; display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.kpi__label { font-size: 12px; color: var(--t3); }
+.kpi__value { font-size: 20px; font-weight: 600; font-variant-numeric: tabular-nums; letter-spacing: -.01em; overflow-wrap: anywhere; }
+.kpi__sub { font-size: 12px; color: var(--t4); font-variant-numeric: tabular-nums; }
+.kpi--blocked .kpi__value { color: var(--blocked); }
+.kpi--risk .kpi__value { color: var(--risk); }
+.kpi--ok .kpi__value { color: var(--ok); }
+.kpi--wait .kpi__value { color: var(--wait); }
+
+/* ---------- Team table cells ---------- */
+.person { display: flex; gap: 10px; align-items: center; min-width: 0; }
+.person__name { font-weight: 500; }
+.person__sub { color: var(--t3); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.table td.actions { text-align: right; white-space: nowrap; }
+
+/* ---------- Activity ---------- */
+.act-row { border-bottom: 1px solid var(--line2); }
+.act-row:last-child { border-bottom: 0; }
+.act-row__head {
+  display: grid; grid-template-columns: 78px 28px minmax(0, 1fr) auto;
+  gap: 12px; align-items: center; padding: 11px 16px;
+  width: 100%; text-align: left; border: 0; background: transparent; color: inherit;
+  font-size: 14px; white-space: normal; min-height: 44px;
+}
+.act-row__head:hover { background: var(--row-hover); }
+.act-row__time { color: var(--t3); font-size: 12px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.act-row__what { font-weight: 500; overflow-wrap: anywhere; }
+.act-row__what--exc { color: var(--risk); }
+.act-row__meta { color: var(--t3); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.act-row__state { font-size: 12px; color: var(--t3); white-space: nowrap; }
+.act-row__body { padding: 0 16px 14px 118px; display: flex; flex-direction: column; gap: 10px; font-size: 13px; }
+.act-pre {
+  margin: 0; font-size: 12px; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere;
+  background: var(--sheet-soft); border: 1px solid var(--line2); border-radius: 10px; padding: 8px 10px; max-height: 260px; overflow: auto;
+}
+@media (max-width: 767px) {
+  .act-row__head { grid-template-columns: 28px minmax(0, 1fr); padding: 12px 14px; }
+  .act-row__time { grid-column: 2; order: 3; }
+  .act-row__state { grid-column: 2; order: 4; }
+  .act-row__body { padding: 0 14px 14px 14px; }
+}
+
+/* ---------- Approval review ---------- */
+.apv-state { display: flex; gap: 10px; font-size: 13px; margin-top: 4px; flex-wrap: wrap; align-items: center; }
+.apv-state__label { font-weight: 500; white-space: nowrap; }
+.apv-rec { color: var(--t2); line-height: 1.5; }
+.apv-facts { display: grid; grid-template-columns: 120px minmax(0, 1fr); gap: 8px 14px; font-size: 14px; }
+.apv-facts > dt { color: var(--t3); margin: 0; }
+.apv-facts > dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+@media (max-width: 480px) { .apv-facts { grid-template-columns: 92px minmax(0, 1fr); } }
+.apv-body {
+  border: 1px solid var(--line2); border-radius: 14px; padding: 14px 16px; line-height: 1.6;
+  background: var(--sheet-soft); white-space: pre-wrap; overflow-wrap: anywhere; font-size: 14px;
+}
+.apv-edit { border: 1px solid var(--amber); border-radius: 14px; padding: 14px 16px; display: flex; flex-direction: column; gap: 10px; }
+.apv-checks { display: flex; flex-direction: column; gap: 6px; }
+.apv-check { display: flex; gap: 8px; align-items: flex-start; font-size: 14px; }
+.apv-check__mark { width: 18px; flex: none; text-align: center; font-weight: 600; }
+.apv-check--fail { color: var(--blocked); }
+.apv-check--fail .apv-check__mark { color: var(--blocked); }
+.apv-check--ok .apv-check__mark { color: var(--ok); }
+.apv-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.apv-actions__note { margin-left: auto; font-size: 13px; color: var(--t3); }
+
+/* Phone: 44px on the controls that matter */
+@media (max-width: 767px) {
+  .btn--primary, .btn--danger, .btn--ok, .set-row .btn, .apv-actions .btn, .dialog__foot .btn { min-height: 44px; }
+  .switch { min-height: 44px; }
+  .set-row__right .select, .set-row__right .input { min-height: 44px; }
+}
+
+/* Inline pair of row actions (e.g. invitation New link · Revoke). */
+.row-actions { display: inline-flex; gap: 6px; align-items: center; flex-wrap: wrap; justify-content: flex-end; }
