@@ -783,6 +783,45 @@ async def test_republishing_reuses_the_uploaded_media_instead_of_filling_the_lib
         assert site.items[pub.external_id]["regular_price"] == "13900.00"
 
 
+async def test_two_vehicles_sharing_a_photo_upload_it_once(db, owner):
+    """The checksum map lives per site, not per publication, so the same image never fills the
+    library with duplicates however many listings use it."""
+    from backend.app.models.listings import SiteMedia
+    site = wordpress_fake(with_existing=False)
+    await wordpress_connections(db)
+    with install_wordpress(site):
+        await _profile(db, owner)
+        shared = jpeg(4242)
+        first = None
+        for i in range(2):
+            v = (await dispatch(ctx_for(db, owner), "vehicles.create", {
+                "make": "Daihatsu", "model": "Hijet", "model_year": 2018, "color": "white",
+                "logistics_state": "received", "create_missing_task": False,
+                "stock_no": f"SH-{_u()[:5]}"})).data["vehicle"]
+            await dispatch(ctx_for(db, owner), "vehicles.set_asking_price",
+                           {"vehicle_id": v["id"], "amount": "12500.00", "currency": "USD"})
+            asset_id = await upload_via_commands(db, owner, shared, f"shared-{i}.jpg")
+            await dispatch(ctx_for(db, owner), "assets.link", {"asset_id": asset_id, "entity_kind": "vehicle",
+                                                               "entity_id": v["id"], "role": "photo", "position": 0})
+            await dispatch(ctx_for(db, owner), "assets.classify", {"asset_id": asset_id,
+                                                                   "classification": "listing_photo",
+                                                                   "public_eligible": True})
+            pkg = (await _build(db, owner, v["id"]))["package"]
+            await _approve_publish(db, owner, pkg["id"], package_hash=pkg["package_hash"])
+            await run_jobs()
+            pub = await _publication(db, v["id"])
+            assert pub.state in ("verified", "pending_verification")
+            first = first or list(pub.media_map.values())[0]
+            assert list(pub.media_map.values())[0] == first     # both listings point at one media row
+            assert len(site.items) == i + 1                     # a stablemate is never mistaken for this truck
+        assert len(site.uploads) == 1 and len(site.media) == 1
+        # one row per (site, checksum): the map that makes the reuse possible
+        sha = site.uploads[0]["sha256"]
+        rows = (await db.execute(select(SiteMedia).where(SiteMedia.sha256 == sha,
+                                                         SiteMedia.site_key == site.base_url))).scalars().all()
+        assert len(rows) == 1 and rows[0].media_id == first
+
+
 async def test_a_photo_deleted_from_the_media_library_is_uploaded_again(db, owner):
     site = wordpress_fake(with_existing=False)
     await wordpress_connections(db)

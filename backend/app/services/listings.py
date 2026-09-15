@@ -963,10 +963,14 @@ async def _find_existing(ad, package: dict, prof: dict, pkg: ListingPackage) -> 
     if len(mine) > 1:
         return None, {"reason": "several site listings claim this vehicle — resolve the duplicates on the site",
                       "candidates": [_candidate(r) for r in mine[:5]]}
-    if seen:
+    # A listing AZKT already bound to a *different* vehicle is definitely not this one, so it is not a
+    # candidate. Without this, a second truck of the same make, model and year would stop for a
+    # confirmation against its stablemate's listing every time.
+    unclaimed = [r for r in seen.values() if not (r.get("meta") or {}).get("azkt_vehicle_id")]
+    if unclaimed:
         reason = ("a site listing looks like this vehicle but carries no AZKT marker — confirm the mapping "
                   "before publishing, or publish as a new listing")
-        return None, {"reason": reason, "candidates": [_candidate(r) for r in list(seen.values())[:5]]}
+        return None, {"reason": reason, "candidates": [_candidate(r) for r in unclaimed[:5]]}
     return None, None
 
 
