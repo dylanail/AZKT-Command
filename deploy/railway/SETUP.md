@@ -15,14 +15,24 @@ Work through this in order. Each step says how to tell it worked.
 
 ## 2. Generate the three secrets
 
-Run these locally and keep the output — you paste them in step 4, and the first two can never be
-rotated casually afterwards (a changed `ENCRYPTION_KEY` makes every stored provider token unreadable).
+Run these in your own terminal and keep the output — you paste them in step 4, and the first two
+cannot be rotated casually afterwards (a changed `ENCRYPTION_KEY` makes every stored provider token
+unreadable).
+
+These three work on a stock macOS terminal with nothing installed:
 
 ```bash
-python3 -c "from cryptography.fernet import Fernet; print('ENCRYPTION_KEY =', Fernet.generate_key().decode())"
+python3 -c "import base64, os; print('ENCRYPTION_KEY =', base64.urlsafe_b64encode(os.urandom(32)).decode())"
 python3 -c "import secrets; print('SESSION_SECRET =', secrets.token_hex(32))"
 python3 -c "import secrets; print('SETUP_TOKEN    =', secrets.token_urlsafe(32))"
 ```
+
+A Fernet key *is* 32 random bytes in url-safe base64, which is exactly what the first line prints — so
+`Fernet.generate_key()` is not needed and neither is the `cryptography` package, which macOS does not
+ship. `openssl rand -base64 32 | tr '+/' '-_'` produces an equally valid key if you prefer it.
+
+Generate them on your own machine, not in a shared terminal or a chat window, and paste them straight
+into Railway's variable editor. Railway stores them encrypted and hides them after saving.
 
 `SETUP_TOKEN` is single-use in practice: it gates the registration of the **first** passkey and
 nothing else.
