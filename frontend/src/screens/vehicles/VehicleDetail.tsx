@@ -1014,6 +1014,16 @@ function SaleTab({ d, reload, cmd, isOwner, costsRead, onMoveReady, moving, canW
               {livePub?.external_url
                 ? <a className="fs13" href={livePub.external_url} target="_blank" rel="noreferrer noopener">Open the live page</a>
                 : <span className="fs13 t4">Not on the website yet.</span>}
+              {livePub?.state === "needs_review" ? (
+                // AZKT found a listing on the site that looks like this truck but carries no AZKT
+                // marker, so it stopped rather than guess. The choice is made on the listing screen.
+                <span className="fs13 t3">
+                  The website already has a listing that might be this truck.{" "}
+                  {pkg ? <Link to={`/listings/${encodeURIComponent(pkg.id)}`}>Confirm which one it is</Link>
+                       : "Open the listing to confirm which one it is"}
+                  {" "}before anything is published.
+                </span>
+              ) : null}
             </div>
           ) : (
             <div className="stack-sm">
