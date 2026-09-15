@@ -163,18 +163,31 @@ async def test_lifecycle_gates_block_active_search_until_evidence(db, owner):
     # the deposit rule is owner-only
     with pytest.raises(Denied):
         await dispatch(ctx_for(db, await _manager(db)), "import_requests.set_deposit_rule", {"request_id": r["id"], "amount": "1000", "currency": "USD"})
-    await dispatch(ctx_for(db, owner), "import_requests.set_deposit_rule", {"request_id": r["id"], "amount": "1000", "currency": "USD"})
+    # setting the rule alone never opens the gate: the deposit is still only "pending", so the request stays deposit_pending
+    res = await dispatch(ctx_for(db, owner), "import_requests.set_deposit_rule", {"request_id": r["id"], "amount": "1000", "currency": "USD"})
+    assert res.data["request"]["status"] == "deposit_pending" and res.data["request"]["deposit_status"] == "pending"
+    assert res.data["gate"]["decision"] == "Blocked"
+    assert {g["key"]: g["ok"] for g in res.data["gate"]["gates"]}["deposit"] is False
+    # a partial payment is a recorded fact, so it is persisted and answered with a structured Blocked decision
+    # (raising would roll the evidence back); the gate stays shut and the remaining balance is explicit.
+    res = await dispatch(ctx_for(db, owner), "import_requests.confirm_deposit", {"request_id": r["id"], "payment_id": "p1", "amount": "400",
+                                                                                  "currency": "USD", "source_ref": "sq-1"})
+    assert res.data["confirmed"] is False and res.data["partial"] is True and res.data["decision"] == "Blocked"
+    assert res.data["remaining"] == "600.00" and res.data["request"]["deposit_status"] == "partial"
+    assert res.data["request"]["status"] == "deposit_pending" and res.data["gate"]["decision"] == "Blocked"
+    # currency mismatches are never converted by assumption
     with pytest.raises(Blocked) as e:
-        await dispatch(ctx_for(db, owner), "import_requests.confirm_deposit", {"request_id": r["id"], "payment_id": "p1", "amount": "400",
-                                                                                "currency": "USD", "source_ref": "sq-1"})
-    assert e.value.detail["remaining"] == "600.00"
-    res = await dispatch(ctx_for(db, owner), "import_requests.confirm_deposit", {"request_id": r["id"], "payment_id": "p2", "amount": "1000",
+        await dispatch(ctx_for(db, owner), "import_requests.confirm_deposit", {"request_id": r["id"], "payment_id": "p1b", "amount": "600",
+                                                                                "currency": "JPY", "source_ref": "sq-1b"})
+    assert "does not match" in e.value.message
+    res = await dispatch(ctx_for(db, owner), "import_requests.confirm_deposit", {"request_id": r["id"], "payment_id": "p2", "amount": "600",
                                                                                   "currency": "USD", "source_ref": "sq-2"})
     assert res.data["request"]["status"] == "active_search" and res.data["request"]["deposit_status"] == "confirmed"
+    assert res.data["request"]["deposit_evidence"]["amount"] == "1000.00" and len(res.data["request"]["deposit_evidence"]["payments"]) == 2
     # replay of the same payment is idempotent; a different payment conflicts
-    rep = await dispatch(ctx_for(db, owner), "import_requests.confirm_deposit", {"request_id": r["id"], "payment_id": "p2", "amount": "1000",
+    rep = await dispatch(ctx_for(db, owner), "import_requests.confirm_deposit", {"request_id": r["id"], "payment_id": "p2", "amount": "600",
                                                                                   "currency": "USD", "source_ref": "sq-2"})
-    assert rep.data["idempotent"] is True
+    assert rep.data["idempotent"] is True and rep.data["changed"] is False
     with pytest.raises(Conflict):
         await dispatch(ctx_for(db, owner), "import_requests.confirm_deposit", {"request_id": r["id"], "payment_id": "p3", "amount": "1000",
                                                                                 "currency": "USD", "source_ref": "sq-3"})
