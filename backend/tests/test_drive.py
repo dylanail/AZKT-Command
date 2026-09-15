@@ -63,13 +63,13 @@ async def _vehicles(db, owner) -> tuple[dict, dict]:
     The fixtures name real identifiers, so the pair is created once per test database and reused."""
     from backend.app.models.vehicles import Vehicle
     from backend.app.services.vehicles import serialize_vehicle
-    existing = (await db.execute(_load(select(Vehicle).where(Vehicle.stock_no == "STK-0412")))).scalars().first()
+    existing = (await db.execute(_load(select(Vehicle).where(Vehicle.stock_no == "STK-7412")))).scalars().first()
     if existing is not None:
         acty_row = (await db.execute(_load(select(Vehicle).where(
             Vehicle.model == "Acty", Vehicle.model_year == 2019)))).scalars().first()
         return serialize_vehicle(existing), serialize_vehicle(acty_row)
     hijet = (await dispatch(ctx_for(db, owner), "vehicles.create", {
-        "make": "Daihatsu", "model": "Hijet", "model_year": 2018, "color": "white", "stock_no": "STK-0412",
+        "make": "Daihatsu", "model": "Hijet", "model_year": 2018, "color": "white", "stock_no": "STK-7412",
         "logistics_state": "received", "create_missing_task": False})).data["vehicle"]
     acty = (await dispatch(ctx_for(db, owner), "vehicles.create", {
         "make": "Honda", "model": "Acty", "model_year": 2019, "color": "silver",
@@ -120,10 +120,10 @@ async def test_scan_indexes_ids_checksums_and_versions_then_goes_incremental(db,
         assert first["mode"] == "full" and first["indexed"] >= 9
         photo = await _row(db, conn, "F-PHOTO-1")
         assert photo is not None and photo.checksum and photo.revision == "1"
-        assert photo.path.endswith("STK-0412 Hijet jumbo/STK-0412 front.jpg")
+        assert photo.path.endswith("STK-7412 Hijet jumbo/STK-7412 front.jpg")
         assert photo.owner_email == "dylxnxil@gmail.com" and photo.in_root is True
         # a second scan uses the changes feed, not a full re-walk
-        fake.add_file("F-NEW", "STK-0412 bed.jpg", FOLDER_EVIDENCED, jpeg(11))
+        fake.add_file("F-NEW", "STK-7412 bed.jpg", FOLDER_EVIDENCED, jpeg(11))
         second = (await dispatch(ctx_for(db, owner), "drive.scan", {})).data
         assert second["mode"] == "incremental" and second["changed"] >= 1
         assert await _row(db, conn, "F-NEW") is not None
@@ -157,7 +157,7 @@ async def test_F01_only_the_evidenced_folder_auto_links(db, owner):
         lookalike = await _row(db, conn, FOLDER_LOOKALIKE)
         # the folder whose name and contents agree on one unique stock reference links itself
         assert evidenced.match_state == "matched" and evidenced.vehicle_id == hijet["id"]
-        assert any("agree on STK-0412" in c for c in evidenced.match_evidence["corroboration"])
+        assert any("agree on STK-7412" in c for c in evidenced.match_evidence["corroboration"])
         # model / year / colour similarity alone never assigns the other truck
         assert lookalike.match_state in ("proposed", "ambiguous")
         assert lookalike.match_state != "matched"

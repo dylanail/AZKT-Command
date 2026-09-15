@@ -271,6 +271,11 @@ async def test_coverage_and_status_endpoints(client, db, owner, mechanic):
     assert all(isinstance(r["doing"], list) for r in st["roles"])
     assert "vehicle status" in st["deterministic_paths"]
 
+    # the capability map is the whole command surface: owner only (spec §10.9, §12.3)
     login(client, mechanic)
-    r2 = await client.get("/api/agent/coverage")
-    assert r2.status_code == 200 and r2.json()["counts"]["available_commands"] < owner_available
+    assert (await client.get("/api/agent/coverage")).status_code == 403
+    # ... and the employee's own reachable subset is still strictly smaller than the owner's
+    from backend.app.agent import coverage as coverage_mod
+    from backend.tests.conftest import actor_of
+    assert coverage_mod.for_actor(actor_of(mechanic, "agent"))["counts"]["available_commands"] < owner_available
+    client.cookies.clear()

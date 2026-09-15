@@ -1,42 +1,50 @@
-"""Listing package lifecycle and channel publication (spec §7.3, acceptance F05, F06, F07, F09, F10, K04).
+"""Listing package lifecycle and channel publication (spec §7.3, acceptance F05–F10, K04).
 
 What is proved here:
 
-* F09 — an en-route truck states its true status and never invents an arrival date; a ready-for-sale
-  truck without verification, documents, price or photos fails its class gates, and a listing class
-  whose gates are not configured is blocked rather than skipped;
-* F05 — an existing site listing is imported before anything is created; a title-only similarity is a
-  proposal that waits for a person;
-* F06 — the network dies after the site accepted the write: the result is `unknown`, reconciliation
-  maps the existing post and at most one post exists;
-* F07 — the API reports success while the public page still shows the old values: the publication is
-  `pending_verification` / `mismatch`, never a false `verified`;
-* F10 — a reservation updates the desired availability immediately, cancels the incompatible queued
-  publication and keeps a cleanup task until the channel is verified; a channel without an adapter is
-  `unsupported` with a manual checklist;
-* K04 — a verified publication records the `listed` milestone with its source.
+* a package is built only from recorded facts with evidence; an en-route listing states the true
+  status and never invents an arrival date, and class gates are enforced — an unconfigured gate blocks
+  publication instead of being skipped (F09);
+* publication is an exact approval bound to package hash + profile version + channel, executed once as
+  a persisted external action; an existing site listing is imported before anything is created and a
+  title-only similarity is a proposal for a person (F05);
+* a lost response after the site accepted the write is `unknown`, reconciled **by mapping** before any
+  retry, and never produces a second post (F06);
+* an API success with a stale public page is `pending_verification`, never a false `verified`, and
+  resolves when the cache catches up (F07);
+* reservation/sale updates the desired availability immediately, cancels incompatible queued channel
+  work and keeps a cleanup task until the channel is verified; a channel without an adapter is
+  `unsupported` with a manual checklist (F10);
+* a verified publication is the source of the `listed` milestone on the vehicle timeline (K04).
 """
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 
 import pytest
 from sqlalchemy import delete, select
 
-from backend.app.adapters import wordpress as wp
 from backend.app.core.errors import Blocked
 from backend.app.domain.commands import dispatch
-from backend.app.models.assets import Asset, AssetLink
 from backend.app.models.listings import ListingPackage, Publication, SiteProfile
 from backend.app.models.runtime import Approval, ExternalAction
 from backend.app.models.tasks import Task
-from backend.app.models.vehicles import Vehicle, VehicleMilestone
+from backend.app.models.vehicles import VehicleMilestone
 from backend.app.services import listings as svc
 from backend.app.services import site_profile as site_svc
 from backend.tests.conftest import ctx_for, login
-from backend.tests.fixtures_providers import (STAGING_URL, install_wordpress, run_jobs, wordpress_connections,
-                                              wordpress_fake)
+from backend.tests.fixtures_providers import (SITE_URL, STAGING_URL, install_wordpress, jpeg, run_jobs,
+                                              wordpress_connections, wordpress_fake)
+from backend.tests.test_assets import upload_via_commands
+
+LIGHT_GATES = {
+    "en_route": [{"requirement": "status_truthful", "label": "States the true current status"},
+                 {"requirement": "eta_sourced", "label": "Any stated ETA is sourced"},
+                 {"requirement": "approved_price", "label": "Owner-approved asking price"}],
+    "ready_for_sale": [{"requirement": "approved_price", "label": "Owner-approved asking price"},
+                       {"requirement": "media_checklist", "label": "Approved public photos", "param": {"min": 1}}],
+}
 
 
 def _u() -> str:
@@ -47,450 +55,499 @@ def _load(stmt):
     return stmt.execution_options(populate_existing=True)
 
 
-async def _reset_profiles(db):
+async def _profile(db, owner, *, gates: dict | None = LIGHT_GATES) -> SiteProfile:
+    """Discover → configure gates → preview on staging → activate. Writes are impossible before this."""
     await db.execute(delete(SiteProfile))
     await db.commit()
-
-
-async def activate_site(db, owner) -> SiteProfile:
     p = (await dispatch(ctx_for(db, owner), "site.discover", {"staging_url": STAGING_URL})).data["profile"]
+    if gates is not None:
+        await dispatch(ctx_for(db, owner), "site.set_listing_gates", {"profile_id": p["id"], "listing_gates": gates})
     await dispatch(ctx_for(db, owner), "site.validate", {"profile_id": p["id"]})
     await dispatch(ctx_for(db, owner), "site.activate", {"profile_id": p["id"]})
     return await db.get(SiteProfile, p["id"])
 
 
-async def make_vehicle(db, owner, *, logistics_state: str = "received", stock: str | None = None, **kw) -> Vehicle:
-    res = await dispatch(ctx_for(db, owner), "vehicles.create", {
+async def _vehicle(db, owner, *, price: str | None = "12500.00", photos: int = 1, **kw) -> dict:
+    v = (await dispatch(ctx_for(db, owner), "vehicles.create", {
         "make": "Daihatsu", "model": "Hijet", "model_year": 2018, "color": "white",
-        "stock_no": stock or f"STK-{uuid.uuid4().int % 9000 + 1000}", "logistics_state": logistics_state,
-        "create_missing_task": False, **kw})
-    return await db.get(Vehicle, res.data["vehicle"]["id"])
-
-
-async def add_photos(db, vehicle: Vehicle, n: int = 6, *, public: bool = True, slots: list[str] | None = None) -> list[str]:
-    ids = []
-    for i in range(n):
-        a = Asset(kind="photo", storage_key=f"assets/test/{_u()}.jpg", content_type="image/jpeg", size_bytes=1024,
-                  sha256=f"sha-{_u()}", status="ready", classification="listing_photo", sensitive=False,
-                  public_eligible=public, pre_arrival=False, visibility="internal", derivatives={"status": "ready"})
-        db.add(a)
-        await db.flush()
-        db.add(AssetLink(asset_id=a.id, entity_kind="vehicle", entity_id=vehicle.id, role="photo", position=i,
-                         slot=(slots[i] if slots and i < len(slots) else None)))
-        ids.append(a.id)
-    await db.commit()
-    return ids
-
-
-async def ready_for_sale(db, owner, **kw) -> Vehicle:
-    """A truck that satisfies every configured ready-for-sale gate."""
-    v = await make_vehicle(db, owner, **kw)
-    await add_photos(db, v, 6)
-    await dispatch(ctx_for(db, owner), "vehicles.set_asking_price",
-                   {"vehicle_id": v.id, "amount": "12500.00", "currency": "USD"})
-    v = (await db.execute(_load(select(Vehicle).where(Vehicle.id == v.id)))).scalar_one()
-    v.recon_state = "ready_for_sale"
-    v.documents_state = "complete"
-    v.inspected_at = datetime.now(timezone.utc) - timedelta(days=1)
-    v.disclosures = [{"text": "small dent on the left door", "by": owner.id}]
-    await db.commit()
-    return v
-
-
-async def build(db, owner, vehicle: Vehicle, **kw) -> dict:
-    return (await dispatch(ctx_for(db, owner), "listings.build_package",
-                           {"vehicle_id": vehicle.id, "use_model": False, **kw})).data
-
-
-async def approve(db, owner, approval_id: str) -> dict:
-    return (await dispatch(ctx_for(db, owner), "approvals.approve", {"approval_id": approval_id})).data
-
-
-async def publish(db, owner, package_id: str, *, channel: str = "website") -> tuple[dict, str | None]:
-    """Request publication (needs an exact approval) and approve it. Returns (result, approval id)."""
-    res = await dispatch(ctx_for(db, owner), "listings.publish", {"package_id": package_id, "channel": channel})
-    if res.status == "needs_review":
-        approval_id = res.approval_id
-        out = await approve(db, owner, approval_id)
-        return out, approval_id
-    return res.to_dict(), None
-
-
-async def publication_of(db, vehicle_id: str) -> Publication:
-    return (await db.execute(_load(select(Publication).where(Publication.vehicle_id == vehicle_id)))).scalars().first()
-
-
-# ── F09: truthful classes and class-specific gates ───────────────────────────
-@pytest.mark.asyncio
-async def test_F09_en_route_draft_is_truthful_and_never_invents_an_eta(db, owner):
-    await wordpress_connections(db)
-    await _reset_profiles(db)
-    with install_wordpress(wordpress_fake()):
-        await activate_site(db, owner)
-        v = await make_vehicle(db, owner, logistics_state="on_vessel")
+        "logistics_state": "received", "create_missing_task": False, **kw})).data["vehicle"]
+    if price is not None:
         await dispatch(ctx_for(db, owner), "vehicles.set_asking_price",
-                       {"vehicle_id": v.id, "amount": "9800.00", "currency": "USD"})
-        data = await build(db, owner, v)
+                       {"vehicle_id": v["id"], "amount": price, "currency": "USD"})
+    for i in range(photos):
+        asset_id = await upload_via_commands(db, owner, jpeg(200 + i + hash(v["id"]) % 50), f"photo-{i}.jpg")
+        await dispatch(ctx_for(db, owner), "assets.link", {"asset_id": asset_id, "entity_kind": "vehicle",
+                                                           "entity_id": v["id"], "role": "photo", "position": i})
+        await dispatch(ctx_for(db, owner), "assets.classify", {"asset_id": asset_id, "classification": "listing_photo",
+                                                               "public_eligible": True})
+    return (await dispatch(ctx_for(db, owner), "vehicles.update", {"vehicle_id": v["id"], "notes": ""})).data["vehicle"]
+
+
+async def _build(db, owner, vehicle_id: str, **kw) -> dict:
+    res = await dispatch(ctx_for(db, owner), "listings.build_package",
+                         {"vehicle_id": vehicle_id, "use_model": False, **kw})
+    return res.data
+
+
+async def _approve_publish(db, owner, package_id: str, *, channel: str = "website",
+                           package_hash: str | None = None) -> tuple[Approval, dict]:
+    res = await dispatch(ctx_for(db, owner), "listings.publish",
+                         {"package_id": package_id, "channel": channel, "expected_package_hash": package_hash})
+    assert res.status == "needs_review" and res.approval_id, res.to_dict()
+    a = await db.get(Approval, res.approval_id)
+    assert a.kind == "publish" and a.consequence["moves_money"] is False
+    ok = await dispatch(ctx_for(db, owner), "approvals.approve",
+                        {"approval_id": a.id, "expected_version": a.approval_version})
+    assert ok.data["executed"] is True, ok.data["approval"].get("invalidated_reason") or ok.data
+    await db.refresh(a)
+    return a, ok.data
+
+
+async def _publication(db, vehicle_id: str, channel: str = "website") -> Publication:
+    return (await db.execute(_load(select(Publication).where(
+        Publication.vehicle_id == vehicle_id, Publication.channel == channel)))).scalars().one()
+
+
+# ── F09: truthful packages and class gates ──────────────────────────────────
+async def test_F09_en_route_package_states_the_truth_and_never_invents_an_eta(db, owner):
+    await wordpress_connections(db)
+    with install_wordpress(wordpress_fake(with_existing=False)):
+        await _profile(db, owner)
+        v = await _vehicle(db, owner, logistics_state="on_vessel", stock_no=f"STK-{_u()[:4].upper()}")
+        data = await _build(db, owner, v["id"])
         pkg = data["package"]
         assert pkg["listing_class"] == "en_route" and pkg["availability"] == "en_route"
-        assert "on the vessel" in pkg["body"]
-        assert "not confirmed yet" in pkg["body"], "an unknown arrival date stays unknown"
+        assert "on the vessel" in pkg["body"] and "not confirmed yet" in pkg["body"]
         assert pkg["evidence"]["eta"] is None
-        assert data["ready"] is True, "en-route publishing does not require finished recon"
-        gates = {g["requirement"]: g for g in pkg["readiness"]}
-        assert gates["eta_sourced"]["ok"] is True and "no arrival date is claimed" in gates["eta_sourced"]["detail"]
-        assert gates["status_truthful"]["ok"] is True
-        assert "recon_verified" not in gates, "recon is not an en-route gate"
+        assert svc.DATE_LIKE.search(pkg["body"]) is None          # no invented arrival date
+        assert data["ready"] is True and pkg["generated_by"] == "template"
+        assert {g["requirement"]: g["ok"] for g in data["readiness"]} == {
+            "status_truthful": True, "eta_sourced": True, "approved_price": True}
+        # specs come from the record and are labelled; nothing is asserted that was never recorded
+        keys = {s["key"] for s in pkg["specs"]}
+        assert {"make", "model", "model_year", "color"} <= keys and "odometer_km" not in keys
+        assert all(s["status"] in ("recorded", "confirmed", "reported") for s in pkg["specs"])
 
-        # a sourced estimate may be repeated, labelled as an estimate with its source
+        # a sourced estimate may be repeated, with its source and its estimated label
         await dispatch(ctx_for(db, owner), "vehicles.record_milestone", {
-            "vehicle_id": v.id, "kind": "arrived_port", "status": "estimated",
-            "at": (datetime.now(timezone.utc) + timedelta(days=20)), "source_kind": "carrier",
-            "source_ref": "vessel-schedule"})
-        data = await build(db, owner, v)
-        pkg = data["package"]
-        assert pkg["evidence"]["eta"]["source"] == "carrier"
-        assert "Estimated arrival" in pkg["body"] and "estimated, source: carrier" in pkg["body"]
-        gate = {g["requirement"]: g for g in pkg["readiness"]}["eta_sourced"]
-        assert gate["ok"] is True and "carrier" in gate["detail"]
+            "vehicle_id": v["id"], "kind": "received", "status": "estimated", "at": "2026-10-20T00:00:00Z",
+            "source_kind": "exporter", "source_ref": "booking-9912"})
+        again = await _build(db, owner, v["id"])
+        eta = again["package"]["evidence"]["eta"]
+        assert eta["source"] == "exporter" and eta["status"] == "estimated" and eta["at"].startswith("2026-10-20")
+        assert "2026-10-20" in again["package"]["body"] and "estimated" in again["package"]["body"]
+        assert again["package"]["package_version"] == pkg["package_version"] + 1
+        assert "body" in again["diff"]["changed"]
 
 
-@pytest.mark.asyncio
-async def test_F09_ready_for_sale_gates_block_an_unverified_truck(db, owner):
+async def test_F09_ready_for_sale_gates_block_a_package_that_is_not_ready(db, owner):
     await wordpress_connections(db)
-    await _reset_profiles(db)
-    with install_wordpress(wordpress_fake()):
-        await activate_site(db, owner)
-        v = await make_vehicle(db, owner, logistics_state="received")   # received → ready_for_sale class
-        data = await build(db, owner, v)
-        gates = {g["requirement"]: g for g in data["package"]["readiness"]}
-        assert data["ready"] is False
-        assert gates["recon_verified"]["ok"] is False and "needs_inspection" in gates["recon_verified"]["detail"]
-        assert gates["documents_ready"]["ok"] is False
-        assert gates["approved_price"]["ok"] is False
-        assert gates["media_checklist"]["ok"] is False and "0 of 6" in gates["media_checklist"]["detail"]
-        assert data["package"]["price"] is None, "no approved price means no price, not a guess"
-        # an unready package cannot be submitted or published
-        with pytest.raises(Blocked, match="gates"):
-            await dispatch(ctx_for(db, owner), "listings.submit_for_review",
-                           {"package_id": data["package"]["id"]})
+    with install_wordpress(wordpress_fake(with_existing=False)):
+        # the spec's configured gates: recon verified, documents ready, approved price, photo checklist
+        await _profile(db, owner, gates=site_svc.DEFAULT_LISTING_GATES)
+        v = await _vehicle(db, owner, price=None, photos=0, stock_no=f"STK-{_u()[:4].upper()}")
+        data = await _build(db, owner, v["id"])
+        assert data["package"]["listing_class"] == "ready_for_sale" and data["ready"] is False
+        failing = {g["requirement"]: g["detail"] for g in data["readiness"] if not g["ok"]}
+        assert set(failing) == {"recon_verified", "documents_ready", "approved_price", "media_checklist"}
+        assert "no owner-approved asking price" in failing["approved_price"]
+        assert "0 of 6 approved public photos" in failing["media_checklist"]
+        assert data["package"]["price"] is None and data["package"]["evidence"]["price"]["missing"] is True
+        with pytest.raises(Blocked, match="does not pass its gates"):
+            await dispatch(ctx_for(db, owner), "listings.submit_for_review", {"package_id": data["package"]["id"]})
         await db.rollback()
         await db.refresh(owner)
 
-        ready = await ready_for_sale(db, owner)
-        data = await build(db, owner, ready)
-        assert data["ready"] is True
-        assert data["package"]["price"] == "12500.00"
-        assert len(data["package"]["media"]) == 6
-        assert data["package"]["disclosures"][0]["text"].startswith("small dent")
 
-
-@pytest.mark.asyncio
-async def test_unconfigured_gates_block_publication_instead_of_being_skipped(db, owner):
+async def test_F09_unconfigured_gates_block_publication_but_not_drafting(db, owner):
     await wordpress_connections(db)
-    await _reset_profiles(db)
-    with install_wordpress(wordpress_fake()):
-        profile = await activate_site(db, owner)
-        await dispatch(ctx_for(db, owner), "site.set_listing_gates", {
-            "profile_id": profile.id,
-            "listing_gates": {"en_route": [{"requirement": "status_truthful", "label": "True status"}],
-                              "ready_for_sale": [{"requirement": "safety_certificate", "label": "Safety certificate"}]}})
-        v = await ready_for_sale(db, owner)
-        data = await build(db, owner, v)
-        assert data["ready"] is False
-        reasons = " ".join(data["package"]["blocked_reasons"])
-        assert "not configured" in reasons
-        # drafting and browsing still work — only publication is blocked
-        assert data["package"]["headline"] and data["package"]["status"] == "draft"
+    with install_wordpress(wordpress_fake(with_existing=False)):
+        # gates exist for en-route only: a ready-for-sale package is blocked, never silently allowed
+        await _profile(db, owner, gates={"en_route": LIGHT_GATES["en_route"]})
+        v = await _vehicle(db, owner, stock_no=f"STK-{_u()[:4].upper()}")
+        data = await _build(db, owner, v["id"])
+        assert data["package"]["id"] and data["ready"] is False        # drafting still works
+        cfg = next(g for g in data["readiness"] if g["requirement"] == "configuration")
+        assert cfg["ok"] is False and "no gates are configured for listing class 'ready_for_sale'" in cfg["detail"]
+        with pytest.raises(Blocked):
+            await dispatch(ctx_for(db, owner), "listings.submit_for_review", {"package_id": data["package"]["id"]})
+        await db.rollback()
+        await db.refresh(owner)
 
 
-# ── F05: an existing listing is imported before anything is created ──────────
-@pytest.mark.asyncio
-async def test_F05_existing_product_is_matched_before_creating_a_duplicate(db, owner):
+async def test_media_comes_only_from_approved_public_photos_and_the_hash_covers_them(db, owner):
     await wordpress_connections(db)
-    await _reset_profiles(db)
-    site = wordpress_fake()          # already has product 501 with sku STK-0412
-    with install_wordpress(site):
-        await activate_site(db, owner)
-        v = await ready_for_sale(db, owner, stock="STK-0412")
-        data = await build(db, owner, v)
-        await dispatch(ctx_for(db, owner), "listings.submit_for_review", {"package_id": data["package"]["id"]})
-        before = len(site.items)
-        await publish(db, owner, data["package"]["id"])
-        await run_jobs()
-        pub = await publication_of(db, v.id)
-        assert pub.external_id == "501", "the existing product is adopted, never duplicated"
-        assert len(site.items) == before
-        assert any(h["state"] == "mapped" for h in (pub.history or []))
+    with install_wordpress(wordpress_fake(with_existing=False)):
+        await _profile(db, owner)
+        v = await _vehicle(db, owner, photos=2, stock_no=f"STK-{_u()[:4].upper()}")
+        data = await _build(db, owner, v["id"])
+        assert len(data["package"]["media"]) == 2
+        assert all(m["sha256"] for m in data["package"]["media_detail"])
+        first_hash = data["package"]["package_hash"]
+        # an extra photo that nobody approved for the public set does not change the package
+        extra = await upload_via_commands(db, owner, jpeg(999), "private.jpg")
+        await dispatch(ctx_for(db, owner), "assets.link", {"asset_id": extra, "entity_kind": "vehicle",
+                                                           "entity_id": v["id"], "role": "photo", "position": 9})
+        same = await _build(db, owner, v["id"])
+        assert same["package"]["package_hash"] == first_hash and same["created"] is False
+        # approving it does change the package hash and shows in the diff
+        await dispatch(ctx_for(db, owner), "assets.classify", {"asset_id": extra, "classification": "listing_photo",
+                                                               "public_eligible": True})
+        changed = await _build(db, owner, v["id"])
+        assert changed["package"]["package_hash"] != first_hash and "media" in changed["diff"]["changed"]
 
 
-@pytest.mark.asyncio
-async def test_F05_title_only_similarity_is_a_proposal_that_waits_for_a_person(db, owner):
-    await wordpress_connections(db)
-    await _reset_profiles(db)
+# ── F05: import the existing listing before creating one ─────────────────────
+async def test_F05_existing_product_is_matched_before_a_new_one_is_created(db, owner):
+    sku = f"STK-{_u()[:4].upper()}"
     site = wordpress_fake(with_existing=False)
-    site.add_product(sku=None, name="2018 Daihatsu Hijet Jumbo", price="11000.00", external_id="777")
-    with install_wordpress(site):
-        await activate_site(db, owner)
-        v = await ready_for_sale(db, owner)
-        v.title = "2018 Daihatsu Hijet Jumbo"
-        await db.commit()
-        data = await build(db, owner, v)
-        await dispatch(ctx_for(db, owner), "listings.submit_for_review", {"package_id": data["package"]["id"]})
-        before = len(site.items)
-        await publish(db, owner, data["package"]["id"])
-        await run_jobs()
-        pub = await publication_of(db, v.id)
-        assert pub.state == "needs_review" and pub.external_id is None
-        assert "title only" in (pub.error or "")
-        assert len(site.items) == before, "a title guess never creates or overwrites a listing"
-        task = (await db.execute(_load(select(Task).where(Task.id == pub.manual_task_id)))).scalar_one()
-        assert "existing website listing" in task.title
-
-
-# ── F06: accepted, then the network dies ─────────────────────────────────────
-@pytest.mark.asyncio
-async def test_F06_unknown_result_is_reconciled_by_mapping_and_creates_one_post(db, owner):
+    site.add_product(sku=sku, name="2018 Daihatsu Hijet Jumbo", price="9000.00", external_id="501")
     await wordpress_connections(db)
-    await _reset_profiles(db)
-    site = wordpress_fake(with_existing=False)
     with install_wordpress(site):
-        await activate_site(db, owner)
-        v = await ready_for_sale(db, owner)
-        data = await build(db, owner, v)
-        await dispatch(ctx_for(db, owner), "listings.submit_for_review", {"package_id": data["package"]["id"]})
-        site.fail_after_accept = True          # the site accepts the draft, the response is lost
-        await publish(db, owner, data["package"]["id"])
+        await _profile(db, owner)
+        v = await _vehicle(db, owner, stock_no=sku)          # the site already lists this truck
+        pkg = (await _build(db, owner, v["id"]))["package"]
+        await dispatch(ctx_for(db, owner), "listings.submit_for_review", {"package_id": pkg["id"]})
+        a, _ = await _approve_publish(db, owner, pkg["id"], package_hash=pkg["package_hash"])
+        assert a.status == "queued" and a.external_action_id
+        act = await db.get(ExternalAction, a.external_action_id)
+        assert act.dedupe_key == f"listing:publish:{pkg['id']}:{pkg['package_version']}:website"
+        assert await run_jobs() >= 1
+        pub = await _publication(db, v["id"])
+        assert pub.external_id == "501" and pub.state == "verified"
+        assert len(site.items) == 1                       # the existing product was updated, not duplicated
+        assert site.items["501"]["regular_price"] == "12500.00" and site.items["501"]["sku"] == sku
+        assert [h["state"] for h in pub.history][:2] == ["queued", "mapped"]
+        assert pub.package_hash == pkg["package_hash"] and pub.profile_version == 1
+
+
+async def test_F05_title_only_similarity_is_a_proposal_not_an_automatic_mapping(db, owner):
+    site = wordpress_fake()               # "2018 Daihatsu Hijet Jumbo" exists, with a different SKU
+    await wordpress_connections(db)
+    with install_wordpress(site):
+        await _profile(db, owner)
+        v = await _vehicle(db, owner, stock_no=None)      # no SKU to match on
+        pkg = (await _build(db, owner, v["id"]))["package"]
+        assert pkg["headline"] == "2018 Daihatsu Hijet"
+        await _approve_publish(db, owner, pkg["id"], package_hash=pkg["package_hash"])
         await run_jobs()
+        pub = await _publication(db, v["id"])
+        assert pub.state == "needs_review" and "title only" in pub.error
+        assert pub.external_id is None and len(site.items) == 1   # nothing created from a guess
+        task = await db.get(Task, pub.manual_task_id)
+        assert task is not None and "Confirm the existing website listing" in task.title
+        assert "501" in task.instructions
 
-        pub = await publication_of(db, v.id)
-        assert pub.state == "unknown" and pub.error_kind == "unknown_result"
-        action = (await db.execute(_load(select(ExternalAction).where(
-            ExternalAction.command_name == "listings.publish")))).scalars().first()
-        assert action.state == "unknown"
-        approval = await db.get(Approval, action.approval_id)
-        assert approval.status == "result_unknown"
-        assert len(site.items) == 1, "the site accepted exactly one write"
 
-        # reconciliation maps the existing post before any retry — never a second post
+# ── F06: accepted then lost → unknown → reconciled by mapping ────────────────
+async def test_F06_network_failure_after_accept_is_unknown_and_reconciles_to_one_post(db, owner):
+    site = wordpress_fake(with_existing=False)
+    await wordpress_connections(db)
+    with install_wordpress(site):
+        await _profile(db, owner)
+        sku = f"STK-{_u()[:4].upper()}"
+        v = await _vehicle(db, owner, stock_no=sku)
+        pkg = (await _build(db, owner, v["id"]))["package"]
+        a, _ = await _approve_publish(db, owner, pkg["id"], package_hash=pkg["package_hash"])
+        site.fail_after_accept = True                       # the site accepts, then the connection dies
+        await run_jobs()
+        pub = await _publication(db, v["id"])
+        act = await db.get(ExternalAction, a.external_action_id)
+        await db.refresh(act)
+        await db.refresh(a)
+        assert pub.state == "unknown" and pub.error_kind == "unknown_result" and pub.cleanup_required is True
+        assert act.state == "unknown" and a.status == "result_unknown"
+        assert len(site.items) == 1                         # the site did accept exactly one write
+        created_id = next(iter(site.items))
+        assert pub.external_id is None                      # AZKT does not claim what it cannot prove
+
+        # reconciliation maps the listing back before any retry: one post, no duplicate
         out = await svc.reconcile_unknown(db)
-        assert out["reconciled"] == 1
-        pub = await publication_of(db, v.id)
-        assert pub.external_id is not None
-        assert pub.state in ("verified", "published", "pending_verification")
+        assert out["reconciled"] >= 1 and out["still_unknown"] == 0
+        pub = await _publication(db, v["id"])
+        await db.refresh(act)
+        await db.refresh(a)
+        assert pub.external_id == created_id and pub.state in ("verified", "pending_verification")
+        assert act.state == "confirmed" and act.receipt["reconciled"] is True and a.status == "confirmed"
         assert len(site.items) == 1
-        await db.refresh(action)
-        assert action.state == "confirmed" and action.receipt.get("reconciled") is True
+        assert any(h["detail"].startswith("reconciled by mapping") for h in pub.history)
+
+
+async def test_F06_a_provider_failure_before_accept_is_failed_and_keeps_cleanup(db, owner):
+    site = wordpress_fake(with_existing=False)
+    await wordpress_connections(db)
+    with install_wordpress(site):
+        await _profile(db, owner)
+        v = await _vehicle(db, owner, stock_no=f"STK-{_u()[:4].upper()}")
+        pkg = (await _build(db, owner, v["id"]))["package"]
+        a, _ = await _approve_publish(db, owner, pkg["id"], package_hash=pkg["package_hash"])
+        site.unsupported_ops.add("upsert_draft")
+        await run_jobs()
+        pub = await _publication(db, v["id"])
+        assert pub.state == "failed" and pub.error_kind == "unsupported" and pub.cleanup_required is True
+        assert len(site.items) == 0                      # nothing was written and nothing was invented
+        await db.refresh(a)
+        assert a.status == "failed"
 
 
 # ── F07: API success, stale public page ──────────────────────────────────────
-@pytest.mark.asyncio
 async def test_F07_stale_public_page_is_pending_verification_not_verified(db, owner):
-    await wordpress_connections(db)
-    await _reset_profiles(db)
+    sku = f"STK-{_u()[:4].upper()}"
     site = wordpress_fake(with_existing=False)
+    site.add_product(sku=sku, name="2018 Daihatsu Hijet", price="12500.00", external_id="501")
+    await wordpress_connections(db)
     with install_wordpress(site):
-        await activate_site(db, owner)
-        v = await ready_for_sale(db, owner)
-        data = await build(db, owner, v)
-        await dispatch(ctx_for(db, owner), "listings.submit_for_review", {"package_id": data["package"]["id"]})
-        site.public_cache_lag = True           # the CDN keeps serving the previous page
-        await publish(db, owner, data["package"]["id"])
+        await _profile(db, owner)
+        v = await _vehicle(db, owner, price="15000.00", stock_no=sku)
+        site.set_public_stale("501", "regular_price", "12500.00")     # the CDN still serves the old price
+        pkg = (await _build(db, owner, v["id"]))["package"]
+        await _approve_publish(db, owner, pkg["id"], package_hash=pkg["package_hash"])
         await run_jobs()
-        pub = await publication_of(db, v.id)
-        assert pub.state in ("pending_verification", "mismatch")
-        assert pub.state != "verified"
-        assert pub.verification["api"]["ok"] is True
-        assert pub.verification["public"]["ok"] in (False, None)
-        # the cache catches up and a bounded re-check verifies it
+        pub = await _publication(db, v["id"])
+        assert pub.state == "pending_verification" and pub.external_id == "501"
+        assert pub.verification["api"]["ok"] is True and pub.verification["public"]["ok"] is False
+        assert pub.verification["public"]["cache"] == "HIT"
+        assert [m["field"] for m in pub.verification["public"]["mismatches"]] == ["price"]
+        assert pub.last_verified_at is not None
+        # a pending publication is not a listed milestone
+        assert await _milestones(db, v["id"]) == []
+
+        # when the cache catches up, the bounded re-check verifies it
         site.public_cache_lag = False
-        site.public[pub.external_id] = dict(site.items[pub.external_id])
-        await run_jobs()
-        pub = await publication_of(db, v.id)
-        assert pub.state == "verified" and pub.last_verified_at is not None
+        site.public["501"] = dict(site.items["501"])
+        await svc.listings_reconcile_sweep(_sessions())
+        assert await run_jobs() >= 1
+        pub = await _publication(db, v["id"])
+        assert pub.state == "verified" and pub.cleanup_required is False
+        assert svc.VERIFY_MAX_ATTEMPTS == 3               # readback/correction is bounded, not endless
 
 
-# ── K04: a verified publication records the listed milestone ─────────────────
-@pytest.mark.asyncio
+def _sessions():
+    from backend.app import db as dbmod
+    return dbmod.SessionLocal
+
+
+async def _milestones(db, vehicle_id: str) -> list[VehicleMilestone]:
+    return list((await db.execute(_load(select(VehicleMilestone).where(
+        VehicleMilestone.vehicle_id == vehicle_id, VehicleMilestone.kind == "listed",
+        VehicleMilestone.is_current.is_(True))))).scalars().all())
+
+
+# ── K04: the listed milestone comes from the verified publication ────────────
 async def test_K04_verified_publication_records_the_listed_milestone_with_its_source(db, owner):
-    await wordpress_connections(db)
-    await _reset_profiles(db)
     site = wordpress_fake(with_existing=False)
+    await wordpress_connections(db)
     with install_wordpress(site):
-        await activate_site(db, owner)
-        v = await ready_for_sale(db, owner)
-        data = await build(db, owner, v)
-        await dispatch(ctx_for(db, owner), "listings.submit_for_review", {"package_id": data["package"]["id"]})
-        await publish(db, owner, data["package"]["id"])
+        await _profile(db, owner)
+        v = await _vehicle(db, owner, stock_no=f"STK-{_u()[:4].upper()}")
+        pkg = (await _build(db, owner, v["id"]))["package"]
+        assert await _milestones(db, v["id"]) == []
+        await _approve_publish(db, owner, pkg["id"], package_hash=pkg["package_hash"])
         await run_jobs()
-        pub = await publication_of(db, v.id)
-        assert pub.state == "verified" and pub.external_url
-
-        milestone = (await db.execute(_load(select(VehicleMilestone).where(
-            VehicleMilestone.vehicle_id == v.id, VehicleMilestone.kind == "listed",
-            VehicleMilestone.is_current.is_(True))))).scalars().first()
-        assert milestone is not None and milestone.status == "completed"
-        assert milestone.source_kind == "provider"
-        assert milestone.source_ref == f"publication:{pub.id}"
-        vehicle = (await db.execute(_load(select(Vehicle).where(Vehicle.id == v.id)))).scalar_one()
-        assert vehicle.listed_at is not None
-
-
-# ── F10: reservation cancels queued work and keeps a cleanup task ────────────
-@pytest.mark.asyncio
-async def test_F10_reservation_cancels_queued_availability_and_keeps_cleanup_until_verified(db, owner):
-    await wordpress_connections(db)
-    await _reset_profiles(db)
-    site = wordpress_fake(with_existing=False)
-    with install_wordpress(site):
-        await activate_site(db, owner)
-        v = await ready_for_sale(db, owner)
-        data = await build(db, owner, v)
-        await dispatch(ctx_for(db, owner), "listings.submit_for_review", {"package_id": data["package"]["id"]})
-        await publish(db, owner, data["package"]["id"])
-        await run_jobs()
-        pub = await publication_of(db, v.id)
-        assert pub.state == "verified" and pub.desired_state == "published"
-
-        # a queued "available" push is waiting when the truck is reserved
-        queued = await dispatch(ctx_for(db, owner), "listings.push_availability",
-                                {"publication_id": pub.id, "availability": "available"})
-        assert queued.status in ("ok", "needs_review")
-        res = await dispatch(ctx_for(db, owner), "listings.update_availability",
-                             {"vehicle_id": v.id, "availability": "reserved", "reason": "deposit confirmed"})
-        entry = res.data["publications"][0]
-        pub = await publication_of(db, v.id)
-        assert pub.desired_state == "reserved", "AZKT's desired state changes immediately"
-        if queued.status == "ok":
-            assert entry["cancelled_queued"], "an incompatible queued publication never leaves"
-            cancelled = (await db.execute(_load(select(ExternalAction).where(
-                ExternalAction.entity_id == pub.id,
-                ExternalAction.command_name == "listings.push_availability")))).scalars().all()
-            assert any(a.state == "cancelled" for a in cancelled)
-        assert pub.cleanup_required is True
-        # the channel update runs under the applicable permission and the cleanup task stays open
-        await run_jobs()
-        pub = await publication_of(db, v.id)
-        if pub.state == "verified":
-            assert pub.cleanup_required is False
-            observed = site.items[pub.external_id]
-            assert observed["stock_status"] == "outofstock" and observed["catalog_visibility"] == "visible"
-        else:
-            assert pub.cleanup_required is True and pub.manual_task_id
-            task = await db.get(Task, pub.manual_task_id)
-            assert task.status not in ("completed", "cancelled")
-
-
-@pytest.mark.asyncio
-async def test_F10_unsupported_channel_gets_a_manual_checklist_not_a_fake_success(db, owner):
-    await wordpress_connections(db)
-    await _reset_profiles(db)
-    with install_wordpress(wordpress_fake(with_existing=False)):
-        await activate_site(db, owner)
-        v = await ready_for_sale(db, owner)
-        data = await build(db, owner, v, channel="facebook_marketplace")
-        await dispatch(ctx_for(db, owner), "listings.submit_for_review",
-                       {"package_id": data["package"]["id"], "channel": "facebook_marketplace"})
-        out, _ = await publish(db, owner, data["package"]["id"], channel="facebook_marketplace")
-        pub = (await db.execute(_load(select(Publication).where(
-            Publication.vehicle_id == v.id, Publication.channel == "facebook_marketplace")))).scalars().first()
-        assert pub.state == "unsupported" and pub.unsupported_reason
-        assert pub.cleanup_required is True and pub.manual_task_id
-        task = await db.get(Task, pub.manual_task_id)
-        assert "facebook_marketplace" in task.title
-        assert "Photos" in task.instructions and "Cleanup" in task.instructions
-        # each channel is tracked independently: the website publication is untouched
-        website = (await db.execute(_load(select(Publication).where(
-            Publication.vehicle_id == v.id, Publication.channel == "website")))).scalars().first()
-        assert website is None
-
-
-# ── approval binding ─────────────────────────────────────────────────────────
-@pytest.mark.asyncio
-async def test_publication_approval_binds_the_package_hash_and_profile_version(db, owner):
-    await wordpress_connections(db)
-    await _reset_profiles(db)
-    site = wordpress_fake(with_existing=False)
-    with install_wordpress(site):
-        await activate_site(db, owner)
-        v = await ready_for_sale(db, owner)
-        data = await build(db, owner, v)
-        pkg_id = data["package"]["id"]
-        await dispatch(ctx_for(db, owner), "listings.submit_for_review", {"package_id": pkg_id})
-        res = await dispatch(ctx_for(db, owner), "listings.publish", {"package_id": pkg_id})
-        assert res.status == "needs_review"
-        approval_id = res.approval_id
-
-        # the price changes after the owner saw the package: the approval no longer applies
-        await dispatch(ctx_for(db, owner), "vehicles.set_asking_price",
-                       {"vehicle_id": v.id, "amount": "11999.00", "currency": "USD"})
-        rebuilt = await build(db, owner, v)
-        assert rebuilt["package"]["package_hash"] != data["package"]["package_hash"]
-        out = await approve(db, owner, approval_id)
-        assert out["executed"] is False
-        approval = await db.get(Approval, approval_id)
-        assert approval.status == "invalidated" and "review again" in (approval.invalidated_reason or "")
-        assert len(site.items) == 0, "an invalidated approval never reaches the site"
-
-
-@pytest.mark.asyncio
-async def test_paused_writes_block_publication_for_the_channel(db, owner):
-    await wordpress_connections(db)
-    await _reset_profiles(db)
-    with install_wordpress(wordpress_fake(with_existing=False)):
-        profile = await activate_site(db, owner)
-        v = await ready_for_sale(db, owner)
-        data = await build(db, owner, v)
-        profile.writes_paused = True
-        profile.status = "drift"
-        profile.pause_reason = "a manual edit changed AZKT-owned field(s) price"
+        pub = await _publication(db, v["id"])
+        assert pub.state == "verified"
+        milestones = await _milestones(db, v["id"])
+        assert len(milestones) == 1
+        m = milestones[0]
+        assert m.status == "completed" and m.source_kind == "provider" and m.source_ref == f"publication:{pub.id}"
+        assert m.at is not None and pub.external_url in (m.note or "")
+        from backend.app.models.vehicles import Vehicle
+        row = await db.get(Vehicle, v["id"])
+        await db.refresh(row)
+        assert row.listed_at is not None and row.listed_at == m.at
+        # replaying the verification does not record a second listed milestone
+        await svc._record_listed_milestone(db, pub, await db.get(ListingPackage, pub.package_id))
         await db.commit()
-        with pytest.raises(Blocked, match="paused|not available"):
-            await dispatch(ctx_for(db, owner), "listings.submit_for_review", {"package_id": data["package"]["id"]})
+        assert len(await _milestones(db, v["id"])) == 1
 
 
-# ── package reads ────────────────────────────────────────────────────────────
-@pytest.mark.asyncio
-async def test_package_view_and_router_surface(client, db, owner):
+# ── F10: reservation, queued channel work and cleanup ────────────────────────
+async def test_F10_reservation_cancels_queued_channel_work_and_keeps_a_cleanup_task(db, owner):
+    site = wordpress_fake(with_existing=False)
     await wordpress_connections(db)
-    await _reset_profiles(db)
-    with install_wordpress(wordpress_fake(with_existing=False)):
-        await activate_site(db, owner)
-        v = await ready_for_sale(db, owner)
-        login(client, owner)
-        r = await client.post(f"/api/listings/vehicles/{v.id}/build", json={"use_model": False})
-        assert r.status_code == 200 and r.json()["status"] == "ok"
-        package_id = r.json()["data"]["package"]["id"]
+    with install_wordpress(site):
+        await _profile(db, owner)
+        v = await _vehicle(db, owner, stock_no=f"STK-{_u()[:4].upper()}")
+        pkg = (await _build(db, owner, v["id"]))["package"]
+        await _approve_publish(db, owner, pkg["id"], package_hash=pkg["package_hash"])
+        await run_jobs()
+        pub = await _publication(db, v["id"])
+        assert pub.state == "verified" and site.items[pub.external_id]["stock_status"] == "instock"
 
-        r = await client.get(f"/api/listings/vehicles/{v.id}/package")
-        body = r.json()
-        assert body["package"]["id"] == package_id and body["ready"] is True
-        assert body["profile"]["status"] == "active"
-        assert body["preview"]["payload"]["name"] == body["package"]["headline"]
-        assert body["preview"]["written"] is False
+        # reserved: the desired state changes in AZKT immediately, the channel update awaits authorization
+        res = (await dispatch(ctx_for(db, owner), "listings.update_availability",
+                              {"vehicle_id": v["id"], "availability": "reserved",
+                               "reason": "deposit received"})).data
+        entry = res["publications"][0]
+        assert entry["desired_state"] == "reserved" and entry["queued"] is False and entry["status"] == "needs_review"
+        pub = await _publication(db, v["id"])
+        assert pub.desired_state == "reserved" and pub.cleanup_required is True and pub.manual_task_id
+        cleanup = await db.get(Task, pub.manual_task_id)
+        assert cleanup.status not in ("completed", "cancelled") and "reserved" in cleanup.title
+        # the owner authorizes it; the intent is persisted but has not run yet
+        approvals = (await db.execute(_load(select(Approval).where(
+            Approval.command_name == "listings.push_availability",
+            Approval.status == "pending")))).scalars().all()
+        pending = next(a for a in approvals if a.payload["publication_id"] == pub.id)
+        assert pending.payload["availability"] == "reserved"
+        await dispatch(ctx_for(db, owner), "approvals.approve",
+                       {"approval_id": pending.id, "expected_version": pending.approval_version})
+        queued = (await db.execute(_load(select(ExternalAction).where(
+            ExternalAction.entity_id == pub.id,
+            ExternalAction.command_name == "listings.push_availability")))).scalars().all()
+        assert [q.state for q in queued] == ["intent"] and queued[0].payload["availability"] == "reserved"
 
-        r = await client.get(f"/api/listings/packages/{package_id}/preview")
-        assert r.status_code == 200 and r.json()["valid"] is True
-        r = await client.get(f"/api/listings/vehicles/{v.id}/diff")
-        assert r.status_code == 200 and r.json()["data"]["diff"]["changed"] == []
-        r = await client.get("/api/listings/publications")
-        assert r.status_code == 200 and r.json()["channels"]["supported"] == ["website"]
+        # the truck sells before that reply leaves: the incompatible queued action is cancelled
+        sold = (await dispatch(ctx_for(db, owner), "listings.update_availability",
+                               {"vehicle_id": v["id"], "availability": "sold", "reason": "sale completed"})).data
+        assert sold["publications"][0]["cancelled_queued"] == [queued[0].id]
+        await db.refresh(queued[0])
+        await db.refresh(pending)
+        assert queued[0].state == "cancelled" and "no longer compatible" in (queued[0].error or "") + (pending.invalidated_reason or "")
+        assert pending.status == "invalidated"
+        await run_jobs()
+        await db.refresh(queued[0])
+        assert queued[0].state == "cancelled"
+        assert site.items[pub.external_id]["stock_status"] == "instock"   # the reserved reply never left
+        pub = await _publication(db, v["id"])
+        assert pub.desired_state == "sold" and pub.cleanup_required is True
+        cleanup = await db.get(Task, pub.manual_task_id)
+        await db.refresh(cleanup)
+        assert cleanup.status not in ("completed", "cancelled")           # stays open until verified
 
 
-@pytest.mark.asyncio
-async def test_specs_carry_evidence_and_unknown_facts_are_omitted(db, owner):
+async def test_F10_a_vehicle_state_change_event_updates_the_desired_availability(db, owner):
+    site = wordpress_fake(with_existing=False)
     await wordpress_connections(db)
-    await _reset_profiles(db)
-    with install_wordpress(wordpress_fake(with_existing=False)):
-        await activate_site(db, owner)
-        v = await ready_for_sale(db, owner)
-        await dispatch(ctx_for(db, owner), "vehicles.propose_fact", {
-            "vehicle_id": v.id, "key": "odometer_km", "value": "48211", "status": "reported",
-            "source_kind": "auction_sheet", "source_ref": "sheet-1"})
-        data = await build(db, owner, v)
-        specs = {s["key"]: s for s in data["package"]["specs"]}
-        assert specs["odometer_km"]["status"] == "reported"
-        assert specs["odometer_km"]["source"] == "auction_sheet"
-        assert specs["make"]["value"] == "Daihatsu"
-        assert "air_conditioning" not in specs, "an unrecorded fact is never invented"
-        assert data["package"]["generated_by"] == "template"
+    with install_wordpress(site):
+        await _profile(db, owner)
+        v = await _vehicle(db, owner, stock_no=f"STK-{_u()[:4].upper()}")
+        pkg = (await _build(db, owner, v["id"]))["package"]
+        await _approve_publish(db, owner, pkg["id"], package_hash=pkg["package_hash"])
+        await run_jobs()
+        await dispatch(ctx_for(db, owner), "vehicles.set_states",
+                       {"vehicle_id": v["id"], "commercial_state": "reserved", "reason": "deposit received"})
+        from backend.tests.fixtures_providers import drain_events
+        await drain_events()
+        pub = await _publication(db, v["id"])
+        assert pub.desired_state == "reserved" and pub.cleanup_required is True
+        assert any(h["state"] == "desired_state" for h in pub.history)
+
+
+async def test_F10_an_unsupported_channel_is_a_manual_task_with_a_checklist(db, owner):
+    site = wordpress_fake(with_existing=False)
+    await wordpress_connections(db)
+    with install_wordpress(site):
+        await _profile(db, owner)
+        v = await _vehicle(db, owner, photos=2, stock_no=f"STK-{_u()[:4].upper()}")
+        pkg = (await _build(db, owner, v["id"]))["package"]
+        a, out = await _approve_publish(db, owner, pkg["id"], channel="facebook_marketplace",
+                                        package_hash=pkg["package_hash"])
+        pub = await _publication(db, v["id"], "facebook_marketplace")
+        assert pub.state == "unsupported" and "no verified adapter" in pub.unsupported_reason
+        assert pub.cleanup_required is True and pub.external_id is None
+        task = await db.get(Task, pub.manual_task_id)
+        assert task is not None and "facebook_marketplace" in task.title
+        assert pkg["headline"] in task.instructions and "Photos (2)" in task.instructions
+        assert "12500.00 USD" in task.instructions and "Cleanup:" in task.instructions
+        assert len(site.items) == 0             # an unsupported channel never writes to the website
+
+
+# ── approval binding and paused writes ───────────────────────────────────────
+async def test_publish_approval_binds_the_package_hash_profile_version_and_channel(db, owner):
+    site = wordpress_fake(with_existing=False)
+    await wordpress_connections(db)
+    with install_wordpress(site):
+        profile = await _profile(db, owner)
+        v = await _vehicle(db, owner, stock_no=f"STK-{_u()[:4].upper()}")
+        pkg = (await _build(db, owner, v["id"]))["package"]
+        res = await dispatch(ctx_for(db, owner), "listings.publish",
+                             {"package_id": pkg["id"], "expected_package_hash": pkg["package_hash"]})
+        a = await db.get(Approval, res.approval_id)
+        assert a.payload["expected_package_hash"] == pkg["package_hash"]
+        assert a.targets == {"channel": "website", "package_id": pkg["id"]}
+        # the price changes after the owner was asked: the approval is invalidated, not executed
+        await dispatch(ctx_for(db, owner), "vehicles.set_asking_price",
+                       {"vehicle_id": v["id"], "amount": "13900.00", "currency": "USD"})
+        await _build(db, owner, v["id"])
+        out = (await dispatch(ctx_for(db, owner), "approvals.approve",
+                              {"approval_id": a.id, "expected_version": a.approval_version})).data
+        assert out["executed"] is False
+        await db.refresh(a)
+        assert a.status == "invalidated" and "review again" in a.invalidated_reason
+        assert "price" in a.invalidated_reason or "package" in a.invalidated_reason
+        assert len(site.items) == 0
+        assert profile.profile_version == 1
+
+
+async def test_paused_writes_block_submission_and_publication(db, owner):
+    site = wordpress_fake(with_existing=False)
+    await wordpress_connections(db)
+    with install_wordpress(site):
+        profile = await _profile(db, owner)
+        v = await _vehicle(db, owner, stock_no=f"STK-{_u()[:4].upper()}")
+        pkg = (await _build(db, owner, v["id"]))["package"]
+        await site_svc.record_drift(ctx_for(db, owner), profile, source="readback",
+                                    reasons=["a manual edit changed AZKT-owned field(s) price"])
+        await db.commit()
+        with pytest.raises(Blocked, match="writes are not available"):
+            await dispatch(ctx_for(db, owner), "listings.submit_for_review", {"package_id": pkg["id"]})
+        await db.rollback()
+        await db.refresh(owner)
+        # asking to publish still only *asks*; the binding is revalidated before anything is written
+        res = await dispatch(ctx_for(db, owner), "listings.publish",
+                             {"package_id": pkg["id"], "expected_package_hash": pkg["package_hash"]})
+        assert res.status == "needs_review"
+        a = await db.get(Approval, res.approval_id)
+        out = (await dispatch(ctx_for(db, owner), "approvals.approve",
+                              {"approval_id": a.id, "expected_version": a.approval_version})).data
+        assert out["executed"] is False
+        await db.refresh(a)
+        assert a.status == "invalidated" and "paused" in a.invalidated_reason
+        assert len(site.items) == 0
+
+
+# ── router surface ───────────────────────────────────────────────────────────
+async def test_listings_router_package_preview_and_publications(client, db, owner):
+    site = wordpress_fake(with_existing=False)
+    await wordpress_connections(db)
+    login(client, owner)
+    with install_wordpress(site):
+        await _profile(db, owner)
+        v = await _vehicle(db, owner, stock_no=f"STK-{_u()[:4].upper()}")
+        view = (await client.get(f"/api/listings/vehicles/{v['id']}/package")).json()
+        assert view["package"] is None and view["ready"] is True and view["listing_class"] == "ready_for_sale"
+        assert view["profile"]["writes_paused"] is False
+        built = (await client.post(f"/api/listings/vehicles/{v['id']}/build", json={"use_model": False})).json()
+        assert built["status"] == "ok"
+        pid = built["data"]["package"]["id"]
+        preview = (await client.get(f"/api/listings/packages/{pid}/preview")).json()
+        assert preview["written"] is False and preview["valid"] is True
+        assert preview["payload"]["regular_price"] == "12500.00" and preview["payload"]["status"] == "draft"
+        assert site.items == {}                                  # a preview never writes
+        diff = (await client.get(f"/api/listings/vehicles/{v['id']}/diff")).json()
+        assert diff["status"] == "ok" and diff["data"]["current"]["id"] == pid
+        sub = (await client.post(f"/api/listings/packages/{pid}/submit", json={})).json()
+        assert sub["status"] == "ok" and sub["data"]["preview"]["written"] is False
+        pub = (await client.post(f"/api/listings/packages/{pid}/publish",
+                                 json={"expected_package_hash": built["data"]["package"]["package_hash"]})).json()
+        assert pub["status"] == "needs_review" and pub["approval_id"]
+        empty = (await client.get("/api/listings/publications", params={"vehicle_id": v["id"]})).json()
+        assert empty["items"] == [] and site.items == {}      # asking is not publishing
+        detail = (await client.get(f"/api/approvals/{pub['approval_id']}")).json()
+        assert detail["kind"] == "publish" and detail["action_class"] == "consequential"
+        assert detail["can_decide"] is True and detail["payload"]["channel"] == "website"
+        ok = await client.post(f"/api/approvals/{pub['approval_id']}/approve",
+                               json={"expected_version": detail["version"]})
+        assert ok.status_code == 200 and ok.json()["data"]["executed"] is True
+        listed = (await client.get("/api/listings/publications", params={"vehicle_id": v["id"]})).json()
+        assert listed["channels"]["supported"] == ["website"]
+        assert [p["state"] for p in listed["items"]] == ["queued"]
+        assert await run_jobs() >= 1
+        done = (await client.get("/api/listings/publications", params={"vehicle_id": v["id"]})).json()
+        assert done["items"][0]["state"] == "verified" and done["items"][0]["external_url"]
+
+
+async def test_listings_reconcile_sweep_is_registered():
+    from backend.app.domain.jobs import SWEEPS
+    assert SWEEPS["listings.reconcile"][1] == svc.VERIFY_SECONDS == 15 * 60

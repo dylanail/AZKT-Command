@@ -10,9 +10,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timedelta, timezone
 
-import pytest
 import pytest_asyncio
-from sqlalchemy import select
 
 from backend.app.core.time import PHOENIX
 from backend.app.domain.commands import dispatch
@@ -408,3 +406,30 @@ async def test_home_groups_duplicate_alerts_about_one_problem(db, owner, en_rout
     assert blocked and all(g["count"] == len(g["items"]) for g in blocked)
     assert all(g["next_action"] for g in out["groups"])
     assert out["items_total"] >= out["total"]
+
+
+async def test_K05_needs_attention_never_shows_an_assigned_person_someone_elses_blocker(db, owner, mechanic):
+    """A task with no vehicle carries no vehicle scope, so ownership decides: an assigned-scope person sees
+    their own blocked work on Home, never another person's block reason (spec §11.1 record access)."""
+    theirs = (await cmd(db, owner, "tasks.create", {"title": f"Owner-only blocker {_u()}",
+                                                    "type": "operational"})).data["task"]
+    await cmd(db, owner, "tasks.report_blocker", {"task_id": theirs["id"], "reason": "waiting on the exporter"})
+    mine = (await cmd(db, owner, "tasks.create", {"title": f"Mechanic blocker {_u()}", "type": "operational",
+                                                  "owner_user_id": mechanic.id})).data["task"]
+    await cmd(db, owner, "tasks.report_blocker", {"task_id": mine["id"], "reason": "needs a part"})
+    now = datetime.now(timezone.utc)
+
+    seen = await home_svc.needs_attention(db, actor_of(mechanic), now=now, tz=PHOENIX)
+    ids = {i.get("id") for g in seen["groups"] for i in g["items"]}
+    assert mine["id"] in ids and theirs["id"] not in ids
+    assert "waiting on the exporter" not in str(seen["groups"])
+
+    full = await home_svc.needs_attention(db, actor_of(owner), now=now, tz=PHOENIX)
+    assert {theirs["id"], mine["id"]} <= {i.get("id") for g in full["groups"] for i in g["items"]}
+
+
+async def test_timeline_echoes_the_filters_it_was_given_when_nothing_matches(db, owner):
+    """An empty page must not look like a page where the filter was silently dropped."""
+    out = await tl.timeline(db, actor_of(owner), vehicle_ids=["no-such-vehicle"], view="shop", horizon_days=7)
+    assert out["items"] == [] and out["total"] == 0
+    assert out["filters"]["vehicle_ids"] == ["no-such-vehicle"] and out["filters"]["view"] == "shop"

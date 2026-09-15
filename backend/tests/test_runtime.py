@@ -35,7 +35,13 @@ NOW = datetime.now(timezone.utc)
 
 
 def uid() -> str:
-    return uuid.uuid4().hex[:8]
+    """A unique tag that is safe to put inside free text.
+
+    Letters only: a hex tag such as "a1234567" matches `intake_analysis._FRAME_RE`, so roughly 3% of runs
+    used to have the intake extractor read the tag as a frame number and silently make an identity-field
+    assertion fail.
+    """
+    return uuid.uuid4().hex[:8].translate(str.maketrans("0123456789", "ghijklmnop"))
 
 
 # ── a consequential test command with a real executor (H02, H04, H12) ────────

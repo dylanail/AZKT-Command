@@ -38,10 +38,10 @@ IN_PROGRESS_MISSION_STATES = ("running", "waiting_approval", "waiting_external",
 OPEN_CASE_STATES = ("open", "waiting", "blocked", "needs_owner")
 # Sources Home depends on before it may say "nothing needs you".
 REQUIRED_CONNECTIONS = ("gmail_business", "square", "sheets", "drive")
-# `services.connections.all_clear_possible` treats only warn/expired/degraded as stale, so a required provider that
-# has never been connected at all would still allow an all-clear on a first run. Home must not claim that nothing
-# needs attention when it has never seen the data (spec §2.2, H11), so `disconnected` counts here too.
-UNHEALTHY_CONNECTION_STATES = ("warn", "expired", "degraded", "disconnected")
+# `services.connections.all_clear_possible` owns the stale rule (warn / expired / degraded) and Home defers to it.
+# It does not treat "never connected at all" as stale, so a first run with nothing connected would still allow an
+# all-clear; Home has not seen the data in that case either, so `disconnected` is added here (spec §2.2, H11).
+NEVER_SYNCED_STATE = "disconnected"
 
 
 def _iso(dt: datetime | None) -> str | None:
@@ -54,11 +54,29 @@ def _day_bounds(now: datetime, tz: str) -> tuple[datetime, datetime]:
     return start.astimezone(timezone.utc), (start + timedelta(days=1)).astimezone(timezone.utc)
 
 
+def _scoped_tasks(q, actor: Actor, scope: set[str] | None):
+    """Record scope for every task list on Home.
+
+    A vehicle outside the person's grant is filtered by `scope`; a task with no vehicle carries no vehicle scope
+    at all, so for an assigned-scope person it is limited to the tasks they own — the same rule the command layer
+    enforces on the write side (policy.check_record_scope), rather than showing them somebody else's blocker."""
+    if scope is not None:
+        q = q.where(or_(Task.vehicle_id.is_(None), Task.vehicle_id.in_(list(scope) or ["-"])))
+    if actor.scope == "assigned" and actor.user_id:
+        q = q.where(Task.owner_user_id == actor.user_id)
+    return q
+
+
 # ── 1. status ────────────────────────────────────────────────────────────────
 def unhealthy_connections(overview: list[dict]) -> list[dict]:
-    """Required connections that cannot back an all-clear: behind, expired, degraded or never connected."""
+    """Required connections that cannot back an all-clear: behind, expired, degraded or never connected.
+
+    The stale rule itself belongs to `connections.all_clear_possible`; calling it keeps the status line and the
+    Settings page from ever disagreeing about which source is behind."""
+    _, stale_labels = conns.all_clear_possible(overview)
+    stale = set(stale_labels)
     return [c for c in overview if c["provider"] in REQUIRED_CONNECTIONS
-            and c["freshness"]["state"] in UNHEALTHY_CONNECTION_STATES]
+            and (c["label"] in stale or c["freshness"]["state"] == NEVER_SYNCED_STATE)]
 
 
 async def status(db: AsyncSession, actor: Actor, *, now: datetime, tz: str, counts: dict) -> dict:
@@ -167,9 +185,7 @@ async def needs_attention(db: AsyncSession, actor: Actor, *, now: datetime, tz: 
                        "count": len(items or []) or 1, "items": items or [], "link": link, "severity": severity})
 
     # blocked work, grouped per vehicle
-    q = select(Task).where(Task.status == "blocked")
-    if scope is not None:
-        q = q.where(or_(Task.vehicle_id.is_(None), Task.vehicle_id.in_(list(scope) or ["-"])))
+    q = _scoped_tasks(select(Task).where(Task.status == "blocked"), actor, scope)
     if has_perm(actor, "tasks.read"):
         blocked = (await db.execute(q.order_by(Task.blocked_at.desc().nulls_last()))).scalars().all()
         by_vehicle: dict[str, list] = {}
@@ -214,9 +230,8 @@ async def needs_attention(db: AsyncSession, actor: Actor, *, now: datetime, tz: 
 
     # overdue tasks (grouped, deduplicated against blocked work above)
     if has_perm(actor, "tasks.read"):
-        qo = select(Task).where(Task.status.in_(("open", "in_progress", "waiting")), Task.due_at.is_not(None), Task.due_at < now)
-        if scope is not None:
-            qo = qo.where(or_(Task.vehicle_id.is_(None), Task.vehicle_id.in_(list(scope) or ["-"])))
+        qo = _scoped_tasks(select(Task).where(Task.status.in_(("open", "in_progress", "waiting")),
+                                              Task.due_at.is_not(None), Task.due_at < now), actor, scope)
         overdue = (await db.execute(qo.order_by(Task.due_at))).scalars().all()
         if overdue:
             add("overdue_tasks", "overdue_task", f"{len(overdue)} overdue task(s)",
@@ -292,13 +307,9 @@ async def today(db: AsyncSession, actor: Actor, *, now: datetime, tz: str) -> di
         return {"available": False, "reason": "tasks.read required", "items": [], "total": 0}
     a, b = _day_bounds(now, tz)
     scope = await visible_vehicle_ids(db, actor)
-    q = select(Task).where(Task.status.in_(ACTIVE_TASK_STATES),
-                           func.coalesce(Task.start_at, Task.due_at) >= a,
-                           func.coalesce(Task.start_at, Task.due_at) < b)
-    if scope is not None:
-        q = q.where(or_(Task.vehicle_id.is_(None), Task.vehicle_id.in_(list(scope) or ["-"])))
-    if actor.scope == "assigned":
-        q = q.where(Task.owner_user_id == actor.user_id)
+    q = _scoped_tasks(select(Task).where(Task.status.in_(ACTIVE_TASK_STATES),
+                                         func.coalesce(Task.start_at, Task.due_at) >= a,
+                                         func.coalesce(Task.start_at, Task.due_at) < b), actor, scope)
     rows = (await db.execute(q.order_by(func.coalesce(Task.start_at, Task.due_at)))).scalars().all()
     items = [{"kind": "task", "id": t.id, "title": t.title, "type": t.type, "status": t.status,
               "at": _iso(t.start_at or t.due_at), "at_label": fmt_local(t.start_at or t.due_at, tz),

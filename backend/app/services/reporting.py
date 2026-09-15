@@ -44,7 +44,7 @@ from ..models.legacy import Setting
 from ..models.reporting import MetricSnapshot
 from ..models.vehicles import Vehicle
 from . import finance_queries as fq
-from .finance import iso, money
+from .finance import money
 
 log = logging.getLogger("azkt.reporting")
 
@@ -311,8 +311,11 @@ async def compute(db: AsyncSession, *, period: dict, now: datetime | None = None
 
 
 def _margin(gross: dict | None, net: dict | None, cohort: dict) -> dict:
-    out = {"label": "Gross margin", "available": False, "value": None, "numerator": gross, "denominator": net,
-           "basis": "weighted from period totals, not an average of per-vehicle percentages", "unavailable_reason": None}
+    # `percent` is declared here so an unavailable margin has exactly the same shape as an available one: a
+    # caller that reads `percent` gets an explicit null instead of a missing key it has to guess about.
+    out = {"label": "Gross margin", "available": False, "value": None, "percent": None, "numerator": gross,
+           "denominator": net, "basis": "weighted from period totals, not an average of per-vehicle percentages",
+           "unavailable_reason": None}
     if gross is None or net is None:
         out["unavailable_reason"] = cohort["gross_margin_note"] or "net vehicle sales value is unknown"
         return out
@@ -524,8 +527,10 @@ async def changed_since(db: AsyncSession, as_of: datetime | None) -> bool:
 
 async def mark_stale(db: AsyncSession, reason: str, *, commit: bool = False) -> int:
     """Canonical change → every cached period is stale; recompute happens lazily on the next read."""
+    # `last_error` is the operator's note on the row; say plainly that this is an invalidation, not a failure
     res = await db.execute(update(MetricSnapshot).where(MetricSnapshot.stale.is_(False))
-                           .values(stale=True, invalidated_at=datetime.now(timezone.utc), last_error=reason[:200]))
+                           .values(stale=True, invalidated_at=datetime.now(timezone.utc),
+                                   last_error=f"invalidated by {reason}"[:200]))
     if commit:
         await db.commit()
     return res.rowcount or 0
@@ -598,21 +603,29 @@ def _strip_money(obj):
 
 
 def sanitize(actor: Actor, payload: dict) -> dict:
-    """Owner / costs.read: everything. finance.status only: counts, timing and record cohorts — no amounts."""
+    """Owner / costs.read: everything. finance.status only: counts, timing and record cohorts — no amounts.
+
+    Every lookup is defensive because this also runs over a *stale* snapshot that an older computation version
+    may have stored, and the whole point of that path is to answer honestly instead of raising (spec §2.4)."""
     if can_see_costs(actor):
         return payload
     out = _strip_money(payload)
     out["money_hidden"] = True
-    out["values"]["vehicle_costs_sold_cohort"]["by_category"] = {
-        k: {kk: vv for kk, vv in v.items() if kk != "usd"} for k, v in (payload["values"]["vehicle_costs_sold_cohort"]["by_category"] or {}).items()}
-    out["values"]["gross_margin"]["value"] = None
-    out["values"]["gross_margin"]["percent"] = None
-    out["values"]["gross_margin"]["available"] = False
-    out["values"]["gross_margin"]["unavailable_reason"] = "amounts hidden (costs.read required)"
-    out["cash_flows"] = {"label": "Cash flows", "money_hidden": True,
-                         "counts": payload["cash_flows"]["counts"], "period": payload["cash_flows"]["period"],
-                         "unsettled": payload["cash_flows"].get("unsettled", [])}
-    out["restatements"] = [{k: v for k, v in r.items() if k not in ("old", "new", "amount")} for r in payload["restatements"]]
+    values = out.get("values") or {}
+    costs = values.get("vehicle_costs_sold_cohort")
+    if isinstance(costs, dict):
+        # keep the per-category line/estimate/fx counts, drop only the money total `_strip_money` nulled out
+        source = ((payload.get("values") or {}).get("vehicle_costs_sold_cohort") or {}).get("by_category") or {}
+        costs["by_category"] = {k: {kk: vv for kk, vv in v.items() if kk != "usd"} for k, v in source.items()}
+    margin = values.get("gross_margin")
+    if isinstance(margin, dict):
+        margin.update({"value": None, "percent": None, "available": False,
+                       "unavailable_reason": "amounts hidden (costs.read required)"})
+    cash = payload.get("cash_flows") or {}
+    out["cash_flows"] = {"label": "Cash flows", "money_hidden": True, "counts": cash.get("counts", {}),
+                         "period": cash.get("period", {}), "unsettled": cash.get("unsettled", [])}
+    out["restatements"] = [{k: v for k, v in r.items() if k not in ("old", "new", "amount")}
+                           for r in (payload.get("restatements") or [])]
     out["visible"] = "counts and timing only"
     return out
 

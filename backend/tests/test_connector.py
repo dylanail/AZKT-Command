@@ -450,8 +450,14 @@ async def test_an_azkt_status_reply_is_never_re_submitted_as_an_instruction(db, 
 # Quotas
 # ═════════════════════════════════════════════════════════════════════════════
 async def test_per_minute_quota_returns_429_with_retry_after(db, owner, client):
+    from unittest.mock import patch
+    from backend.app.services import external_clients as ec
     c, token = await register(db, owner, quota={"per_minute": 1})
-    with use_model(FakeModel([{"text": "ok"}, {"text": "ok"}])):
+    # The window is keyed by the wall-clock minute, so a pair of requests that straddles a minute boundary
+    # is legitimately allowed. Freeze "now" for the pair: the rollover is asserted separately below.
+    frozen = datetime.now(timezone.utc)
+    with patch.object(ec, "_now", lambda: frozen), \
+            use_model(FakeModel([{"text": "ok"}, {"text": "ok"}])):
         first = await client.post("/api/integrations/v1/ask",
                                   json={"message": "hello", "request_key": f"k-{uid()}"}, headers=hdr(token))
         second = await client.post("/api/integrations/v1/ask",
@@ -460,7 +466,8 @@ async def test_per_minute_quota_returns_429_with_retry_after(db, owner, client):
     assert second.status_code == 429 and second.headers["Retry-After"] == "60"
     assert second.json()["detail"]["scope"] == "per_minute"
     # reads are metered too: a connector cannot poll or search this endpoint without bound
-    assert (await client.get("/api/integrations/v1/records/search?q=a", headers=hdr(token))).status_code == 429
+    with patch.object(ec, "_now", lambda: frozen):
+        assert (await client.get("/api/integrations/v1/records/search?q=a", headers=hdr(token))).status_code == 429
     # the window rolls over on its own; no owner action is needed to restore access
     await db.refresh(c)
     c.usage_window = {}

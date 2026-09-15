@@ -85,6 +85,34 @@ async def thread(db, actor: Actor, role: str = "manager", *, limit: int = 50) ->
 
 
 # ── the entry point ──────────────────────────────────────────────────────────
+def chat_correlation(actor: Actor, request_id: str) -> str:
+    """Idempotency key for one chat message. A dropped connection and a retried POST are the same
+    logical request, so they must map to the same mission — never a second one (spec §12.1 step 3)."""
+    return f"chat:{actor.key}:{request_id}"[:200]
+
+
+async def _replay(db, mission: Mission, *, key: str, role: str, context: dict) -> dict:
+    """The stored answer for a chat request that already ran. Nothing is re-run and nothing is re-written."""
+    from ..models.runtime import Run
+    run = (await db.execute(select(Run).where(Run.mission_id == mission.id)
+                            .order_by(Run.created_at.desc()).limit(1))).scalars().first()
+    r = dict(mission.result or {})
+    approvals = r.get("approvals") or []
+    return {"text": _with_review_links(r.get("summary") or "", approvals, mission.status),
+            "status": mission.status, "mission_id": mission.id, "run_id": run.id if run is not None else None,
+            "cursor": int(mission.cursor or 0), "changed": r.get("changed") or [], "approvals": approvals,
+            "needed_input": r.get("needed_input"), "run_status": r.get("run_status"), "error": r.get("error"),
+            "wrote": bool(r.get("changed")), "replayed": True, "thread_key": key, "role": role, "context": context,
+            "blocks": [{"type": "mission", "id": mission.id, "status": mission.status}]}
+
+
+def _with_review_links(summary: str, approvals: list, mission_status: str) -> str:
+    if mission_status == "waiting_approval" and approvals:
+        links = "; ".join(f"{a.get('title') or a.get('kind')} → {a.get('review_path')}" for a in approvals)
+        return (summary + f"\n\nNothing was sent or ordered. Waiting for your signed-in review: {links}").strip()
+    return summary
+
+
 async def handle_message(db, actor: Actor, text: str, *, channel: str = "web", thread_key: str | None = None,
                          context: dict | None = None, attachments: list | None = None, role: str = "manager",
                          request_id: str | None = None, mission_kwargs: dict | None = None,
@@ -99,6 +127,15 @@ async def handle_message(db, actor: Actor, text: str, *, channel: str = "web", t
         raise ValidationFailed("message or attachments required")
     key = thread_key or thread_key_for(actor, role)
     context = dict(context or {})
+
+    if request_id and not (mission_kwargs or {}).get("correlation_id"):
+        prior = (await db.execute(select(Mission).where(
+            Mission.correlation_id == chat_correlation(actor, request_id)))).scalars().first()
+        if prior is not None:
+            if (prior.outcome or "")[:200] != (text or "Help with the attached evidence")[:200]:
+                from ..core.errors import DomainError
+                raise DomainError("request_id reused with a different message", code="idempotency_conflict")
+            return await _replay(db, prior, key=key, role=role, context=context)
 
     if store:
         await store_turn(db, key, "user", text, channel=channel, actor_user_id=actor.user_id,
@@ -141,7 +178,8 @@ async def _route(db, actor: Actor, text: str, *, channel: str, thread_key: str, 
         return quick
 
     return await _mission(db, actor, text, channel=channel, thread_key=thread_key, context=context,
-                          role=role, mission_kwargs=mission_kwargs, on_event_cb=on_event_cb)
+                          role=role, mission_kwargs=mission_kwargs, on_event_cb=on_event_cb,
+                          request_id=request_id)
 
 
 # ── deterministic fast paths ─────────────────────────────────────────────────
@@ -414,8 +452,10 @@ def _blocked(prefix: str, res: tools.ToolResult, *, extra: dict | None = None) -
 
 # ── mission path ─────────────────────────────────────────────────────────────
 async def _mission(db, actor: Actor, text: str, *, channel: str, thread_key: str, context: dict, role: str,
-                   mission_kwargs: dict | None, on_event_cb) -> dict:
+                   mission_kwargs: dict | None, on_event_cb, request_id: str | None = None) -> dict:
     kw = dict(mission_kwargs or {})
+    if request_id and not kw.get("correlation_id"):
+        kw["correlation_id"] = chat_correlation(actor, request_id)
     entity_refs = list(kw.pop("entity_refs", []) or [])
     if context.get("vehicle_id") and not any(r.get("id") == context["vehicle_id"] for r in entity_refs):
         entity_refs.append({"kind": "vehicle", "id": context["vehicle_id"], "label": context.get("label")})
@@ -428,10 +468,7 @@ async def _mission(db, actor: Actor, text: str, *, channel: str, thread_key: str
     await db.commit()
     run, out = await runtime.run_inline(db, mission, on_event_cb=on_event_cb)
     mission = await db.get(Mission, mission.id)
-    reply = out.summary
-    if out.mission_status == "waiting_approval" and out.approvals:
-        links = "; ".join(f"{a.get('title') or a.get('kind')} → {a.get('review_path')}" for a in out.approvals)
-        reply = (reply + f"\n\nNothing was sent or ordered. Waiting for your signed-in review: {links}").strip()
+    reply = _with_review_links(out.summary, out.approvals or [], out.mission_status)
     return {"text": reply, "status": mission.status, "mission_id": mission.id, "run_id": run.id,
             "cursor": int(mission.cursor or 0), "changed": out.changed or [], "approvals": out.approvals or [],
             "needed_input": out.needed_input, "run_status": out.run_status, "used_model": out.used_model,

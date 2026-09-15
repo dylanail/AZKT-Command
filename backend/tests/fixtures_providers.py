@@ -165,7 +165,7 @@ async def square_connection(db, *, merchant_id: str = MERCHANT, connect: bool = 
 # ── Drive ────────────────────────────────────────────────────────────────────
 ROOT_A = "FOLDER-ROOT-A"
 ROOT_B = "FOLDER-ROOT-B"          # a second folder with the identical name (A09)
-FOLDER_EVIDENCED = "FOLDER-STK-0412"
+FOLDER_EVIDENCED = "FOLDER-STK-7412"
 FOLDER_LOOKALIKE = "FOLDER-ACTY"
 FOLDER_MOVED = "FOLDER-MOVED"
 OUTSIDE = "FOLDER-OUTSIDE"
@@ -180,13 +180,13 @@ def drive_fake(*, owner: str = "dylxnxil@gmail.com", salt: int = 0) -> drive_ada
     d.add_folder(OUTSIDE, "Archive 2025", None, owner=owner)
 
     # an evidenced folder: the name and the file names agree on the same stock reference (F01)
-    d.add_folder(FOLDER_EVIDENCED, "STK-0412 Hijet jumbo", ROOT_A, owner=owner)
-    d.add_file("F-PHOTO-1", "STK-0412 front.jpg", FOLDER_EVIDENCED, jpeg(1 + salt))
-    d.add_file("F-PHOTO-2", "STK-0412 rear.jpg", FOLDER_EVIDENCED, jpeg(2 + salt))
-    d.add_file("F-PHOTO-DUP", "STK-0412 front (copy).jpg", FOLDER_EVIDENCED, jpeg(1 + salt))     # identical bytes (F03)
+    d.add_folder(FOLDER_EVIDENCED, "STK-7412 Hijet jumbo", ROOT_A, owner=owner)
+    d.add_file("F-PHOTO-1", "STK-7412 front.jpg", FOLDER_EVIDENCED, jpeg(1 + salt))
+    d.add_file("F-PHOTO-2", "STK-7412 rear.jpg", FOLDER_EVIDENCED, jpeg(2 + salt))
+    d.add_file("F-PHOTO-DUP", "STK-7412 front (copy).jpg", FOLDER_EVIDENCED, jpeg(1 + salt))     # identical bytes (F03)
     d.add_file("F-ID", "customer id scan.jpg", FOLDER_EVIDENCED, jpeg(3 + salt))                 # sensitive (F02)
     d.add_file("F-INVOICE", "invoice 8891.pdf", FOLDER_EVIDENCED, pdf(f"8891-{salt}"), mime="application/pdf")
-    d.add_file("F-BL", "bill of lading STK-0412.pdf", FOLDER_EVIDENCED, pdf(f"bl-{salt}"), mime="application/pdf")
+    d.add_file("F-BL", "bill of lading STK-7412.pdf", FOLDER_EVIDENCED, pdf(f"bl-{salt}"), mime="application/pdf")
 
     # a visually similar truck with no unique reference anywhere: a proposal at best (F01)
     d.add_folder(FOLDER_LOOKALIKE, "2019 Silver Acty", ROOT_A, owner=owner)
@@ -228,8 +228,8 @@ def sheets_fake() -> sheets_adapter.FakeSheets:
     src = sheets_adapter.FakeSheets()
     src.add_sheet(LEDGER_SHEET, "AZKT Ledger 2026", {
         "Costs": {"tab_id": "0", "headers": ["Date", "Vehicle", "Supplier", "Description", "Amount", "Currency", "Total"],
-                  "rows": [["2026-08-02", "STK-0412", "Kanto Parts", "Water pump", "120.00", "USD", "132.00"],
-                           ["2026-08-05", "STK-0412", "Yamato", "Freight", "310.00", "USD", "341.00"],
+                  "rows": [["2026-08-02", "STK-7412", "Kanto Parts", "Water pump", "120.00", "USD", "132.00"],
+                           ["2026-08-05", "STK-7412", "Yamato", "Freight", "310.00", "USD", "341.00"],
                            ["2026-08-09", "STK-0999", "Kanto Parts", "Tyres", "480.00", "USD", "528.00"]],
                   "formulas": {(0, "Total"): "=E2*1.1", (1, "Total"): "=E3*1.1", (2, "Total"): "=E4*1.1"}},
         "Notes": {"tab_id": "1", "headers": ["Note"], "rows": [["not a ledger tab"]]},
@@ -269,7 +269,7 @@ def wordpress_fake(*, with_existing: bool = True, custom_type: bool = False) -> 
         site.add_custom_type("azkt_vehicle", "Vehicle", rest_base="vehicles")
     if with_existing:
         # a live product for a truck AZKT has no mapping for yet (F05)
-        site.add_product(sku="STK-0412", name="2018 Daihatsu Hijet Jumbo", price="12500.00",
+        site.add_product(sku="STK-7412", name="2018 Daihatsu Hijet Jumbo", price="12500.00",
                          external_id=EXISTING_PRODUCT_ID)
     return site
 

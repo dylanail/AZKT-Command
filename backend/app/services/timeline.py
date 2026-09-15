@@ -13,7 +13,7 @@ invented. Rules kept here:
 """
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -278,7 +278,7 @@ async def timeline(db: AsyncSession, actor: Actor, *, vehicle_ids: list[str] | N
     scope = await visible_vehicle_ids(db, actor)
     if scope is not None:
         if not scope:
-            return _empty(now, tz, horizon_days, view, owner, blocked_only, scoped=True)
+            return _empty(now, tz, horizon_days, vehicle_ids, view, owner, blocked_only, scoped=True)
         q = q.where(Vehicle.id.in_(list(scope)))
     if view and view != "all":
         if view in VIEW_STATES:
@@ -299,7 +299,7 @@ async def timeline(db: AsyncSession, actor: Actor, *, vehicle_ids: list[str] | N
         rows = [v for v in rows if v.next_action_owner_id == owner or v.id in owned]
     ids = [v.id for v in rows]
     if not ids:
-        return _empty(now, tz, horizon_days, view, owner, blocked_only)
+        return _empty(now, tz, horizon_days, vehicle_ids, view, owner, blocked_only)
 
     ms = (await db.execute(select(VehicleMilestone).where(VehicleMilestone.vehicle_id.in_(ids))
                            .order_by(VehicleMilestone.created_at))).scalars().all()
@@ -356,9 +356,13 @@ async def timeline(db: AsyncSession, actor: Actor, *, vehicle_ids: list[str] | N
     }
 
 
-def _empty(now: datetime, tz: str, horizon_days: int, view, owner, blocked_only, *, scoped: bool = False) -> dict:
+def _empty(now: datetime, tz: str, horizon_days: int, vehicle_ids, view, owner, blocked_only, *,
+           scoped: bool = False) -> dict:
+    """No rows matched. The filters are echoed back exactly as asked for, so the caller can tell an empty
+    result apart from a filter the server quietly dropped."""
     return {"as_of": now.isoformat(), "timezone": tz, "horizon_days": horizon_days,
-            "filters": {"vehicle_ids": None, "view": view or "all", "owner": owner, "blocked_only": blocked_only, "period": None},
+            "filters": {"vehicle_ids": vehicle_ids, "view": view or "all", "owner": owner,
+                        "blocked_only": blocked_only, "period": None},
             "milestone_kinds": list(MILESTONE_KINDS), "items": [], "total": 0, "returned": 0,
             "turnaround_excluded": {"acquisition_to_sale": 0, "received_to_ready": 0, "listed_to_sold": 0},
             "notes": (["no vehicles are assigned to you"] if scoped else ["no vehicles match these filters"])}

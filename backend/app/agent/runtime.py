@@ -91,8 +91,46 @@ CONTROL_TOOLS: dict[str, tuple[type[BaseModel], str]] = {
 
 
 def control_definitions() -> list[dict]:
-    return [{"name": name, "description": desc, "input_schema": tools.strict_schema(model.model_json_schema())}
-            for name, (model, desc) in CONTROL_TOOLS.items()]
+    out = []
+    for name, (model, desc) in CONTROL_TOOLS.items():
+        schema = tools.strict_schema(model.model_json_schema())
+        d = {"name": name, "description": desc, "input_schema": schema}
+        if tools.strict_compatible(schema):
+            d["strict"] = True
+        out.append(d)
+    return out
+
+
+CHECKPOINT_MESSAGES = 40
+
+
+def _has_tool_result(msg: dict) -> bool:
+    content = msg.get("content")
+    return isinstance(content, list) and any(isinstance(b, dict) and b.get("type") == "tool_result" for b in content)
+
+
+def trim_messages(messages: list[dict], keep: int = CHECKPOINT_MESSAGES) -> list[dict]:
+    """Checkpoint a conversation that is still *valid* to resume from.
+
+    A plain `messages[-keep:]` slice would start the resumed conversation on an assistant turn, or on a
+    user message holding `tool_result` blocks whose `tool_use` has been dropped — both are rejected by the
+    API, so a crashed run could never be picked up (invariant 2, H01/H02). Instead the opening context is
+    always kept and whole assistant/tool-result turns are dropped from the front.
+    """
+    msgs = list(messages)
+    if len(msgs) <= keep:
+        return msgs
+    head: list[dict] = []
+    i = 0
+    while i < len(msgs) and msgs[i].get("role") == "user" and not _has_tool_result(msgs[i]):
+        head.append(msgs[i])
+        i += 1
+    tail = msgs[i:]
+    while len(head) + len(tail) > keep and len(tail) > 2:
+        tail = tail[1:]                                   # drop the assistant turn ...
+        while tail and _has_tool_result(tail[0]):
+            tail = tail[1:]                               # ... together with its tool results
+    return head + tail
 
 
 # ── actors and scope ─────────────────────────────────────────────────────────
@@ -314,6 +352,11 @@ async def assemble_context(db, mission: Mission, actor: Actor) -> tuple[str, lis
     if proc:
         lines.append("<procedure>" + proc[:4000] + "</procedure>")
 
+    progress = await _progress(db, mission)
+    if progress:
+        lines.append("<work_already_done>" + json.dumps(progress, default=str)[:6000] + "</work_already_done>")
+        lines.append(prompts.RESUME_INSTRUCTION)
+
     messages: list[dict] = [{"role": "user", "content": "\n".join(lines)}]
     for turn in await _conversation(db, mission):
         messages.append(turn)
@@ -343,6 +386,33 @@ async def _current_facts(db, mission: Mission, actor: Actor) -> dict:
             out[f"{kind}:{rid}"] = res.to_dict()
         except Exception as e:  # noqa: BLE001
             out[f"{kind}:{rid}"] = {"status": "error", "error": str(e)[:200]}
+    return out
+
+
+async def _progress(db, mission: Mission) -> dict | None:
+    """What earlier runs of this mission already did, for a resumed run.
+
+    A resume (approval decided, next check due, client replied) starts a *new* run with an empty
+    checkpoint, so without this the model would re-plan from the bare outcome and ask for the same
+    consequential action again — producing a second approval for work the owner has already decided
+    (spec §10.4 step 8, §11.4). States and receipts here are read from the records, never invented.
+    """
+    prior = dict(mission.result or {})
+    updates = [u for u in (mission.updates or []) if u.get("state") not in ("queued", "running")][-12:]
+    if not updates and not prior.get("summary"):
+        return None
+    out: dict = {"previous_result": {k: prior.get(k) for k in ("summary", "run_status", "error", "needed_input")
+                                     if prior.get(k)},
+                 "changed_so_far": (prior.get("changed") or [])[-20:],
+                 "updates": updates}
+    from ..models.runtime import Approval
+    rows = (await db.execute(select(Approval).where(Approval.mission_id == mission.id)
+                             .order_by(Approval.created_at))).scalars().all()
+    if rows:
+        out["approvals"] = [{"id": a.id, "title": a.title, "command": a.command_name, "status": a.status,
+                             "decided_at": _iso(a.decided_at), "decision_note": a.decision_note,
+                             "receipt": dict(a.receipt or {}) or None,
+                             "invalidated_reason": a.invalidated_reason} for a in rows[-10:]]
     return out
 
 
@@ -575,7 +645,7 @@ async def execute_run(db, mission: Mission, run: Run, lease_token: str, *, on_ev
             await emit("tool_finished", {"tool": name, "status": tr.status})
         # every tool_result for this assistant turn travels in ONE user message
         messages.append({"role": "user", "content": results})
-        run.checkpoint = {"system": system, "messages": messages[-40:], "failures": failures,
+        run.checkpoint = {"system": system, "messages": trim_messages(messages), "failures": failures,
                           "alternatives": alternatives, "approvals": approvals, "changed": changed[-100:]}
         run.steps_used, run.used_model = steps, used_model
         try:
@@ -598,7 +668,7 @@ async def execute_run(db, mission: Mission, run: Run, lease_token: str, *, on_ev
     # clean end_turn: the run succeeded. The *case* may still be waiting (H12).
     mission_status = "waiting_approval" if approvals else "succeeded"
     summary = final_text or "Done."
-    run.checkpoint = {"system": system, "messages": messages[-40:], "failures": failures,
+    run.checkpoint = {"system": system, "messages": trim_messages(messages), "failures": failures,
                       "alternatives": alternatives, "approvals": approvals, "changed": changed[-100:]}
     return await _finish(db, mission, run, lease_token,
                          RunOutcome("succeeded", mission_status, summary, changed, steps=steps,

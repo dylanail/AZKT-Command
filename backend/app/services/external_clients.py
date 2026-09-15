@@ -435,6 +435,17 @@ async def ask(db, actor: Actor, client: ExternalClient, *, message: str, request
         req.result = {"summary": e.message}
         await db.commit()
         raise
+    except Exception as e:  # noqa: BLE001
+        # The request row is already durable, and `(client, request_key)` is unique: without recording the
+        # failure a retry would keep replaying an "accepted" request that never has a mission. A failed
+        # request says so truthfully, with no invented progress.
+        await db.rollback()
+        req = await db.get(DelegatedRequest, req.id)
+        if req is not None:
+            req.status, req.error = "failed", f"{type(e).__name__}: {str(e)[:300]}"
+            req.result = {"summary": "AZKT could not start this work; nothing was changed by it."}
+            await db.commit()
+        raise
     req = await db.get(DelegatedRequest, req.id)
     mission = await db.get(Mission, out.get("mission_id")) if out.get("mission_id") else None
     req.mission_id = out.get("mission_id")

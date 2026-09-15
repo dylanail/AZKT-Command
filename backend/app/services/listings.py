@@ -549,6 +549,11 @@ async def publish_revalidate(ctx: CommandContext, inp: PublishIn, approval) -> l
         reasons.append("the package changed since it was approved — review again")
     if inp.expected_package_hash and inp.expected_package_hash != pkg.package_hash:
         reasons.append("package hash changed — review again")
+    if pkg.status in ("superseded", "invalidated", "published"):
+        reasons.append(f"package is {pkg.status} — review again")
+    newer = await latest_package(ctx.db, pkg.vehicle_id, channel=inp.channel)
+    if newer is not None and newer.id != pkg.id and newer.package_hash != pkg.package_hash:
+        reasons.append("a newer package version was built — review again")
     profile = await site_svc.active_profile(ctx.db)
     if profile is None:
         reasons.append("no active site profile")
@@ -562,6 +567,10 @@ async def publish_revalidate(ctx: CommandContext, inp: PublishIn, approval) -> l
     v = await ctx.db.get(Vehicle, pkg.vehicle_id)
     if v is not None and availability_for(v, pkg.listing_class) != pkg.availability:
         reasons.append(f"availability changed to {availability_for(v, pkg.listing_class)} — review again")
+    if v is not None:
+        approved = str(v.asking_price) if (v.asking_price is not None and v.price_approved_at is not None) else None
+        if approved != (str(pkg.price) if pkg.price is not None else None):
+            reasons.append("the approved price changed — review again")
     if v is not None:
         gates = await evaluate_gates(ctx.db, v, profile, pkg.listing_class, {**package_payload(pkg),
                                                                              "media_detail": list(pkg.media_detail or []),
@@ -629,7 +638,7 @@ async def listings_publish(ctx: CommandContext, inp: PublishIn) -> dict:
     if not ok:
         raise Blocked(f"website writes are not available: {why}")
     pub.profile_id, pub.profile_version = profile.id, profile.profile_version
-    pub.desired_state = "published"
+    pub.desired_state = pkg.availability      # what the public listing must show once it is live
     pub.state = "queued"
     pub.error = None
     _history(pub, "queued", f"package v{pkg.package_version}")
@@ -711,12 +720,13 @@ def _verify(expected_payload: dict, readback: dict, profile: SiteProfile | None)
         return out
     rendered = public.get("rendered")
     if rendered:
-        pub_cmp = site_svc.compare_managed(expected_payload, rendered, profile)
+        pub_cmp = site_svc.compare_managed(expected_payload, rendered, profile,
+                                           fields=site_svc.PUBLIC_COMPARE_FIELDS)
         out["public"] = {"fetched": True, "ok": not pub_cmp["mismatches"], **pub_cmp, "cache": public.get("cache")}
         return out
     html = public.get("html") or ""
     checks = {}
-    for logical in ("title", "price"):
+    for logical in site_svc.PUBLIC_COMPARE_FIELDS:
         target = wp_adapter.field_map_for(site_svc.profile_dict(profile)).get(logical, logical)
         value = expected_payload.get(target)
         if value is None:
@@ -754,6 +764,7 @@ async def _apply_verification(db: AsyncSession, pub: Publication, pkg: ListingPa
     if public_ok is True:
         pub.state = "verified"
         pub.cleanup_required = False
+        pub.error = None
         _history(pub, "verified", "API and public page agree")
         return pub.state
     if (pub.attempts or 0) >= VERIFY_MAX_ATTEMPTS:
@@ -773,15 +784,16 @@ async def _exec_publish(db: AsyncSession, act: ExternalAction) -> dict:
     pub = await db.get(Publication, payload.get("publication_id"))
     pkg = await db.get(ListingPackage, payload.get("package_id"))
     if pub is None or pkg is None:
-        return {"error": "publication or package missing", "sent": False}
+        raise DomainError("publication or package missing", code="publication_missing")
     profile = await db.get(SiteProfile, payload.get("profile_id")) if payload.get("profile_id") else None
     ok, why = site_svc.writable(profile)
     if not ok:
         pub.state = "failed"
         pub.error = f"website writes are not available: {why}"
+        pub.cleanup_required = True
         _history(pub, "failed", pub.error)
         await db.commit()
-        return {"error": pub.error, "sent": False}
+        raise Blocked(pub.error)
     prof = site_svc.profile_dict(profile)
     package = package_payload(pkg)
     expected_payload = wp_adapter.render_payload({**package, "status": "publish"}, prof)
@@ -832,7 +844,8 @@ async def _exec_publish(db: AsyncSession, act: ExternalAction) -> dict:
         pub.cleanup_required = True
         _history(pub, "failed", f"{kind}: {e}")
         await db.commit()
-        return {"error": f"{kind}: {e}", "sent": False, "provider_ref": pub.external_id}
+        # a provider refusal is a failure, not a hand-off: re-raise so the approval reads `failed`
+        raise
     try:
         readback = await ad.read_back(pub.external_id, profile=prof)
     except (ProviderError, Unsupported) as e:
@@ -867,15 +880,23 @@ async def _task(db: AsyncSession, *, title: str, vehicle_id: str | None, source_
 
 
 async def _record_listed_milestone(db: AsyncSession, pub: Publication, pkg: ListingPackage) -> None:
-    """K04: a verified publication is the source of the `listed` milestone."""
+    """K04: a verified publication is the source of the `listed` milestone and of the listed state."""
     ctx = CommandContext(db=db, actor=SYSTEM_ACTOR, channel="worker")
     try:
         await dispatch(ctx, "vehicles.record_milestone", {
-            "vehicle_id": pkg.vehicle_id, "kind": "listed", "status": "completed", "at": now(),
+            "vehicle_id": pkg.vehicle_id, "kind": "listed", "status": "completed", "at": ctx.now,
             "source_kind": "provider", "source_ref": f"publication:{pub.id}",
             "note": f"Verified on {pub.channel}: {pub.external_url or pub.external_id}"}, commit=False)
     except DomainError as e:
         log.warning("listed milestone could not be recorded: %s", e)
+    v = await db.get(Vehicle, pkg.vehicle_id)
+    if v is not None and v.commercial_state == "not_listed":
+        try:
+            await dispatch(ctx, "vehicles.set_states", {
+                "vehicle_id": pkg.vehicle_id, "commercial_state": "listed",
+                "reason": f"verified publication on {pub.channel}"}, commit=False)
+        except DomainError as e:
+            log.warning("listed state could not be recorded: %s", e)
 
 
 # ── availability (F10) ───────────────────────────────────────────────────────
@@ -907,6 +928,10 @@ async def listings_update_availability(ctx: CommandContext, inp: AvailabilityIn)
         _history(pub, "desired_state", f"{previous} → {desired}", reason=inp.reason)
         entry = {"publication_id": pub.id, "channel": pub.channel, "desired_state": desired,
                  "cancelled_queued": cancelled, "queued": False}
+        if previous == desired and pub.state == "verified" and not pub.cleanup_required:
+            entry["status"] = "already_verified"
+            out.append(entry)
+            continue
         if pub.channel not in SUPPORTED_CHANNELS or not pub.external_id:
             pub.cleanup_required = True
             pub.manual_task_id = pub.manual_task_id or await _cleanup_task(ctx, pub, v, desired)
@@ -948,11 +973,11 @@ async def _cancel_incompatible(ctx: CommandContext, pub: Publication, desired: s
         wanted = (act.payload or {}).get("availability")
         if act.command_name == "listings.push_availability" and wanted and wanted != desired:
             act.state = "cancelled"
-            act.error = f"superseded: desired availability is now {desired}"
+            act.error = f"no longer compatible: the desired availability is now {desired}"
             cancelled.append(act.id)
         elif act.command_name == "listings.publish" and desired in ("sold",):
             act.state = "cancelled"
-            act.error = "vehicle is sold; the queued publication is no longer compatible"
+            act.error = "the vehicle is sold; this queued publication is no longer compatible"
             cancelled.append(act.id)
     if cancelled:
         await approvals_svc.invalidate_for_entity(ctx, "publication", pub.id,
@@ -980,6 +1005,7 @@ class PushAvailabilityIn(BaseModel):
 
 @command("listings.push_availability", input=PushAvailabilityIn, perm="listings.publish",
          action_class="consequential", approval_kind="publish",
+         records=lambda p: [("publication", p.publication_id)],
          summary=lambda p: f"Set the website listing to {p.availability}",
          consequence=lambda p: {"scope": "public listing availability", "moves_money": False,
                                 "targets": {"publication_id": p.publication_id, "availability": p.availability}},
@@ -1019,7 +1045,7 @@ async def _exec_push_availability(db: AsyncSession, act: ExternalAction) -> dict
     payload = dict(act.payload or {})
     pub = await db.get(Publication, payload.get("publication_id"))
     if pub is None:
-        return {"error": "publication missing", "sent": False}
+        raise DomainError("publication missing", code="publication_missing")
     profile = await db.get(SiteProfile, payload.get("profile_id")) if payload.get("profile_id") else None
     ok, why = site_svc.writable(profile)
     if not ok:
@@ -1027,7 +1053,7 @@ async def _exec_push_availability(db: AsyncSession, act: ExternalAction) -> dict
         pub.cleanup_required = True
         _history(pub, "failed", pub.error)
         await db.commit()
-        return {"error": pub.error, "sent": False}
+        raise Blocked(pub.error)
     prof = site_svc.profile_dict(profile)
     ad = await _adapter(db)
     desired = payload.get("availability") or pub.desired_state
@@ -1050,7 +1076,8 @@ async def _exec_push_availability(db: AsyncSession, act: ExternalAction) -> dict
         pub.cleanup_required = True
         _history(pub, "cleanup_pending", pub.error)
         await db.commit()
-        return {"error": pub.error, "sent": False}
+        # the channel refused the change: a failure the owner sees, never a silent hand-off
+        raise
     pub.state = "accepted"
     _history(pub, "accepted", f"availability {desired} accepted")
     await db.commit()
@@ -1245,6 +1272,10 @@ async def reconcile_unknown(db: AsyncSession) -> dict:
 @sweep("listings.reconcile", VERIFY_SECONDS)
 async def listings_reconcile_sweep(session_factory) -> dict:
     async with session_factory() as db:
+        try:
+            await _adapter(db)          # no reachable site: nothing is queued (setup blocked)
+        except Unsupported as e:
+            return {"setup_blocked": str(e)}
         try:
             out = await reconcile_unknown(db)
         except Exception as e:  # noqa: BLE001

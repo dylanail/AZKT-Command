@@ -216,9 +216,11 @@ async def test_F08_manual_edit_to_an_owned_field_is_drift_and_unrelated_fields_s
         assert ok is False and "manual edit" in why
         # a review task is raised for the person, and nothing sitewide was touched
         from backend.app.models.tasks import Task
-        task = (await db.execute(_load(select(Task).where(Task.source_kind == "site_profile",
-                                                          Task.source_id == profile.id)))).scalars().first()
+        task = (await db.execute(_load(select(Task).where(
+            Task.source_kind == "site_profile",
+            Task.title == "Review website profile drift and re-validate")))).scalars().first()
         assert task is not None and task.priority == "high"
+        assert task.status not in ("completed", "cancelled")
         assert site.settings_changes == 0
 
         # resuming needs a fresh passing preview, then writes continue

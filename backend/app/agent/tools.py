@@ -57,8 +57,18 @@ def tool_name_for(command_name: str) -> str:
 
 
 # ── schema ───────────────────────────────────────────────────────────────────
+# Keywords strict tool use does not accept (Claude API reference: numerical and string constraints,
+# complex array constraints and recursive schemas). They are dropped from the model-facing schema; the
+# command's own pydantic model still enforces every one of them server-side in `execute()`, so nothing
+# is actually relaxed — the model simply stops being told about constraints the API would reject.
+UNSUPPORTED_SCHEMA_KEYS = ("minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum", "multipleOf",
+                           "minLength", "maxLength", "pattern", "minItems", "maxItems", "uniqueItems",
+                           "minProperties", "maxProperties", "patternProperties")
+SUPPORTED_FORMATS = ("date-time", "time", "date", "duration", "email", "hostname", "uri", "ipv4", "ipv6", "uuid")
+
+
 def strict_schema(schema: dict) -> dict:
-    """Inline `$defs`, forbid unknown keys and drop cosmetic fields.
+    """Inline `$defs`, forbid unknown keys and drop cosmetic or strict-incompatible fields.
 
     Unlike `adapters.model._strict_schema` (structured *output*, where every field must be present)
     this keeps pydantic's own `required` list: a command with optional fields must stay callable
@@ -84,6 +94,10 @@ def strict_schema(schema: dict) -> dict:
         node = dict(node)
         node.pop("title", None)
         node.pop("default", None)
+        for key in UNSUPPORTED_SCHEMA_KEYS:
+            node.pop(key, None)
+        if node.get("format") not in (None, *SUPPORTED_FORMATS):
+            node.pop("format", None)
         if node.get("type") == "object" or "properties" in node:
             node["type"] = "object"
             props = {k: walk(v, depth + 1) for k, v in (node.get("properties") or {}).items()}
@@ -103,6 +117,29 @@ def strict_schema(schema: dict) -> dict:
     return out
 
 
+def strict_compatible(schema: dict) -> bool:
+    """May this schema carry `strict: true`? Every object must declare its properties, forbid unknown
+    keys and list its required fields; a free-form or degraded object (a `dict` field, a recursive model)
+    cannot, so that tool is offered without the guarantee rather than with an invalid one."""
+    def ok(node) -> bool:
+        if isinstance(node, list):
+            return all(ok(x) for x in node)
+        if not isinstance(node, dict):
+            return True
+        if node.get("type") == "object" or "properties" in node:
+            if node.get("additionalProperties") is not False or "properties" not in node:
+                return False
+            if not isinstance(node.get("required"), list):
+                return False
+            if not all(ok(v) for v in node["properties"].values()):
+                return False
+        for key in ("items", "anyOf", "oneOf", "allOf", "prefixItems"):
+            if key in node and not ok(node[key]):
+                return False
+        return True
+    return ok(schema)
+
+
 # ── registry ─────────────────────────────────────────────────────────────────
 @dataclass
 class ToolSpec:
@@ -118,8 +155,14 @@ class ToolSpec:
     extra_scopes: tuple[str, ...] = ()   # external-client scopes needed on top of `perm`
 
     def definition(self) -> dict:
-        return {"name": self.tool_name, "description": self.description,
-                "input_schema": strict_schema(self.input_model.model_json_schema())}
+        schema = strict_schema(self.input_model.model_json_schema())
+        d = {"name": self.tool_name, "description": self.description, "input_schema": schema}
+        if strict_compatible(schema):
+            # Guarantees the model's tool input validates against this schema, which matters most here:
+            # nothing forces a tool call (Fable 5.1 rejects tool_choice), so a malformed input would
+            # otherwise burn a step and count towards the identical-failure breaker (spec §10.7, H06).
+            d["strict"] = True
+        return d
 
 
 READ_TOOLS: dict[str, ToolSpec] = {}
@@ -305,7 +348,22 @@ async def _run_write(ctx: CommandContext, spec: ToolSpec, inp: BaseModel, *, req
     if res.status == "needs_review":
         return ToolResult("needs_review", data={"prepared": True, "nothing_sent": True},
                           approval=_approval_brief(res.data), decision=res.decision or {})
-    return ToolResult("ok", data=_jsonable(res.data), changed=res.changed or [], decision=res.decision or {})
+    return ToolResult("ok", data=_sanitized(ctx.actor, res), changed=res.changed or [], decision=res.decision or {})
+
+
+def _sanitized(actor: Actor, res) -> Any:
+    """A command handler returns the whole record; the HTTP routers strip owner-only money before it
+    leaves. The agent surface must do exactly the same, or a person without `costs.read` would read a
+    purchase amount out of a write result instead of a read one (A02, spec §10.6)."""
+    envelope = _jsonable(res.to_dict())
+    try:
+        from ..services.vehicles import sanitize_command_result
+        envelope = sanitize_command_result(actor, envelope)
+    except Exception:  # noqa: BLE001  (never let redaction plumbing fail a tool call)
+        log.exception("could not sanitize a command result for the agent surface")
+        if not can_see_costs(actor):
+            return {"money_hidden": True, "note": "the result could not be redacted, so it is not shown"}
+    return envelope.get("data")
 
 
 async def _record_step(ctx: CommandContext, run_id: str | None, seq: int, tool_name: str, payload: dict,
@@ -711,6 +769,7 @@ class ActivityQuery(BaseModel):
                        "may see. Money values are scrubbed for anyone without the costs permission.")
 async def _activity_recent(ctx: CommandContext, inp: ActivityQuery) -> dict:
     from ..models.runtime import ActivityEntry
+    from ..models.tasks import Task
     from ..routers.activity import _allowed_visibilities, _brief, _record_ok, _scope_sets
     clauses = []
     vis = _allowed_visibilities(ctx.actor)
@@ -724,8 +783,17 @@ async def _activity_recent(ctx: CommandContext, inp: ActivityQuery) -> dict:
         clauses.append(ActivityEntry.kind == inp.kind)
     if inp.exceptions_only:
         clauses.append(ActivityEntry.exception.is_(True))
+    # A record-limited connector follows its vehicle grant here too. `_scope_sets` only narrows
+    # assigned-scope people, so without this an external client with read:activity would read the
+    # history of trucks outside its grant (invariant 14, J03).
+    limit = await visible_vehicle_ids(ctx.db, ctx.actor)
+    if ctx.actor.kind == "external" and limit is not None:
+        task_ids = {r[0] for r in (await ctx.db.execute(
+            select(Task.id).where(Task.vehicle_id.in_(list(limit) or [""])))).all()} if limit else set()
+        clauses.append(or_((ActivityEntry.entity_kind == "vehicle") & ActivityEntry.entity_id.in_(list(limit) or [""]),
+                           (ActivityEntry.entity_kind == "task") & ActivityEntry.entity_id.in_(list(task_ids) or [""])))
     rows = (await ctx.db.execute(select(ActivityEntry).where(*clauses)
                                  .order_by(ActivityEntry.at.desc()).limit(inp.limit * 3))).scalars().all()
     scope = await _scope_sets(ctx.db, ctx.actor)
     items = [_brief(e, ctx.actor) for e in rows if _record_ok(ctx.actor, scope, e)][:inp.limit]
-    return {"items": items, "count": len(items)}
+    return {"items": items, "count": len(items), "scope_limited": limit is not None}

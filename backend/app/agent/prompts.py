@@ -129,6 +129,13 @@ NEEDED_INPUT_INSTRUCTION = (
     "question naming what you already checked and the smallest missing fact. Do not guess and do not write."
 )
 
+RESUME_INSTRUCTION = (
+    "This mission is being resumed: <work_already_done> is the record of what earlier runs already did. "
+    "Treat it as fact. Do not repeat a step that already succeeded, and do not ask again for an approval "
+    "that is already approved, confirmed, queued, declined or invalidated — report its recorded outcome "
+    "instead. Only do what is still missing to reach the outcome."
+)
+
 DETERMINISTIC_UNAVAILABLE = (
     "The AI Manager is unavailable right now ({reason}). Deterministic operations still work — records, tasks, "
     "reminders, approvals and the recovery queue are unaffected. Nothing was invented for this answer."

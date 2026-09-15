@@ -311,13 +311,23 @@ async def site_activate(ctx: CommandContext, inp: ProfileRefIn) -> dict:
 MANAGED_COMPARE = (("title", "title"), ("price", "price"), ("body", "body"),
                    ("short_description", "short_description"), ("stock_status", "stock_status"),
                    ("visibility", "visibility"))
+# What a rendered public page is trusted to prove (spec §7.3: "old price or availability"). A theme may
+# legitimately reformat a title or truncate a description, so those are verified through the API.
+PUBLIC_COMPARE_FIELDS = ("price", "stock_status")
 
 
-def compare_managed(expected_payload: dict, observed: dict, profile: SiteProfile | None) -> dict:
-    """Which AZKT-owned fields differ from what AZKT last wrote, and which editor-owned fields exist."""
+def compare_managed(expected_payload: dict, observed: dict, profile: SiteProfile | None,
+                    fields: tuple[str, ...] | None = None) -> dict:
+    """Which AZKT-owned fields differ from what AZKT last wrote, and which editor-owned fields exist.
+
+    `fields` narrows the comparison — the public page is only compared on what a rendered page can be
+    trusted to show (price and availability), while the API state is compared on every managed field.
+    """
     fmap = wp_adapter.field_map_for(profile_dict(profile))
     mismatches: list[dict] = []
     for logical, observed_key in MANAGED_COMPARE:
+        if fields is not None and logical not in fields:
+            continue
         target = fmap.get(logical, logical)
         expected = expected_payload.get(target)
         if expected is None:

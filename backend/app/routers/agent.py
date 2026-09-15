@@ -25,7 +25,7 @@ from .. import db as dbmod
 from ..agent import coverage as coverage_mod
 from ..agent import manager as manager_mod
 from ..agent import runtime as rt
-from ..auth.deps import command_context, current_actor
+from ..auth.deps import command_context, current_actor, require_owner
 from ..core.errors import Denied, NotFound
 from ..db import get_db
 from ..domain.actors import Actor
@@ -107,10 +107,13 @@ async def get_thread(role: str, limit: int = Query(50, ge=1, le=200), actor: Act
 
 
 @router.get("/api/agent/coverage")
-async def coverage(actor: Actor = Depends(current_actor)):
-    """The capability map. The owner sees the whole map; anyone else sees it annotated for their own grant."""
-    if actor.kind != "user":
-        raise HTTPException(403, "signed-in access required")
+async def coverage(actor: Actor = Depends(require_owner())):
+    """The owner capability map (spec §10.9, §12.3): every owner-editable command and its Manager tool.
+
+    Owner only. It is the app's whole command surface with its permission keys — the map of what AZKT can
+    be made to do — so it is not shown to an employee or a connector, whose own reachable subset is already
+    visible to them through the tools they are offered.
+    """
     return coverage_mod.for_actor(actor)
 
 

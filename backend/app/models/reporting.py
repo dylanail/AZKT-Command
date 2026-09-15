@@ -28,4 +28,5 @@ class MetricSnapshot(Base, BusinessRow):
     period_kind: Mapped[str | None] = mapped_column(String, nullable=True)  # month|7d|30d|custom
     cohort_hash: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
     restatements: Mapped[list] = mapped_column(JSON, default=list)
+    # operator note on the row: either "invalidated by <event>" or the last failed recompute
     last_error: Mapped[str | None] = mapped_column(String, nullable=True)

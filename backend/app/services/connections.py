@@ -140,6 +140,8 @@ async def overview(db: AsyncSession) -> list[dict]:
 
 def all_clear_possible(conns: list[dict]) -> tuple[bool, list[str]]:
     """Home must not claim all-clear when a required source is stale (spec §2.2, H11)."""
+    # A required source that has never connected is as blocking as a stale one: nothing has been synced, so
+    # "no urgent items found in synced data" would be an all-clear over an empty set.
     stale = [c["label"] for c in conns if c["provider"] in ("gmail_business", "square", "sheets", "drive")
-             and c["freshness"]["state"] in ("warn", "expired", "degraded")]
+             and c["freshness"]["state"] in ("warn", "expired", "degraded", "disconnected")]
     return (len(stale) == 0), stale

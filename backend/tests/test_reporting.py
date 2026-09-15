@@ -506,3 +506,40 @@ async def test_required_cost_categories_are_configurable(db, owner, k01):
         await db.delete(row)
         await db.commit()
     assert (await rep.required_cost_categories(db))[1] == "default"
+
+
+async def test_margin_has_the_same_shape_available_or_not(db, owner):
+    """A caller reading `percent` on an unavailable margin gets an explicit null, not a missing key."""
+    empty = await metrics(db, owner, 2017, 2, 28)
+    m = empty["values"]["gross_margin"]
+    assert m["available"] is False and m["value"] is None and m["percent"] is None
+    assert m["unavailable_reason"]
+    live = (await metrics(db, owner, 2019, 5, 31))["values"]["gross_margin"]
+    assert set(live) >= set(m) and live["available"] is True and live["percent"]
+
+
+async def test_a_snapshot_from_an_older_computation_version_is_still_sanitized_honestly(db, owner, manager, monkeypatch):
+    """The stale path exists so Home answers with an old, labelled number instead of a false zero. It must
+    survive a snapshot whose payload predates the current value layout rather than raising on a missing key."""
+    p = rep.resolve_period("custom", PHOENIX, date(2017, 4, 1), date(2017, 4, 30))
+    thin = {"period": {k: v for k, v in p.items() if not k.startswith("_")}, "currency": USD,
+            "as_of": datetime(2017, 5, 1, tzinfo=timezone.utc).isoformat(), "values": {}, "completeness": {},
+            "contributing_ids": {}, "cohort": {}, "restatements": [], "model_used": False}
+    row = MetricSnapshot(key=rep.snapshot_key(p), period_kind="custom", cohort_hash=rep.cohort_hash(p),
+                         period_from=p["_a"], period_to=p["_b"], timezone=PHOENIX, values=thin,
+                         as_of=datetime(2017, 5, 1, tzinfo=timezone.utc), computation_version=0, stale=True)
+    db.add(row)
+    await db.commit()
+
+    async def boom(*args, **kw):
+        raise RuntimeError("finance read unavailable")
+    monkeypatch.setattr(fq, "sold_cohort", boom)
+    try:
+        for user in (owner, manager):
+            out = await rep.metrics(db, actor_of(user), "custom", date(2017, 4, 1), date(2017, 4, 30), PHOENIX)
+            assert out["stale"] is True and out["served_from"] == "stale_snapshot"
+            assert out["as_of"] == row.as_of.isoformat()
+        assert out["money_hidden"] is True and out["cash_flows"]["money_hidden"] is True
+    finally:
+        await db.delete(row)
+        await db.commit()

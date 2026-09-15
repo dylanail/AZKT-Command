@@ -739,6 +739,12 @@ async def _scan_job(jctx: jobs.JobContext, payload: dict) -> dict:
         res = await dispatch(_system_ctx(jctx.db), "drive.scan", {"full": bool(payload.get("full"))})
     except Blocked as e:
         return {"skipped": e.message}
+    except Unsupported as e:
+        # no credential / no client: setup blocked is a state, not a failing job
+        return {"setup_blocked": str(e)}
+    except Unsupported as e:
+        # no usable Google client (setup blocked): say so, never retry forever and never invent an index
+        return {"setup_blocked": e.message}
     data = res.data or {}
     if data.get("pending_import"):
         await jobs.enqueue(jctx.db, "drive.import_assets", {}, dedupe_key="drive:import")
@@ -754,6 +760,10 @@ async def _import_job(jctx: jobs.JobContext, payload: dict) -> dict:
                               "limit": int(payload.get("limit") or 25)})
     except Blocked as e:
         return {"skipped": e.message}
+    except Unsupported as e:
+        return {"setup_blocked": str(e)}
+    except Unsupported as e:
+        return {"setup_blocked": e.message}
     data = res.data or {}
     return {k: v for k, v in data.items() if k != "items"}
 
@@ -764,6 +774,10 @@ async def drive_scan_sweep(session_factory) -> dict:
         conn = await drive_connection(db)
         if conn is None or conn.status == "disconnected" or not root_id_of(conn):
             return {"skipped": "drive root not selected"}
+        try:
+            adapter(db, conn)          # no reachable client: nothing is queued (setup blocked)
+        except Unsupported as e:
+            return {"setup_blocked": str(e)}
         await jobs.enqueue(db, "drive.scan", {}, dedupe_key="drive:scan")
         await db.commit()
         return {"enqueued": True}
@@ -858,6 +872,11 @@ async def ledger_sync_sweep(session_factory) -> dict:
         m = await active_mapping(db, (conn.config or {}).get("sheet_id"))
         if m is None:
             return {"skipped": "no active ledger mapping"}
+        if _fixture_source() is None:
+            try:
+                sheets_adapter.make_source(db, conn)
+            except Unsupported as e:
+                return {"setup_blocked": str(e)}
         await jobs.enqueue(db, "ledger.sync", {"mapping_id": m.id}, dedupe_key="ledger:sync")
         await db.commit()
         return {"enqueued": True, "mapping_id": m.id}

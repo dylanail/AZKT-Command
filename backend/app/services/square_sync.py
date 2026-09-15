@@ -443,6 +443,20 @@ async def _retry_pending_events(db: AsyncSession, limit: int = 50) -> dict:
     return {"retried": len(rows), "processed": done, "still_pending": still}
 
 
+def _money_parts(value) -> tuple[Decimal | None, str | None]:
+    """Finance serializes money as {"amount": "123.45", "currency": "USD"}; accept a plain value too."""
+    if isinstance(value, dict):
+        raw, currency = value.get("amount"), value.get("currency")
+    else:
+        raw, currency = value, None
+    if raw in (None, ""):
+        return None, currency
+    try:
+        return Decimal(str(raw)), currency
+    except (ArithmeticError, ValueError):
+        return None, currency
+
+
 async def _compare_email_signals(db: AsyncSession, api_payments: list[dict], begin: datetime, end: datetime) -> list[dict]:
     """An email said a payment happened; the authenticated API is the authority. Disagreements are
     visible with evidence and never averaged away (E05/E06)."""
@@ -456,9 +470,13 @@ async def _compare_email_signals(db: AsyncSession, api_payments: list[dict], beg
         if when is not None and not (begin <= when <= end):
             continue
         amt = Decimal(str(c.amount))
-        same_amount = [p for p in api_payments
-                       if p.get("amount") is not None and Decimal(str(p["amount"])) == amt
-                       and (p.get("currency") or "USD") == c.currency]
+        same_amount = []
+        for p in api_payments:
+            value, currency = _money_parts(p.get("amount"))
+            if value is None:
+                continue
+            if value == amt and (currency or p.get("currency") or "USD") == c.currency:
+                same_amount.append(p)
         same_payer = [p for p in api_payments
                       if c.payer_email and (p.get("payer_email") or "").lower() == c.payer_email.lower()]
         if same_amount:
@@ -468,8 +486,10 @@ async def _compare_email_signals(db: AsyncSession, api_payments: list[dict], beg
                     "claimed_by": (c.report_source or {}).get("claimed_by"),
                     "sender": (c.report_source or {}).get("sender"), "subject": (c.report_source or {}).get("subject"),
                     "flags": list(c.report_flags or []),
-                    "api_payments_for_payer": [{"id": p.get("provider_payment_id"), "amount": p.get("amount"),
-                                                "currency": p.get("currency"), "status": p.get("status")}
+                    "api_payments_for_payer": [{"id": p.get("provider_payment_id"),
+                                                "amount": str(_money_parts(p.get("amount"))[0] or ""),
+                                                "currency": _money_parts(p.get("amount"))[1] or p.get("currency"),
+                                                "status": p.get("status")}
                                                for p in same_payer][:5],
                     "window": {"from": _iso(begin), "to": _iso(end)}}
         body = ("The Square API has no payment matching this reported amount in the reconciled window."
@@ -519,8 +539,11 @@ async def reconcile(db: AsyncSession, *, window_hours: int = RECONCILE_WINDOW_HO
             continue
         res = await _upsert(db, payload)
         p = res.get("payment") or {}
-        seen.append({"provider_payment_id": p.get("provider_payment_id"), "amount": p.get("amount"),
-                     "currency": p.get("currency"), "status": p.get("status"), "payer_email": p.get("payer_email")})
+        value, currency = _money_parts(p.get("amount"))
+        seen.append({"provider_payment_id": p.get("provider_payment_id"),
+                     "amount": str(value) if value is not None else None,
+                     "currency": currency or p.get("currency"), "status": p.get("status"),
+                     "payer_email": p.get("payer_email")})
         if res.get("created") or res.get("applied"):
             await _maybe_propose(db, p)
     disagreements = await _compare_email_signals(db, seen, begin, now)

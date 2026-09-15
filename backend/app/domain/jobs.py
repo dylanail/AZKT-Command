@@ -127,20 +127,22 @@ async def run_one(session_factory, j: Job, token: str, worker_id: str) -> None:
             return
         ctx = JobContext(db=db, job=job_row, worker_id=worker_id, lease_token=token)
         try:
+            job_id = job_row.id  # plain value: safe to use after a rollback expires the row
             result = await asyncio.wait_for(handler(ctx, dict(job_row.payload or {})), timeout=settings.MODEL_RUN_TIMEOUT_SECONDS * 4)
-            await db.rollback() if db.in_transaction() and False else None
             # fenced completion: only the lease holder may finish the job
-            res = await db.execute(update(Job).where(Job.id == job_row.id, Job.lease_token == token)
+            res = await db.execute(update(Job).where(Job.id == job_id, Job.lease_token == token)
                                    .values(state="done", finished_at=datetime.now(timezone.utc),
                                            result=(result if isinstance(result, dict) else {}), lease_token=None))
             await db.commit()
             if res.rowcount != 1:
-                log.warning("job %s finished by a stale worker; result discarded", job_row.id)
+                log.warning("job %s finished by a stale worker; result discarded", job_id)
         except Exception as e:  # noqa: BLE001
+            # The rollback expires every loaded instance (touching job_row afterwards would trigger a sync
+            # lazy-load and MissingGreenlet), so the retry bookkeeping uses the captured id/kind only.
             await db.rollback()
             err = f"{type(e).__name__}: {e}\n{traceback.format_exc()[-2000:]}"
             async with session_factory() as db2:
-                row = await db2.get(Job, job_row.id)
+                row = await db2.get(Job, j.id)
                 if row is None or row.lease_token != token:
                     return
                 if row.attempts >= row.max_attempts:
@@ -152,7 +154,7 @@ async def run_one(session_factory, j: Job, token: str, worker_id: str) -> None:
                 row.last_error = err[:4000]
                 row.lease_token = None
                 await db2.commit()
-            log.exception("job %s (%s) failed", job_row.id, job_row.kind)
+            log.exception("job %s (%s) failed", j.id, j.kind)
 
 
 async def run_due(session_factory, worker_id: str, limit: int | None = None) -> int:
