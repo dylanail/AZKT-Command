@@ -267,6 +267,9 @@ async def test_a_non_production_destination_is_blocked_by_the_H08_guard(db, owne
     assert row.state == "failed"
     assert "must not reach a production" in (row.last_error or "")
     assert row.attempt_log[-1]["outcome"] == "failed"
+    # a destination AZKT may not send to is still a client left waiting, so the owner is told
+    assert (await db.execute(select(Notification).where(
+        Notification.group_key == f"external_callback:{c.id}"))).scalars().first() is not None
 
 
 async def test_a_client_with_no_callback_is_polling_only(db, owner, client):

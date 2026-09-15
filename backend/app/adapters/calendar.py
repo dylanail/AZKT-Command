@@ -30,10 +30,10 @@ Contract notes the calendar slice depends on:
 """
 from __future__ import annotations
 
-import logging
 import re
 from datetime import datetime, timedelta, timezone
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import httpx
 
@@ -41,8 +41,6 @@ from ..core.destinations import assert_destination_allowed
 from ..core.errors import ProviderError, Unsupported
 from ..core.ids import sha256_hex
 from ..core.time import PHOENIX, ensure_aware
-
-log = logging.getLogger("azkt.calendar")
 
 API = "https://www.googleapis.com/calendar/v3"
 READ_SCOPE = "https://www.googleapis.com/auth/calendar.readonly"
@@ -121,7 +119,6 @@ def parse_time(field: Any) -> datetime | None:
     try:
         if "T" not in str(raw):
             zone = field.get("timeZone") or "UTC"
-            from zoneinfo import ZoneInfo
             d = datetime.fromisoformat(f"{raw}T00:00:00")
             return d.replace(tzinfo=ZoneInfo(zone)).astimezone(timezone.utc)
         return ensure_aware(datetime.fromisoformat(str(raw).replace("Z", "+00:00"))).astimezone(timezone.utc)

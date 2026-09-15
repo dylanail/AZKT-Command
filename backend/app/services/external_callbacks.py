@@ -351,6 +351,16 @@ def _retry_after(status: int, headers: dict | None = None) -> int | None:
     return int(raw) if raw.isdigit() else 60
 
 
+async def _setup_failure(db: AsyncSession, client: ExternalClient, row: CallbackDelivery, reason: str) -> str:
+    """A destination AZKT cannot legitimately send to. Retrying cannot fix an address or a missing key, so
+    this is final — and it is raised to the owner rather than left quietly in a list nobody opens, because
+    the client it was meant for is now silently waiting on a push that will never come."""
+    _log_attempt(row, outcome="failed", error=reason)
+    _finish(row, "failed", error=reason)
+    await _raise_connection_issue(db, client, row, reason)
+    return "failed"
+
+
 async def _deliver_one(db: AsyncSession, delivery_id: str) -> str:
     row = (await db.execute(select(CallbackDelivery).where(CallbackDelivery.id == delivery_id)
                             .with_for_update())).scalar_one_or_none()
@@ -370,25 +380,23 @@ async def _deliver_one(db: AsyncSession, delivery_id: str) -> str:
         row.url = url
     if not url.startswith("https://"):
         # validated when it was set, checked again because a row may predate that validation
-        _log_attempt(row, outcome="failed", error="destination is not https")
-        return _finish(row, "failed", error="setup_blocked: the callback destination must be an https URL")
+        return await _setup_failure(db, client, row,
+                                    "setup_blocked: the callback destination must be an https URL")
     if not client.callback_secret_enc:
-        _log_attempt(row, outcome="failed", error="no signing secret configured")
-        return _finish(row, "failed",
-                       error="setup_blocked: no signing secret is configured, so this callback cannot be signed")
+        return await _setup_failure(db, client, row, "setup_blocked: no signing secret is configured, so "
+                                                     "this callback cannot be signed")
     try:
         secret = decrypt(client.callback_secret_enc)
     except ValueError:
-        # the message deliberately says nothing about the secret itself
-        _log_attempt(row, outcome="failed", error="the stored signing secret could not be decrypted")
-        return _finish(row, "failed", error="setup_blocked: the stored signing secret could not be read "
-                                            "(encryption key rotated?); set the callback secret again")
+        # the reason deliberately says nothing about the secret itself
+        return await _setup_failure(db, client, row, "setup_blocked: the stored signing secret could not be "
+                                                     "read (encryption key rotated?); set the callback "
+                                                     "secret again")
     try:
         # H08: this transport really delivers, so outside production it may only reach an allowlisted host.
         assert_destination_allowed("callback", url)
     except Blocked as e:
-        _log_attempt(row, outcome="failed", error=e.message)
-        return _finish(row, "failed", error=e.message)
+        return await _setup_failure(db, client, row, e.message)
 
     payload = dict(row.payload or {})
     raw = canonical_body(payload)
