@@ -909,3 +909,33 @@ async def test_the_hourly_scan_leaves_a_healthy_listing_verified(db, owner):
         assert pub.state == "verified" and pub.attempts == attempts_before   # a scan is not a retry
         await db.refresh(profile)
         assert profile.writes_paused is False
+
+
+async def test_a_photo_missing_from_storage_blocks_the_publish_instead_of_publishing_without_it(db, owner):
+    """Railway throws the container filesystem away on every deploy. If photo bytes are gone, the
+    publish must say so on the publication rather than write a product with missing images."""
+    from backend.app.models.assets import Asset
+    from backend.app.services.storage import storage
+    site = wordpress_fake(with_existing=False)
+    await wordpress_connections(db)
+    with install_wordpress(site):
+        await _profile(db, owner)
+        v = await _vehicle(db, owner, photos=1)
+        pkg = (await _build(db, owner, v["id"]))["package"]
+        asset_id = (pkg["media_detail"] or [{}])[0].get("asset_id")
+        asset = await db.get(Asset, asset_id)
+        st = storage()
+        for key in [asset.storage_key] + [d.get("key") for d in (asset.derivatives or {}).values() if isinstance(d, dict)]:
+            if key:
+                st.delete(key)
+        res = await dispatch(ctx_for(db, owner), "listings.publish",
+                             {"package_id": pkg["id"], "channel": "website",
+                              "expected_package_hash": pkg["package_hash"]})
+        a = await db.get(Approval, res.approval_id)
+        await dispatch(ctx_for(db, owner), "approvals.approve",
+                       {"approval_id": a.id, "expected_version": a.approval_version})
+        await run_jobs()
+        pub = await _publication(db, v["id"])
+        assert pub.state == "failed" and pub.error_kind == "unreadable_media"
+        assert "no readable image bytes" in (pub.error or "")
+        assert site.items == {} and site.uploads == []

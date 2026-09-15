@@ -839,8 +839,11 @@ async def upload_package_media(db: AsyncSession, ad, pkg: ListingPackage, prof: 
         return package, report
     site_key = _site_key(profile, ad)
     checksums = [m.get("sha256") for m in media if m.get("sha256")]
-    known = {**await _known_media(db, site_key, checksums), **{k: v for k, v in (pub.media_map or {}).items()}
-             } if pub is not None else await _known_media(db, site_key, checksums)
+    # The per-site map is the general one; this publication's own map wins where they disagree,
+    # because it was proved against this exact listing.
+    known = await _known_media(db, site_key, checksums)
+    if pub is not None:
+        known = {**known, **dict(pub.media_map or {})}
     items: list[dict] = []
     for m in media:
         sha = m.get("sha256")
@@ -1075,8 +1078,11 @@ async def _exec_publish(db: AsyncSession, act: ExternalAction) -> dict:
     ad = await _adapter(db)
     try:
         package, media_report = await upload_package_media(db, ad, pkg, prof, profile, pub)
-    except (ProviderError, Unsupported) as e:
-        kind = wp_adapter.error_kind(e) if isinstance(e, ProviderError) else "unsupported"
+    except (ProviderError, Unsupported, Blocked) as e:
+        # Blocked is the local half of this: an approved photo whose bytes are gone from storage.
+        # Either way the product is never written without its images, and the row says which it was.
+        kind = ("unreadable_media" if isinstance(e, Blocked)
+                else wp_adapter.error_kind(e) if isinstance(e, ProviderError) else "unsupported")
         pub.state = "failed"
         pub.error = f"listing photos could not be uploaded to the site media library: {e}"
         pub.error_kind = kind
