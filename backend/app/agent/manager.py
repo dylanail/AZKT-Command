@@ -264,9 +264,12 @@ async def _issue_report(db, ctx: CommandContext, actor: Actor, text: str, *, con
                                                  "title": f"{c.make or ''} {c.model or ''}".strip()} for c in cands[:5]]},
                 "fast_path": "ask_which_vehicle", "wrote": False}
     title = _verb_title(what)
+    # A retried chat POST (same request_id) must not create a second issue: thread a derived request id so the
+    # command log replays the first write instead of duplicating it.
     res = await tools.execute(ctx, "shop_create_issue", {
         "vehicle_id": v.id, "title": title, "detail": text[:2000], "source_kind": "owner_reported",
-        "create_task": True, "task_title": title, "priority": "normal"})
+        "create_task": True, "task_title": title, "priority": "normal"},
+        request_id=f"{ctx.request_id}:issue_report" if ctx.request_id else None)
     if res.status != "ok":
         return {"text": f"I could not record that on {v.stock_no or v.id[:8]}: {res.error or res.status}.",
                 "status": "blocked", "mission_id": None, "run_id": None, "cursor": 0, "changed": [],

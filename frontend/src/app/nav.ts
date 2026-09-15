@@ -47,11 +47,12 @@ export function navFor(role: Role | string | undefined): NavSet {
   if (isEmployeeRole(role)) {
     // Logistics lives in shipments; mechanics never see them (shipping.read is off for the role).
     const primary = role === "logistics" ? [MY_TASKS, SHIPMENTS, VEHICLES] : [MY_TASKS, VEHICLES];
+    // Employees may talk to the Manager (agents.chat is on for both roles); the screen itself explains when it is off.
     return {
       primary,
       utility: [MORE],
       mobile: primary.length > 3 ? [MY_TASKS, VEHICLES, MORE] : [...primary, MORE],
-      more: role === "logistics" ? [SHIPMENTS] : [],
+      more: role === "logistics" ? [SHIPMENTS, AGENTS] : [AGENTS],
     };
   }
   const isOwner = role === "owner";
@@ -69,7 +70,7 @@ export function routeAllowed(role: Role | string | undefined, pathname: string):
   if (!role) return false;
   if (isEmployeeRole(role)) {
     if (role === "logistics" && /^\/(shipments|contacts)(\/|$)/.test(pathname)) return true;
-    return /^\/(tasks|vehicles|more|approvals)(\/|$)/.test(pathname) || pathname === "/";
+    return /^\/(tasks|vehicles|more|approvals|agents)(\/|$)/.test(pathname) || pathname === "/";
   }
   if (role === "owner") return true;
   // manager and other office roles: everything except owner-only settings sections
