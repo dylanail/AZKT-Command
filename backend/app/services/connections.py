@@ -13,12 +13,18 @@ from ..models.comms import Connection, SyncCursor
 
 # Freshness targets (minutes) per provider; warn after this without a successful sync.
 WARN_AFTER_MIN = {"gmail_business": 15, "gmail_personal": 15, "square": 30, "sheets": 30, "drive": 30,
-                  "wordpress": 90, "woocommerce": 90, "telegram": 60 * 24, "model": 60 * 24, "smtp": 60 * 24}
+                  "wordpress": 90, "woocommerce": 90, "telegram": 60 * 24, "model": 60 * 24, "smtp": 60 * 24,
+                  # calendar sync is event-driven, not polled: a day without a write is normal, so
+                  # freshness only complains once a whole day has passed with no successful call.
+                  "google_calendar": 60 * 24}
 PROVIDER_LABELS = {
     "gmail_business": "Business email (info@azkeitrucks.com)", "gmail_personal": "Personal email (allowlisted senders)",
+    "google_calendar": "Business calendar (info@azkeitrucks.com)",
     "drive": "Importer Drive folder", "sheets": "Ledger sheet", "square": "Square", "telegram": "Telegram",
     "wordpress": "WordPress", "woocommerce": "WooCommerce", "model": "AI model", "smtp": "Reminder email",
-    "sms": "Business SMS", "calendar": "Calendar", "legacy_notion": "Notion mirror (legacy)",
+    # the old "calendar" placeholder is gone: `google_calendar` above is the real, connectable row, and
+    # leaving both would put a "coming in a later stage" line next to a calendar that now works.
+    "sms": "Business SMS", "legacy_notion": "Notion mirror (legacy)",
     "legacy_openclaw": "OpenClaw agents (legacy)",
 }
 

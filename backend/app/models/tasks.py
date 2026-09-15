@@ -61,6 +61,19 @@ class Task(Base, BusinessRow):
     gate_requirement: Mapped[str | None] = mapped_column(String, nullable=True)
     is_suggestion: Mapped[bool] = mapped_column(Boolean, default=False)
     extra: Mapped[dict] = mapped_column(JSON, default=dict)
+    # calendar sync (add-only, spec §5.3 "calendar sync is a separate adapter ... with explicit write
+    # permission"). The event id and the revision that was pushed live on the task itself so a replayed
+    # `task.changed` can tell "already on the calendar at this revision" from "needs a write" without
+    # asking Google, and so a lost write result names the exact event to reconcile.
+    calendar_event_id: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
+    calendar_id: Mapped[str | None] = mapped_column(String, nullable=True)      # which calendar holds it
+    calendar_state: Mapped[str | None] = mapped_column(String, nullable=True)   # synced|cancelled|setup_blocked|failed|unknown|skipped
+    calendar_synced_revision: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    calendar_synced_hash: Mapped[str | None] = mapped_column(String, nullable=True)  # content actually pushed
+    calendar_link: Mapped[str | None] = mapped_column(String, nullable=True)
+    calendar_synced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    calendar_error: Mapped[str | None] = mapped_column(Text, nullable=True)     # the provider's own words
+    calendar_conflicts: Mapped[list] = mapped_column(JSON, default=list)        # overlapping entries, reported not refused
 
 
 class Case(Base, BusinessRow):

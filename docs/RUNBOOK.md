@@ -89,9 +89,11 @@ Pausing shows pending/unknown external actions; resuming revalidates queued appr
 | Square reconciliation | Square token + webhook signature key + notification URL (S07) | Email signals stay "Payment reported — needs confirmation"; manual confirmed payments work |
 | Telegram | Bot token, webhook secret, bot username; owner pairs from Settings (S10) | Email-only reminders |
 | Reminder email | SMTP or Gmail send scope + verified owner address (S10) | Reminders logged, not sent |
+| Calendar events from tasks | Connect `info@azkeitrucks.com` in Settings → Calendar (`calendar.readonly`, plus `calendar.events` to create), then turn on "Put calls and meetings on the calendar" — a separate owner capability (spec §11.2) | Calls/meetings/scheduled follow-ups are marked `setup_blocked` on the task and nothing is written; reminders are unaffected |
 | AI Manager / intake analysis | `ANTHROPIC_API_KEY` + `MODEL_DAILY_BUDGET_USD` (S14) | Deterministic fallbacks: reminders, lists, approvals, intake text splitting |
 | Voice transcription | `TRANSCRIBE_URL` (self-hosted STT) or browser transcript | Audio kept; "transcript needed" with typed entry |
 | External agents | Register a client in Settings → External agents (S17) | `/mcp` and `/api/integrations/v1` reject unknown tokens |
+| Signed callbacks to an external agent | That client's https callback address + signing secret (same screen) | Clients are polling-only: `GET /api/integrations/v1/work/{request_id}?cursor=` |
 | Knowledge embeddings | `EMBEDDINGS_URL` (+ model/token); pgvector on the database is optional | Lexical (pg_trgm) retrieval only; the retrieval check says so |
 | Auction candidate feed | `AUCTION_SOURCE_URL` + key | Candidates are entered by hand or pasted; bids still need exact approval |
 
@@ -108,7 +110,8 @@ Webhook endpoints (all verify before storing anything; a rejected delivery store
 Worker sweeps (registered with `@sweep`, run by `backend/worker.py`; `WORKER_BATCH` bounds parallel jobs):
 `reminders.deliver_due` (15 s), `reminders.reconcile` / `reminders.repair` / `reminders.digest` (5 min),
 `inbox.reconcile_unknown_sends` (5 min), `gmail.fallback_check` and `gmail.watch_renew` (from settings),
-`missions.resume_due` (60 s), `reporting.refresh_metrics` (5 min), `square.reconcile`, `drive.scan`,
+`missions.resume_due` (60 s), `external_callbacks.deliver_due` (15 s), `reporting.refresh_metrics` (5 min),
+`calendar.repair` (5 min), `square.reconcile`, `drive.scan`,
 `ledger.sync`, `listings.reconcile` (15 min), `listings.availability_scan` (60 min). A sweep that finds
 its provider unconfigured reports `setup_blocked` in its job result and does nothing else.
 
@@ -122,10 +125,44 @@ External agents: `POST /mcp` (remote MCP over Streamable HTTP; bearer token from
 once at registration; rotate or revoke from the same screen. `PUBLIC_ORIGIN` must be the deployed origin because the
 MCP server's allowed-host list is derived from it.
 
+## 6b. Outbound signed callbacks to an external agent
+
+Polling is the baseline and always works. Optionally, Settings → External agents → *Set callback* stores one
+**https** address plus a signing secret per client (the secret is encrypted with `ENCRYPTION_KEY` and shown never
+again). AZKT then POSTs the same envelope `GET /work/{request_id}` returns, once per terminal transition of that
+client's work — `work.completed`, `work.failed`, `work.needs_input`. A URL supplied in a prompt or a request body
+is discarded and reported back as `ignored_fields`; the stored address is the only one AZKT will ever call.
+
+| Header | Meaning |
+|---|---|
+| `X-AZKT-Signature` | `v1=<hex>` — HMAC-SHA256 over `<timestamp> + "." + the raw body bytes`, keyed with that client's callback secret |
+| `X-AZKT-Timestamp` | Unix seconds. The receiver must reject anything older than 300 s, or a captured body replays for ever |
+| `X-AZKT-Delivery` | Delivery id, stable across retries of the same delivery — the receiver's idempotency key |
+| `X-AZKT-Attempt` | 1-based attempt number for this delivery |
+| `X-AZKT-Event` / `X-AZKT-Client` | the event name and the client id |
+
+Compare the signature with a constant-time comparison, never `==`, and verify **before** parsing the JSON. The
+full recipe is in the module docstring of `backend/app/services/external_callbacks.py` and is published, live, at
+`GET /api/integrations/v1/openapi-lite` → `callbacks`.
+
+Delivery states are truthful and are listed per client under *Recent callbacks*: `accepted` (a real 2xx),
+`failed` (a permanent 4xx, or five attempts exhausted with backoff 30 s / 2 min / 10 min / 30 min), `unknown`
+(the connection broke **after** the body was sent — it may have arrived, so it is never called delivered and is
+never re-sent), `cancelled` (the owner cleared the destination, or the client was revoked). A `failed` or
+`unknown` delivery raises a grouped **connection issue** in the owner's notification feed and an activity
+exception; the client can still read everything by polling.
+
+Before real work depends on it, use *Recent callbacks → Send a test callback*: one signed POST carrying no
+business data, answered with whatever really happened. Outside `ENV=production` the H08 destination guard applies,
+so a staging deployment can only reach a host listed in `NON_PROD_DESTINATION_ALLOWLIST` — a test callback that
+reports "must not reach a production destination" is that guard working, not a bug.
+
 ## 7. Incident playbook
 
 - **Gmail history cursor invalid** → the worker starts a bounded resync of the approved scope; Inbox shows the coverage gap until catch-up completes. Do not mark all-clear manually.
 - **Result unknown on a send/publish** → open the approval; reconcile from the provider (message id / product id) before any retry. Retry reuses the same logical action.
+- **Calendar entry stuck at "Result unknown"** → Settings → Calendar shows it. The event id is derived from the task id, so the next attempt (or `calendar.repair`, every 5 min) looks that exact entry up and patches it; it never inserts a second one. "Try again" only re-queues the same durable job.
+- **External agent callback failing** → Settings → External agents → *Recent callbacks*: read the per-attempt log. A permanent 4xx means the address or its handler changed — fix it, then *Send a test callback*. `unknown` means AZKT does not know whether the body arrived: ask the receiving agent (it has the `X-AZKT-Delivery` id) instead of forcing a resend. Nothing is lost either way; the client can poll `GET /api/integrations/v1/work/{request_id}`.
 - **Telegram bot blocked/token rotated** → Settings → Connections → Telegram: update token, re-set webhook, owner re-pairs. Email fallback carries reminders meanwhile.
 - **Budget cap reached** → discretionary model work stops; reminders/ingestion/approvals continue. Raise the cap in variables and redeploy the worker.
 - **Access removal** → Settings → Team → Disable: the person's sessions and queued authorizations are invalidated immediately.

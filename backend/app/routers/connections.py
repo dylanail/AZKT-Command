@@ -45,6 +45,10 @@ async def google_start(provider: str, request: Request, actor: Actor = Depends(r
         extra += google_oauth.SCOPES["gmail_business_send"]
     if provider == "gmail_business" and body.get("enable_modify"):
         extra += google_oauth.SCOPES["gmail_business_modify"]
+    if provider == "google_calendar" and body.get("enable_write"):
+        # asking for the write scope is not the same as switching writes on: the owner capability in
+        # Settings → Calendar still decides whether AZKT may create an event (spec §11.2).
+        extra += google_oauth.SCOPES["google_calendar_write"]
     conn = await conn_svc.get(db, provider, create=True)
     if provider == "gmail_personal" and body.get("expected_identity"):
         conn.config = {**(conn.config or {}), "expected_identity": body["expected_identity"]}
@@ -77,7 +81,7 @@ async def disconnect(provider: str, actor: Actor = Depends(require("connections"
     conn = await conn_svc.get(db, provider)
     if conn is None:
         raise NotFound("not connected")
-    if provider in ("gmail_business", "gmail_personal", "drive", "sheets"):
+    if provider in ("gmail_business", "gmail_personal", "drive", "sheets", "google_calendar"):
         await google_oauth.revoke(db, conn)
     else:
         conn.secret_enc = None

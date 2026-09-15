@@ -2,8 +2,9 @@
    Reads:  GET /api/settings/external-clients          registered clients, connect URLs, scope list, MCP tools
            GET /api/settings/external-clients/health    live state, in-flight missions, request totals
            GET /api/settings/external-clients/{id}/requests
+           GET /api/settings/external-clients/{id}/callbacks   signed callback deliveries and every attempt
    Writes: POST /api/settings/external-clients          register — the key is shown exactly once
-           POST /api/settings/external-clients/{id}/rotate | revoke | set-callback
+           POST /api/settings/external-clients/{id}/rotate | revoke | set-callback | test-callback
    A client's effective access is your rights ∩ its scopes ∩ its record scope; the server decides, always. */
 import { useMemo, useState } from "react";
 import { api } from "../../../lib/api";
@@ -12,12 +13,26 @@ import { useCommand } from "../../../lib/useCommand";
 import { useQuery } from "../../../lib/useQuery";
 import { Button, Chip, EmptyState, ErrorState, Expander, GlassPanel, Loading, Menu, Notice, When, useToast } from "../../../ui";
 import {
-  BASE, CallbackDialog, RegisterDialog, RequestsDialog, RevokeDialog, TRANSPORT_LABELS,
-  clientState, recordScopeSummary, scopeLabel,
+  BASE, CALLBACK_STATE_LABELS, CallbackDialog, CallbacksDialog, RegisterDialog, RequestsDialog, RevokeDialog,
+  TRANSPORT_LABELS, callbackStateTone, clientState, recordScopeSummary, scopeLabel,
   type ClientsResp, type ExternalClient, type HealthResp, type RegisterResult,
 } from "./ExternalAgentsParts";
 
-type DialogKind = "register" | "callback" | "revoke" | "requests";
+type DialogKind = "register" | "callback" | "revoke" | "requests" | "callbacks";
+
+/* How this client hears that work finished. "Address saved, no signing secret" is not the same as "on":
+   AZKT never pushes an unsigned body, so that client is still polling-only and must be told so. */
+function callbackLine(c: ExternalClient) {
+  if (!c.callback_configured) return { text: "polling only", tone: null as null | "ok" | "risk" | "blocked" | "wait", detail: "" };
+  if (!c.callback_signing_configured) return { text: "callback needs a signing secret", tone: "risk" as const, detail: "" };
+  const h = c.callbacks;
+  if (!h || !h.last_state) return { text: "callback set", tone: "ok" as const, detail: "" };
+  return {
+    text: `callback ${CALLBACK_STATE_LABELS[h.last_state]?.toLowerCase() || h.last_state}`,
+    tone: callbackStateTone(h.last_state),
+    detail: h.failed ? ` · ${h.failed} needing attention` : "",
+  };
+}
 
 function CopyLine({ label, value }: { label: string; value: string }) {
   const { toast } = useToast();
@@ -158,10 +173,18 @@ export function ExternalAgentsSection() {
                     {typeof c.in_flight_missions === "number" ? ` · ${c.in_flight_missions} in flight` : ""}
                     {typeof c.requests_total === "number" ? ` · ${c.requests_total} requests` : ""}
                   </div>
+                  <div className="set-row__meta row-wrap" style={{ gap: 6 }}>
+                    {(() => {
+                      const cb = callbackLine(c);
+                      return cb.tone
+                        ? <Chip size="sm" tone={cb.tone}>{cb.text}{cb.detail}</Chip>
+                        : <span className="fs13 t4">{cb.text}</span>;
+                    })()}
+                    {c.callbacks?.last_error ? <span className="fs12 t4 truncate" title={c.callbacks.last_error}>{c.callbacks.last_error}</span> : null}
+                  </div>
                   <div className="set-row__meta">
                     {`Limits: ${c.quota?.per_minute ?? "—"}/min · ${c.quota?.concurrent ?? "—"} at once · ${c.quota?.per_day ?? "—"}/day`}
                     {c.expires_at ? <> · stops <When iso={c.expires_at} format="date" /></> : " · no end date"}
-                    {c.callback_configured ? " · callback set" : ""}
                     {c.notes ? ` · ${c.notes}` : ""}
                   </div>
                 </div>
@@ -182,6 +205,7 @@ export function ExternalAgentsSection() {
                     trigger={<Button size="md" variant="glass">More</Button>}
                     items={[
                       { label: "Recent requests", onSelect: () => setDialog({ kind: "requests", client: c }) },
+                      { label: "Recent callbacks", onSelect: () => setDialog({ kind: "callbacks", client: c }) },
                       { label: c.callback_configured ? "Change callback" : "Set callback", onSelect: () => setDialog({ kind: "callback", client: c }) },
                       {
                         label: "Revoke access",
@@ -228,6 +252,11 @@ export function ExternalAgentsSection() {
                 A dropped connection is not a second command: the client repeats its <code>request_key</code> and gets the same
                 answer back. Over its limit it receives 429 with a wait time.
               </div>
+              <div>
+                Clients read progress with <code>GET /work/&#123;request_id&#125;?cursor=</code>. If you set a callback address for
+                one, AZKT also posts that same result there once, signed, when the work finishes — only ever to the address you
+                saved, never to one supplied in a request.
+              </div>
             </div>
           </Expander>
         </GlassPanel>
@@ -244,6 +273,7 @@ export function ExternalAgentsSection() {
         }}
       />
       <CallbackDialog open={dialog?.kind === "callback"} client={dialog?.client || null} onClose={() => setDialog(null)} onSaved={reload} />
+      <CallbacksDialog open={dialog?.kind === "callbacks"} client={dialog?.client || null} onClose={() => { setDialog(null); reload(); }} />
       <RevokeDialog open={dialog?.kind === "revoke"} client={dialog?.client || null} onClose={() => setDialog(null)} onRevoked={reload} />
       <RequestsDialog open={dialog?.kind === "requests"} client={dialog?.client || null} onClose={() => setDialog(null)} />
     </div>

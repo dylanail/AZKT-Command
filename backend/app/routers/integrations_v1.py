@@ -87,15 +87,23 @@ async def ask(request: Request, payload: dict = Body(default={}), c: Caller = De
     if not isinstance(entity_refs, list) or not isinstance(asset_ids, list):
         raise ValidationFailed("entity_refs and asset_ids must be lists")
     # A callback/file URL supplied inside a request is ignored by design (spec §10.8): destinations are
-    # owner-configured only. We record that it was seen so the owner can audit the attempt.
+    # owner-configured only. Signed callbacks exist now, which makes this stricter rather than looser — the
+    # only address AZKT will ever POST to is the one stored on the client by the owner. We record that a URL
+    # was seen so the owner can audit the attempt.
     ignored = [k for k in ("callback_url", "webhook_url", "file_url", "fetch_url") if payload.get(k)]
     env, accepted = await _guard(ec.ask(c.db, c.actor, c.client, message=message, request_key=request_key,
                                         entity_refs=entity_refs, asset_ids=asset_ids,
                                         conversation_id=payload.get("conversation_id"), channel="http"))
-    body = {**env, "accepted": accepted}
+    from ..services import external_callbacks as cb
+    body = {**env, "accepted": accepted,
+            # Say plainly how this client will learn the answer, so nobody builds on a callback that is not on.
+            "delivery": ("signed callback to the owner-configured destination when this reaches a terminal "
+                         "state, plus polling" if cb.callback_configured(c.client)
+                         else "polling: GET /api/integrations/v1/work/{request_id}?cursor=")}
     if ignored:
         body["ignored_fields"] = {k: "AZKT never uses a destination or file URL supplied in a request; the owner "
-                                     "configures callbacks in Settings" for k in ignored}
+                                     "configures callbacks in Settings, and a signed callback is only ever sent "
+                                     "to that stored address" for k in ignored}
     from fastapi.responses import JSONResponse
     return JSONResponse(status_code=202 if accepted else 200, content=_jsonable(body))
 
