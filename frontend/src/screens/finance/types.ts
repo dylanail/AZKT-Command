@@ -293,10 +293,20 @@ export const LEDGER_ROW_STATUS_LABELS: Record<string, string> = {
   new: "New",
   matched: "Matched",
   ambiguous: "Ambiguous",
-  changed: "Changed since import",
+  changed: "Value changed",
+  moved: "Moved row",
+  missing: "Gone from the sheet",
   imported: "Imported",
   ignored: "Ignored",
 };
+
+export function ledgerRowTone(status: string): Tone {
+  if (status === "matched") return "ok";
+  if (status === "ambiguous" || status === "missing") return "risk";
+  if (status === "changed") return "wait";
+  if (status === "moved") return "soft";
+  return "amber";
+}
 
 export const LEDGER_MAPPING_STATUS_LABELS: Record<string, string> = {
   draft: "Draft",

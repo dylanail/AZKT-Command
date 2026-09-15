@@ -186,7 +186,7 @@ def check_record_scope(actor: Actor, records: list[tuple[str, str]], assigned_ve
             for kind, rid in records:
                 if kind == "vehicle" and rid not in limit:
                     reasons.append(f"vehicle {rid} outside client record scope")
-    if actor.kind in ("user", "agent") and actor.scope == "assigned":
+    if actor.kind in ("user", "agent") and (actor.scope == "assigned" or not actor.perms.get("vehicles.all", False)):
         for kind, rid in records:
             if kind == "vehicle" and rid not in (assigned_vehicle_ids or set()):
                 reasons.append(f"vehicle {rid} not assigned to you")

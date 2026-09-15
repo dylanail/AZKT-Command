@@ -66,7 +66,8 @@ def redact_for(d: dict, actor) -> dict:
         src["excerpt_hidden"] = True
         spec["source"] = src
         out["spec"] = spec
-    out["source_ref"] = None
+    if "source_ref" in out:
+        out["source_ref"] = None
     for key in ("versions", "current_version"):
         if isinstance(out.get(key), list):
             out[key] = [redact_for(v, actor) for v in out[key]]

@@ -144,7 +144,10 @@ def spec_for(name: str) -> CommandSpec:
 
 
 async def _assigned_sets(db, actor: Actor) -> tuple[set[str], set[str]]:
-    if actor.scope != "assigned" or not actor.user_id:
+    """Vehicles/tasks an assigned-scope person (or anyone without vehicles.all) may write to —
+    the same rule as access.visible_vehicle_ids on the read side."""
+    limited = actor.scope == "assigned" or not actor.perms.get("vehicles.all", False)
+    if actor.kind not in ("user", "agent") or not limited or not actor.user_id:
         return set(), set()
     from ..models.tasks import Task
     rows = (await db.execute(select(Task.id, Task.vehicle_id).where(Task.owner_user_id == actor.user_id))).all()

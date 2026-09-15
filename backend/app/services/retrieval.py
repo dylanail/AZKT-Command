@@ -135,7 +135,7 @@ def chunk_clauses(acl: dict) -> list:
         clauses.append(CorpusChunk.vehicle_id.is_not(None))
         clauses.append(CorpusChunk.contact_id.is_(None))
         clauses.append(or_(CorpusChunk.kind.is_(None), CorpusChunk.kind != "exception"))
-    elif acl["contact_ids"] is not None:
+    elif acl.get("contact_ids") is not None:
         # an external client with read:contacts still only reaches the customers inside its record scope
         ids = acl["contact_ids"]
         clauses.append(or_(CorpusChunk.contact_id.is_(None), CorpusChunk.contact_id.in_(ids)) if ids
@@ -516,7 +516,7 @@ async def retrieve(db: AsyncSession, actor: Actor, query: str, *, contact_id: st
     acl = await acl_for(db, actor)
     res = RetrievalResult(query=query, as_of=now.isoformat())
     res.acl = {k: acl[k] for k in ("is_owner", "costs", "finance_status", "contacts", "messages", "assigned_only", "external")}
-    res.acl["record_scoped_contacts"] = acl["contact_ids"] is not None
+    res.acl["record_scoped_contacts"] = acl.get("contact_ids") is not None
     # (a) records first
     if vehicle_id and acl["vehicle_ids"] is not None and vehicle_id not in acl["vehicle_ids"]:
         vehicle_id = None  # outside the actor's record scope: not resolved, not mentioned
