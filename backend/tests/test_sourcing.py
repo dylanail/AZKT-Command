@@ -489,6 +489,71 @@ async def test_G05_won_lost_replay_idempotent_and_manual_purchase_never_invents_
                                                                                             "evidence": {"source_ref": "invoice-44"}})
 
 
+# ── owner-only decision matrix (spec §11.1/§11.2) ───────────────────────────
+async def test_owner_only_decisions_denied_for_manager_mechanic_agent_and_connector(db, owner):
+    """Deposit terms, purchase linking and bid placement/result are the owner's decisions: nobody else decides them,
+    and an agent acting for the owner only ever prepares an exact approval."""
+    from backend.app.domain.actors import Actor
+    from backend.app.domain.commands import REGISTRY
+    from backend.app.domain.policy import effective_perms
+    from backend.tests.conftest import make_user
+
+    contact = await make_contact(db, "Otto Owneronly")
+    r = await active_request(db, owner, contact, [MUST_MANUAL, MUST_AC], title="Otto")
+    (c,) = await ingest(db, owner, raw_candidate(transmission="manual", ac=True, year=2019, mileage_km=40000))
+    await match_for(db, owner, r, c)
+    await complete_translation(db, owner, c)
+    b, appr = await pending_bid(db, owner, c, r)
+    await approve(db, owner, appr.id)
+    await db.refresh(b)
+    assert b.status == "approved"
+
+    payloads = {
+        "import_requests.set_deposit_rule": {"request_id": r.id, "amount": "1500", "currency": "USD"},
+        "import_requests.record_purchase": {"request_id": r.id, "vehicle": {"make": "Daihatsu", "model": "Hijet"},
+                                            "evidence": {"source_ref": "invoice-matrix"}},
+        "bids.record_submitted": {"bid_id": b.id, "evidence": {"source_ref": "exporter-matrix"}},
+        "bids.record_result": {"bid_id": b.id, "result": "lost", "evidence": {"source_ref": "exporter-matrix"}},
+    }
+    manager, mechanic = await _manager(db), await make_user(db, f"marco{uid()}", "mechanic")
+    connector = Actor(kind="external", user_id=owner.id, role="owner", scope="all", perms=effective_perms("owner", {}),
+                      client_id="cli-matrix", client_name="Connector", client_scopes=["write:requests", "read:requests"])
+    others = {"manager": actor_of(manager), "mechanic": actor_of(mechanic), "agent(manager)": actor_of(manager, "agent"),
+              "external": connector}
+    for name, payload in payloads.items():
+        assert REGISTRY[name].action_class == "owner_only", name
+        for label, actor in others.items():
+            with pytest.raises(Denied) as e:
+                await dispatch(CommandContext(db=db, actor=actor, correlation_id="test"), name, payload)
+            reasons = e.value.detail["decision"]["reasons"]
+            # the mechanic never holds requests.write; everyone else is refused by the owner-only gate itself
+            expected = "missing permission requests.write" if label == "mechanic" else "owner-only action"
+            assert expected in reasons, (name, label, reasons)
+        # the AI Manager acting for the owner does not decide either: it prepares the exact approval
+        res = await dispatch(ctx_for(db, owner, "agent"), name, payload)
+        assert res.status == "needs_review" and res.approval_id, name
+    # nothing was decided by the attempts
+    await db.refresh(r)
+    await db.refresh(b)
+    assert r.deposit_rule["amount"] == "1000.00" and r.purchased_vehicle_id is None and b.status == "approved"
+
+
+# ── translation request revalidation (spec §11.4) ───────────────────────────
+async def test_translation_request_revalidated_before_it_leaves(db, owner):
+    contact = await make_contact(db, "Nora Notlot")
+    r = await active_request(db, owner, contact, [MUST_MANUAL, MUST_AC], title="Nora")
+    (c,) = await ingest(db, owner, raw_candidate(transmission="manual", ac=True, year=2019, mileage_km=40000))
+    await match_for(db, owner, r, c)
+    res = await dispatch(ctx_for(db, owner), "translations.request", {"candidate_id": c.id})
+    assert res.status == "needs_review"
+    # the lot is decided (won by another buyer / withdrawn) before the owner reaches the approval
+    c.status = "lost"
+    await db.commit()
+    out = await approve(db, owner, res.approval_id)
+    assert out["executed"] is False and "already decided" in out["approval"]["invalidated_reason"]
+    assert (await db.execute(select(Translation).where(Translation.candidate_id == c.id))).scalars().all() == []
+
+
 # ── API surface ─────────────────────────────────────────────────────────────
 async def test_import_request_and_candidate_routes(client, db, owner):
     contact = await make_contact(db, "Ivy Interface")

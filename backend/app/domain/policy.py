@@ -168,6 +168,10 @@ async def _find_standing_permission(db, actor: Actor, spec, payload) -> tuple[Pe
         if allowed and any(r not in allowed for r in recs):
             reasons.append("record outside standing permission")
             continue
+        shared = info.get("fields") or []
+        if p.fields and any(f not in p.fields for f in shared):
+            reasons.append("data shared outside standing permission fields")
+            continue
         return p, reasons
     return None, reasons
 

@@ -254,7 +254,9 @@ async def _execute_external_action(jctx: jobs.JobContext, payload: dict) -> dict
         return {"failed": act.error}
     try:
         receipt = await fn(db, act)
-        outcome = "confirmed"
+        # An executor that could only hand the work to a person (no adapter) reports sent=False /
+        # handed_off=True; keep that visibly distinct from a provider-confirmed effect.
+        outcome = "handed_off" if (receipt.get("handed_off") or receipt.get("sent") is False) else "confirmed"
     except UnknownResult as e:
         receipt = {"error": str(e), "provider_ref": e.provider_ref}
         outcome = "unknown"
@@ -270,13 +272,13 @@ async def _execute_external_action(jctx: jobs.JobContext, payload: dict) -> dict
         return {"stale": True}
     if act.approval_id:
         a = await db.get(Approval, act.approval_id)
-        a.status = {"confirmed": "confirmed", "failed": "failed", "unknown": "result_unknown"}[outcome]
+        a.status = {"confirmed": "confirmed", "handed_off": "confirmed", "failed": "failed", "unknown": "result_unknown"}[outcome]
         a.receipt = receipt
     from ..models.runtime import ActivityEntry, Event
     db.add(ActivityEntry(at=now, actor=act.actor or {"kind": "system"}, what=f"External action {outcome}: {act.command_name}",
                          entity_kind=act.entity_kind, entity_id=act.entity_id, kind="automation", state=outcome,
                          receipt=receipt, correlation_id=act.correlation_id, mission_id=act.mission_id,
-                         exception=(outcome != "confirmed"), details={"external_action_id": act.id}))
+                         exception=(outcome not in ("confirmed", "handed_off")), details={"external_action_id": act.id}))
     db.add(Event(type=f"external_action.{outcome}", aggregate_type=act.entity_kind, aggregate_id=act.entity_id,
                  payload={"external_action_id": act.id, "command": act.command_name, "receipt": receipt},
                  correlation_id=act.correlation_id, happened_at=now, actor=act.actor or {}))

@@ -181,7 +181,9 @@ def summarize(outcomes: list[dict]) -> dict:
 def rank(matches: list[dict]) -> list[dict]:
     """Order match summaries: never a mandatory-fail; unknowns after fully known; then score desc."""
     eligible = [m for m in matches if not m.get("mandatory_fail")]
-    return sorted(eligible, key=lambda m: (m.get("mandatory_unknown", False), -(m.get("score") or -1)))
+    # a recorded score of 0 is a real score and ranks above "no score recorded" (which stays last)
+    return sorted(eligible, key=lambda m: (m.get("mandatory_unknown", False),
+                                           -(m["score"] if m.get("score") is not None else -1)))
 
 
 def tiers(requirements: list[dict]) -> dict:

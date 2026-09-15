@@ -1208,9 +1208,20 @@ def _translation_summary(p: TranslationRequestIn) -> str:
     return f"Request auction-sheet translation for candidate {p.candidate_id[:8]}"
 
 
+async def translation_request_revalidate(ctx: CommandContext, inp: TranslationRequestIn, approval) -> list[str]:
+    """Immediately before execution (spec §11.4): the lot the owner reviewed must still be an open auction lot.
+    A candidate that was won/lost/withdrawn in the meantime never produces a new exporter request."""
+    c = (await ctx.db.execute(select(Candidate).where(Candidate.id == inp.candidate_id))).scalar_one_or_none()
+    if c is None:
+        return ["candidate no longer exists"]
+    if c.status not in ("discovered", "active"):
+        return [f"candidate is {c.status}; the lot is already decided"]
+    return []
+
+
 @command("translations.request", input=TranslationRequestIn, perm="requests.write", action_class="consequential",
          approval_kind="translation_request", records=lambda p: [("candidate", p.candidate_id)],
-         summary=_translation_summary, limits=lambda p: {"records": [p.candidate_id]},
+         summary=_translation_summary, limits=lambda p: {"records": [p.candidate_id]}, revalidate=translation_request_revalidate,
          consequence=lambda p: {"scope": "exporter translation request", "targets": {"channel": "teams_or_manual"}, "moves_money": False},
          description="Ask the exporter to translate the auction sheet. Exact approval initially; one request per candidate per "
                      "revision even when several requests match. Persists a Teams intent when a route is configured, otherwise a "
@@ -1688,7 +1699,8 @@ async def bids_submit_for_approval(ctx: CommandContext, inp: BidRefIn) -> dict:
         raise Blocked(f"bid is {b.status}", bid_status=b.status)
     reasons = await bid_gate(ctx, b)
     if reasons:
-        ctx.record("Bid blocked: " + "; ".join(reasons), entity_kind="bid", entity_id=b.id, kind="approval", state="blocked", exception=True)
+        # no activity row here: raising rolls the transaction back, so a record written now would either vanish or
+        # (in a caller that swallows the error and commits) persist by accident. The reasons travel in the decision.
         raise Blocked("bid cannot be submitted for approval", reasons=reasons, decision="Blocked")
     res = await dispatch(ctx.child(), "bids.submit", {"bid_id": b.id, "packet_hash": b.packet_hash}, commit=False)
     if res.status == "needs_review":
@@ -1899,6 +1911,11 @@ async def bids_record_result(ctx: CommandContext, inp: BidResultIn) -> dict:
         vehicle_id = vehicle.id
         if r.purchased_vehicle_id and r.purchased_vehicle_id != vehicle.id:
             raise Conflict("import request already has a different purchased vehicle", purchased_vehicle_id=r.purchased_vehicle_id)
+        other = (await ctx.db.execute(select(ImportRequest).where(ImportRequest.purchased_vehicle_id == vehicle.id,
+                                                                  ImportRequest.id != r.id))).scalar_one_or_none()
+        if other is not None:
+            # invariant 6: one purchased vehicle per request and one request per purchased vehicle
+            raise Conflict("that vehicle is already the purchase of another import request", import_request_id=other.id)
         evidence = {**inp.evidence, "bid_id": b.id, "manual": False, "recorded_by": ctx.actor.user_id, "recorded_at": ctx.now.isoformat()}
         r.purchased_vehicle_id, r.purchase_evidence = vehicle.id, evidence
         r.purchased_at = ensure_aware(_dt(inp.evidence.get("at") or inp.evidence.get("purchased_at")))  # unknown stays unknown

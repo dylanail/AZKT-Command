@@ -182,7 +182,7 @@ class ExternalAction(Base, BusinessRow):
     payload: Mapped[dict] = mapped_column(JSON, default=dict)
     approval_id: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
     permission_id: Mapped[str | None] = mapped_column(String, nullable=True)
-    state: Mapped[str] = mapped_column(String, default="intent", index=True)  # intent|claimed|executing|confirmed|failed|unknown|cancelled|reconciled
+    state: Mapped[str] = mapped_column(String, default="intent", index=True)  # intent|claimed|executing|confirmed|handed_off|failed|unknown|cancelled|reconciled
     lease_token: Mapped[str | None] = mapped_column(String, nullable=True)
     lease_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     fencing_token: Mapped[int] = mapped_column(Integer, default=0)

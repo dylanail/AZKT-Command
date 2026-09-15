@@ -252,7 +252,7 @@ async def test_G07_case_waits_across_worker_restart_and_ambiguous_reply_clarifie
     await db.refresh(case)
     act = await db.get(ExternalAction, q.request_action_id)
     await db.refresh(act)
-    assert act.state == "confirmed" and act.receipt["sent"] is False and act.receipt["state"] == "manual_send_required"
+    assert act.state == "handed_off" and act.receipt["sent"] is False and act.receipt["state"] == "manual_send_required"
     send_task = await db.get(Task, act.receipt["task_id"])
     assert send_task is not None and v.title in send_task.instructions and MONTWAY in send_task.notes
     assert q.status == "requested" and q.next_check_at is not None and case.status == "waiting" and case.next_check_at is not None
@@ -372,7 +372,7 @@ async def test_shipping_routes_and_money_visibility(client, db, owner):
     body = res.json()
     assert body["quote"]["amount"] == "1150.00" and body["decisions"] == {"forwarded": False, "booked": False,
                                                                            "note": "Forwarding and booking are separate approvals; neither authorizes the other"}
-    assert body["actions"]["request"]["state"] in ("intent", "confirmed") and body["case"]["status"] == "open"
+    assert body["actions"]["request"]["state"] in ("intent", "confirmed", "handed_off") and body["case"]["status"] == "open"
     res = await client.post("/api/shipping/quotes/start", json={"vehicle_id": v.id, "destination": "Mesa, AZ", "service": "open"})
     assert res.status_code == 200 and res.json()["status"] == "ok"
     res = await client.post(f"/api/shipments/{s['id']}/record-milestone", json={"kind": "discharge", "status": "planned"})
