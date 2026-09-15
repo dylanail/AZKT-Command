@@ -17,6 +17,7 @@ from ..models.legacy import SyncState
 from ..models.notify import ScheduledDelivery
 from ..models.runtime import Event, ExternalAction, Job
 from ..services import connections as conn_svc
+from ..services import health as health_svc
 
 router = APIRouter(prefix="/api/health", tags=["health"])
 
@@ -49,7 +50,9 @@ async def health(actor: Actor = Depends(current_actor), db: AsyncSession = Depen
         "reminders": {"overdue_deliveries": int(late or 0)},
         "connections": conns,
         "model": await model_adapter.budget_state(db) if actor.perms.get("settings") else {"available": model_adapter.available()},
-        "storage": {"backend": settings.STORAGE_BACKEND},
+        "storage": health_svc.storage_state(),
     }
-    out["ok"] = worker_ok and int(unknown or 0) == 0
+    # Ephemeral photo storage is not an outage, but it is a real fault: the files an approved listing
+    # needs are thrown away on the next deploy, and the failure only shows up at publish time.
+    out["ok"] = worker_ok and int(unknown or 0) == 0 and out["storage"].get("durable") is not False
     return out

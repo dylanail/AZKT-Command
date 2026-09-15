@@ -40,6 +40,16 @@ one bucket or volume. `railway.json` runs `scripts/migrate.sh` before each web d
 variable from `.env.example` per environment; staging and production must have separate
 databases, Telegram bots, Square environments, WordPress targets and reminder recipients (H08).
 
+Two things are easy to skip and both fail quietly:
+
+* **Durable file storage.** Railway replaces the container filesystem on every deploy, so
+  `STORAGE_BACKEND=local` with no mounted volume loses every uploaded photo. It surfaces later as a
+  listing that cannot be published because its photos have no bytes. Use a bucket (`STORAGE_BACKEND=s3`
+  + `S3_*`) or a volume with `DATA_DIR` inside its mount, on **both** services. `GET /api/health`
+  reports `storage.durable: false` and is not "ok" when this is wrong.
+* **The worker service.** Without it no sweep runs: no reminder delivery, no provider reconciliation,
+  and no hourly website scan.
+
 Rollback: redeploy the previous image. Migrations are backward compatible for queued work; if a
 migration must be reverted, run `PYTHONPATH=. alembic -c backend/alembic.ini downgrade -1` on the
 previous image, then redeploy.
@@ -75,7 +85,7 @@ Pausing shows pending/unknown external actions; resuming revalidates queued appr
 | Personal Sebastian/port mail | Connect personal Google account + explicit sender/thread allowlist (S02) | No personal ingestion |
 | Ledger import | Connect Sheets, choose sheet/tab, map columns, preview, activate (S03) | Costs entered manually or from emails only |
 | Importer photos | Connect Drive, choose `Dylan Nail Shipments` folder id (S04) | Photos via app/Telegram intake only |
-| Website publication | WP/Woo base URL + app password / consumer keys, discovery, staging preview (S05/S06) | Listing packages prepared locally; publication "unsupported" |
+| Website publication | WP/Woo base URL + app password / consumer keys, discovery, staging preview (S05/S06). The application password also has to allow **media uploads**: listing photos are uploaded into the site's media library and referenced by id, because the site cannot fetch an AZKT asset URL. | Listing packages prepared locally; publication "unsupported" |
 | Square reconciliation | Square token + webhook signature key + notification URL (S07) | Email signals stay "Payment reported — needs confirmation"; manual confirmed payments work |
 | Telegram | Bot token, webhook secret, bot username; owner pairs from Settings (S10) | Email-only reminders |
 | Reminder email | SMTP or Gmail send scope + verified owner address (S10) | Reminders logged, not sent |
@@ -99,8 +109,13 @@ Worker sweeps (registered with `@sweep`, run by `backend/worker.py`; `WORKER_BAT
 `reminders.deliver_due` (15 s), `reminders.reconcile` / `reminders.repair` / `reminders.digest` (5 min),
 `inbox.reconcile_unknown_sends` (5 min), `gmail.fallback_check` and `gmail.watch_renew` (from settings),
 `missions.resume_due` (60 s), `reporting.refresh_metrics` (5 min), `square.reconcile`, `drive.scan`,
-`ledger.sync`, `listings.reconcile` (15 min). A sweep that finds its provider unconfigured reports
-`setup_blocked` in its job result and does nothing else.
+`ledger.sync`, `listings.reconcile` (15 min), `listings.availability_scan` (60 min). A sweep that finds
+its provider unconfigured reports `setup_blocked` in its job result and does nothing else.
+
+`listings.availability_scan` is the routine pass over everything currently live on the website. Post-publish
+verification stops once a listing settles, so without the scan a price or stock change made in wp-admin would
+never be noticed. The scan re-reads each live publication and compares it with what AZKT last wrote; a changed
+AZKT-owned field pauses website writes as drift, exactly as it does right after a publish.
 
 External agents: `POST /mcp` (remote MCP over Streamable HTTP; bearer token from Settings → External agents) and
 `/api/integrations/v1/*` (the HTTP twin; `GET /api/integrations/v1/openapi-lite` documents it). Tokens are shown
