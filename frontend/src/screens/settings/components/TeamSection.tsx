@@ -9,7 +9,7 @@ import { useQuery } from "../../../lib/useQuery";
 import { useCommand } from "../../../lib/useCommand";
 import { useIsMobile } from "../../../lib/viewport";
 import { ROLE_LABELS, whyNot, type Role } from "../../../lib/perms";
-import { Avatar, Button, EmptyState, ErrorState, GlassPanel, HealthLabel, ListGroup, ListRow, Loading, PageHeader, Section, Table, Tr, When } from "../../../ui";
+import { Avatar, Button, Dialog, EmptyState, ErrorState, GlassPanel, HealthLabel, ListGroup, ListRow, Loading, PageHeader, Section, Table, Tr, When, useToast } from "../../../ui";
 import { PersonDialog } from "./PersonDialog";
 import { contactOf, scopeText, statusView, type InvitationsResp, type Person, type TeamResp } from "./types";
 
@@ -32,6 +32,10 @@ export function TeamSection({ level = 1 }: { level?: 1 | 2 }) {
   const owner = team.data?.scope === "all";
   const invites = useQuery<InvitationsResp | null>(async (signal) => (owner ? api.get<InvitationsResp>("/api/team/invitations", { signal }) : null), [owner]);
   const [dialog, setDialog] = useState<{ mode: "invite" | "edit"; person?: Person } | null>(null);
+  const { toast } = useToast();
+  /* A reissued link is shown exactly once, like the original: the server hands it only to a signed-in owner. */
+  const [reissued, setReissued] = useState<{ name: string; contact: string; url: string; expires_at?: string | null } | null>(null);
+  const [copied, setCopied] = useState(false);
 
   useEffect(() => {
     if (params.get("new") === "1" && owner) {
@@ -46,6 +50,20 @@ export function TeamSection({ level = 1 }: { level?: 1 | 2 }) {
   const active = people.filter((p) => p.status === "active").length;
   const pending = (invites.data?.items || []).filter((i) => i.status === "pending");
   const reload = () => { team.reload(); invites.reload(); };
+
+  const reissue = async (inv: InvitationsResp["items"][number]) => {
+    const r = await run<{ invitation: InvitationsResp["items"][number]; token?: string; accept_path?: string }>(`reissue:${inv.id}`, `/api/team/invitations/${encodeURIComponent(inv.id)}/reissue`, { expected_version: inv.version });
+    if (r?.status === "ok" && r.data?.token) {
+      setCopied(false);
+      setReissued({ name: r.data.invitation.display_name, contact: contactOf(r.data.invitation), url: `${window.location.origin}/invite/${r.data.token}`, expires_at: r.data.invitation.expires_at });
+      invites.reload();
+    }
+  };
+  const copyReissued = async () => {
+    if (!reissued) return;
+    try { await navigator.clipboard.writeText(reissued.url); setCopied(true); toast({ message: "Link copied.", tone: "ok" }); }
+    catch { toast({ message: "Couldn't copy — select the link and copy it by hand.", tone: "risk" }); }
+  };
 
   const revoke = async (id: string, version: number) => {
     const r = await run(`revoke:${id}`, `/api/team/invitations/${encodeURIComponent(id)}/revoke`, { expected_version: version }, { success: "Invitation revoked. The link no longer works." });
@@ -128,7 +146,12 @@ export function TeamSection({ level = 1 }: { level?: 1 | 2 }) {
                   health={sv.health || undefined}
                   healthLabel={sv.label}
                   meta={<>{ROLE_LABELS[i.role as Role] || i.role} · {contactOf(i)}{i.status === "pending" && i.expires_at ? <> · expires <When iso={i.expires_at} relative /></> : i.accepted_at ? <> · accepted <When iso={i.accepted_at} format="date" /></> : i.revoked_at ? <> · revoked <When iso={i.revoked_at} format="date" /></> : null}</>}
-                  right={i.status === "pending" ? <Button size="sm" variant="soft" loading={busy(`revoke:${i.id}`)} onClick={() => revoke(i.id, i.version)}>Revoke</Button> : undefined}
+                  right={i.status === "pending" ? (
+                    <span className="row-actions">
+                      <Button size="sm" variant="soft" loading={busy(`reissue:${i.id}`)} disabled={busy(`revoke:${i.id}`)} onClick={() => reissue(i)}>New link</Button>
+                      <Button size="sm" variant="soft" loading={busy(`revoke:${i.id}`)} disabled={busy(`reissue:${i.id}`)} onClick={() => revoke(i.id, i.version)}>Revoke</Button>
+                    </span>
+                  ) : undefined}
                 />
               );
             })}
@@ -143,6 +166,18 @@ export function TeamSection({ level = 1 }: { level?: 1 | 2 }) {
         {!owner && team.data?.scope === "reports" ? <> Open <Link to="/tasks">Tasks</Link> to see their work.</> : null}
       </div>
 
+      <Dialog open={!!reissued} onClose={() => setReissued(null)} title="New invitation link" size="lg" align="top" footer={<Button variant="primary" onClick={() => setReissued(null)}>Done</Button>}>
+        {reissued ? (
+          <div className="stack">
+            <div>The earlier link for {reissued.name} stopped working the moment this one was made. This link is shown <b style={{ fontWeight: 600 }}>once</b>; AZKT keeps only a hash of it{reissued.expires_at ? <> · valid until <When iso={reissued.expires_at} format="long" /></> : null}.</div>
+            <div className="copybox">
+              <code onClick={(e) => { const r = document.createRange(); r.selectNodeContents(e.currentTarget); window.getSelection()?.removeAllRanges(); window.getSelection()?.addRange(r); }}>{reissued.url}</code>
+              <Button size="sm" variant={copied ? "soft" : "primary"} onClick={copyReissued}>{copied ? "Copied" : "Copy link"}</Button>
+            </div>
+            <div className="fs13 t3">Send it to {reissued.contact}. Their device creates a passkey when they open it; no password.</div>
+          </div>
+        ) : null}
+      </Dialog>
       {owner ? <PersonDialog open={!!dialog} mode={dialog?.mode || "invite"} person={dialog?.person} people={people} onClose={() => setDialog(null)} onChanged={reload} /> : null}
     </div>
   );

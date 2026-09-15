@@ -109,3 +109,6 @@
   .switch { min-height: 44px; }
   .set-row__right .select, .set-row__right .input { min-height: 44px; }
 }
+
+/* Inline pair of row actions (e.g. invitation New link · Revoke). */
+.row-actions { display: inline-flex; gap: 6px; align-items: center; flex-wrap: wrap; justify-content: flex-end; }

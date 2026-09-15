@@ -26,6 +26,7 @@ const TASKS: NavItem = { key: "tasks", label: "Tasks", to: "/tasks", icon: "task
 const MY_TASKS: NavItem = { key: "tasks", label: "My tasks", to: "/tasks", icon: "tasks" };
 const INBOX: NavItem = { key: "inbox", label: "Inbox", to: "/inbox" };
 const CONTACTS: NavItem = { key: "contacts", label: "Contacts", to: "/contacts", icon: "team" };
+const SHIPMENTS: NavItem = { key: "shipments", label: "Shipments", to: "/shipments" };
 const AGENTS: NavItem = { key: "agents", label: "Agents", to: "/agents", img: "/gen/icon-agents-thin.png", imgSize: 26, icon: "agents" };
 const ACTIVITY: NavItem = { key: "activity", label: "Activity", to: "/activity" };
 const FINANCE: NavItem = { key: "finance", label: "Finance", to: "/finance" };
@@ -44,20 +45,22 @@ export interface NavSet {
 
 export function navFor(role: Role | string | undefined): NavSet {
   if (isEmployeeRole(role)) {
+    // Logistics lives in shipments; mechanics never see them (shipping.read is off for the role).
+    const primary = role === "logistics" ? [MY_TASKS, SHIPMENTS, VEHICLES] : [MY_TASKS, VEHICLES];
     return {
-      primary: [MY_TASKS, VEHICLES],
+      primary,
       utility: [MORE],
-      mobile: [MY_TASKS, VEHICLES, MORE],
-      more: [],
+      mobile: primary.length > 3 ? [MY_TASKS, VEHICLES, MORE] : [...primary, MORE],
+      more: role === "logistics" ? [SHIPMENTS] : [],
     };
   }
   const isOwner = role === "owner";
   const utility = isOwner ? [AGENTS, ACTIVITY, FINANCE, TEAM, SETTINGS] : [AGENTS, ACTIVITY, FINANCE, PEOPLE, SETTINGS];
   return {
-    primary: [HOME, VEHICLES, SALES, REQUESTS, TASKS, INBOX, CONTACTS],
+    primary: [HOME, VEHICLES, SALES, REQUESTS, SHIPMENTS, TASKS, INBOX, CONTACTS],
     utility,
     mobile: [HOME, VEHICLES, SALES, MORE],
-    more: [REQUESTS, TASKS, INBOX, CONTACTS, AGENTS, ACTIVITY, FINANCE, isOwner ? TEAM : PEOPLE, SETTINGS],
+    more: [REQUESTS, SHIPMENTS, TASKS, INBOX, CONTACTS, AGENTS, ACTIVITY, FINANCE, isOwner ? TEAM : PEOPLE, SETTINGS],
   };
 }
 
@@ -65,7 +68,8 @@ export function navFor(role: Role | string | undefined): NavSet {
 export function routeAllowed(role: Role | string | undefined, pathname: string): boolean {
   if (!role) return false;
   if (isEmployeeRole(role)) {
-    return /^\/(tasks|vehicles|more)(\/|$)/.test(pathname) || pathname === "/";
+    if (role === "logistics" && /^\/(shipments|contacts)(\/|$)/.test(pathname)) return true;
+    return /^\/(tasks|vehicles|more|approvals)(\/|$)/.test(pathname) || pathname === "/";
   }
   if (role === "owner") return true;
   // manager and other office roles: everything except owner-only settings sections
