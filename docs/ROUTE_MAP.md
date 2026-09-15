@@ -17,12 +17,12 @@ screens below. Every record has a stable deep link; list filters live in the URL
 | Lead detail | `/sales?lead=:id` | Contact, inquiry, notes, correspondence, requirements, next task; deposit evidence and fulfilment hand-off. |
 | Import requests | `/requests`, `/requests/:id` | Requirement tiers, agreement/deposit, candidates, activity, linked inbox and purchased vehicle. |
 | Candidate detail | `/candidates/:id` | Auction identity/snapshot/deadline, per-request Pass/Fail/Unknown checks, translations, scoped customer draft, exact bid packet. |
-| Tasks | `/tasks` (`?view=my|all&bucket=upcoming|overdue|unassigned|blocked|waiting&layout=list|schedule&secondary=cases|promises`) | One task can appear in several views without duplication; Cases and Promises are secondary views over `/api/tasks/cases` and `/api/tasks/promises`. |
+| Tasks | `/tasks` (`?view=my|all&bucket=upcoming|overdue|unassigned|blocked|waiting&layout=list|schedule&secondary=cases|promises`) | One task can appear in several views without duplication. Cases and Promises are secondary views over `/api/tasks/cases` and `/api/tasks/promises`, and each row resolves from there: `POST /api/tasks/cases/{id}/{resolve\|reopen\|waiting\|block\|needs_owner\|cancel\|update}` and `POST /api/tasks/promises/{id}/{kept\|missed\|withdraw\|reopen\|update}`. |
 | Employee task / Task detail | `/tasks/:id` (`?action=done|snooze|reschedule|cancel` from reminder emails → confirm first, never on GET) | Complete task with evidence, I'm blocked, upload progress, recoverable draft, Awaiting verification. |
 | Inbox | `/inbox` (`?filter=needs_reply|drafts|taken_over|unmatched|all&account=&q=`), `/inbox/:threadId` | Thread, contextual records, checks, editable reply, Take over / Resume; account and recipients always visible. |
 | Contacts | `/contacts`, `/contacts/:id` | Identities, linked records, history, consent, promises, reversible audited merge. |
 | Shipments | `/shipments`, `/shipments/:id` | Legs and milestones, release/storage evidence, quotes, separate forwarding/booking decisions, delivery evidence. Logistics role lands here. |
-| Listing editor | `/listings/:id` | Versioned package, preview/diff, readiness checks, per-channel publication state; publish only via approval. |
+| Listing editor | `/listings/:id` | Versioned package, preview/diff, readiness checks, per-channel publication state; publish only via approval. A publication in `needs_review` offers the candidate site listings, and confirming one posts `POST /api/listings/vehicles/{id}/link`. |
 | Approvals queue / Exact approval | `/approvals`, `/approvals/:id` | Same record from Home, Inbox, Ask, notifications and email deep links; approve / edit / decline; invalidated, expired, execution status and receipt. |
 | Agents / Ask | `/agents`, `/agents/:agentId` (`?context=vehicle:<id>`) and the Ask inspector on every page | Manager default, specialist roles, persistent web+Telegram thread, attachments, streamed replies, missions/runs, coverage map (owner). |
 | Activity | `/activity` (`?kind=&entity=&q=`) | Append-only business events with execution detail, versions, source/receipt, retries. |
@@ -35,7 +35,7 @@ screens below. Every record has a stable deep link; list filters live in the URL
 | Settings → External agents | `/settings/external-agents` | Register / rotate / revoke MCP+HTTP clients with scopes, record limits, quotas; connect URLs and tool catalog. |
 | Settings → Procedures / Teach | `/settings/procedures` | Teach, versions, tests, promote / roll back. |
 | Settings → Knowledge | `/settings/knowledge` | Corpus manifests, admissions, retrieval check, re-index one source. |
-| Settings → Website | `/settings/website` | Site profile (WordPress/WooCommerce mapping), publications and failures. |
+| Settings → Website | `/settings/website` | Site profile (WordPress/WooCommerce mapping), the SKU rule (`site.set_sku_strategy`), publications and failures. |
 | Settings → Drive importer | `/settings/drive` | Importer root folder, scan, matches, import. |
 | Settings → Recovery | `/settings/recovery` | System health (owner), passkeys, sign out. |
 | Settings → Usage | `/settings/usage` | Model budget and spend (owner). |
