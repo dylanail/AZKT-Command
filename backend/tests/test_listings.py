@@ -567,6 +567,12 @@ async def test_listings_reconcile_sweep_is_registered():
     assert SWEEPS["listings.reconcile"][1] == svc.VERIFY_SECONDS == 15 * 60
 
 
+async def test_the_availability_scan_is_registered_hourly():
+    """The routine scan only exists if the worker runs it (spec §12.3: every hour)."""
+    from backend.app.domain.jobs import SWEEPS
+    assert SWEEPS["listings.availability_scan"][1] == svc.AVAILABILITY_SCAN_SECONDS == 60 * 60
+
+
 # ── review regressions ───────────────────────────────────────────────────────
 async def test_a_retry_after_a_failed_publish_actually_runs(db, owner):
     """A publication that failed at the provider must be re-publishable. Reusing the dead external
