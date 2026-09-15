@@ -857,7 +857,9 @@ async def upload_package_media(db: AsyncSession, ad, pkg: ListingPackage, prof: 
             continue
         got = _asset_bytes(asset)
         if not got:
-            report["skipped"].append({"asset_id": asset_id, "reason": "no readable image bytes"})
+            report["skipped"].append({"asset_id": asset_id,
+                                      "reason": "no readable image bytes (the web rendition is missing; the "
+                                                "original is never published because its EXIF is not stripped)"})
             continue
         data, content_type = got
         items.append({"sha256": sha, "asset_id": asset_id, "data": data, "content_type": content_type,
@@ -897,16 +899,20 @@ def package_with_known_media(pkg: ListingPackage, pub: Publication | None) -> di
 
 
 def _asset_bytes(asset: Asset) -> tuple[bytes, str] | None:
-    """The web rendition, falling back to the original. A file missing from storage is honestly None
-    rather than an exception that would read as a website failure."""
-    for variant in ("web", "original"):
-        try:
-            got = assets_svc.variant_bytes(asset, variant)
-        except Exception:  # noqa: BLE001 - storage object is gone or unreadable
-            got = None
-        if got and got[0]:
-            return got
-    return None
+    """The web rendition, and only ever that.
+
+    The rendition is the one copy with its metadata stripped (services/assets.py), so the original is
+    deliberately not a fallback: publishing it would put the camera's EXIF — including the GPS fix of
+    wherever the truck was photographed — on a public product page. A vehicle whose rendition is
+    missing blocks the publish with a reason instead, which is recoverable; a leaked location is not.
+    A file missing from storage is honestly None rather than an exception that would read as a
+    website failure.
+    """
+    try:
+        got = assets_svc.variant_bytes(asset, "web")
+    except Exception:  # noqa: BLE001 - storage object is gone or unreadable
+        return None
+    return got if got and got[0] else None
 
 
 def _media_filename(pkg: ListingPackage, m: dict, sha: str, content_type: str) -> str:

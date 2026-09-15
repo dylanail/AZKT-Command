@@ -1053,3 +1053,31 @@ async def test_product_mapping_refuses_taxonomy_the_site_does_not_have(db, owner
                            {"profile_id": profile.id, "attribute_map": {"color": {}}})
         await db.refresh(profile)
         assert list(profile.category_ids or []) == [] and dict(profile.attribute_map or {}) == {}
+
+
+async def test_the_original_file_is_never_published_only_the_stripped_rendition(db, owner):
+    """The web rendition is the copy with its metadata removed. Publishing the original instead would
+    put the camera's EXIF — the GPS fix of wherever the truck was photographed — on a public page."""
+    from backend.app.models.assets import Asset
+    from backend.app.services.storage import storage
+    site = wordpress_fake(with_existing=False)
+    await wordpress_connections(db)
+    with install_wordpress(site):
+        await _profile(db, owner)
+        v = await _vehicle(db, owner, photos=1)
+        pkg = (await _build(db, owner, v["id"]))["package"]
+        asset = await db.get(Asset, (pkg["media_detail"] or [{}])[0].get("asset_id"))
+        web = (asset.derivatives or {}).get("web") or {}
+        assert web.get("key") and asset.storage_key != web["key"]
+        storage().delete(web["key"])          # only the stripped copy is gone; the original remains
+        res = await dispatch(ctx_for(db, owner), "listings.publish",
+                             {"package_id": pkg["id"], "channel": "website",
+                              "expected_package_hash": pkg["package_hash"]})
+        a = await db.get(Approval, res.approval_id)
+        await dispatch(ctx_for(db, owner), "approvals.approve",
+                       {"approval_id": a.id, "expected_version": a.approval_version})
+        await run_jobs()
+        pub = await _publication(db, v["id"])
+        assert pub.state == "failed" and pub.error_kind == "unreadable_media"
+        assert "EXIF is not stripped" in (pub.error or "")
+        assert site.uploads == [] and site.items == {}
