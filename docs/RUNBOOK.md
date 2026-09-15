@@ -81,7 +81,31 @@ Pausing shows pending/unknown external actions; resuming revalidates queued appr
 | Reminder email | SMTP or Gmail send scope + verified owner address (S10) | Reminders logged, not sent |
 | AI Manager / intake analysis | `ANTHROPIC_API_KEY` + `MODEL_DAILY_BUDGET_USD` (S14) | Deterministic fallbacks: reminders, lists, approvals, intake text splitting |
 | Voice transcription | `TRANSCRIBE_URL` (self-hosted STT) or browser transcript | Audio kept; "transcript needed" with typed entry |
-| External agents | Register a client in Settings → Connections → External agents (S17) | `/mcp` and `/api/integrations/v1` reject unknown tokens |
+| External agents | Register a client in Settings → External agents (S17) | `/mcp` and `/api/integrations/v1` reject unknown tokens |
+| Knowledge embeddings | `EMBEDDINGS_URL` (+ model/token); pgvector on the database is optional | Lexical (pg_trgm) retrieval only; the retrieval check says so |
+| Auction candidate feed | `AUCTION_SOURCE_URL` + key | Candidates are entered by hand or pasted; bids still need exact approval |
+
+## 6a. Provider webhooks and the worker's sweeps
+
+Webhook endpoints (all verify before storing anything; a rejected delivery stores nothing and is counted):
+
+| Endpoint | Verification | Configure at the provider |
+|---|---|---|
+| `POST /api/webhooks/gmail` | `GOOGLE_PUBSUB_VERIFICATION_TOKEN` (query `token=` or bearer); `users.watch` needs `GOOGLE_PUBSUB_TOPIC` and is renewed daily by `gmail.watch_renew` | Pub/Sub push subscription → `https://<PUBLIC_ORIGIN>/api/webhooks/gmail?token=…` |
+| `POST /api/webhooks/square` | HMAC over `SQUARE_NOTIFICATION_URL` + raw body with `SQUARE_WEBHOOK_SIGNATURE_KEY`; duplicate `event_id` is a no-op | Square developer dashboard → webhook subscription (payments, refunds) |
+| `POST /api/telegram/webhook` | `X-Telegram-Bot-Api-Secret-Token` must equal `TELEGRAM_WEBHOOK_SECRET` | Settings → Reminders → Telegram → "Set webhook" (queues a fenced external action that calls `setWebhook`) |
+
+Worker sweeps (registered with `@sweep`, run by `backend/worker.py`; `WORKER_BATCH` bounds parallel jobs):
+`reminders.deliver_due` (15 s), `reminders.reconcile` / `reminders.repair` / `reminders.digest` (5 min),
+`inbox.reconcile_unknown_sends` (5 min), `gmail.fallback_check` and `gmail.watch_renew` (from settings),
+`missions.resume_due` (60 s), `reporting.refresh_metrics` (5 min), `square.reconcile`, `drive.scan`,
+`ledger.sync`, `listings.reconcile` (15 min). A sweep that finds its provider unconfigured reports
+`setup_blocked` in its job result and does nothing else.
+
+External agents: `POST /mcp` (remote MCP over Streamable HTTP; bearer token from Settings → External agents) and
+`/api/integrations/v1/*` (the HTTP twin; `GET /api/integrations/v1/openapi-lite` documents it). Tokens are shown
+once at registration; rotate or revoke from the same screen. `PUBLIC_ORIGIN` must be the deployed origin because the
+MCP server's allowed-host list is derived from it.
 
 ## 7. Incident playbook
 
