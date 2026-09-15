@@ -237,3 +237,27 @@ def test_managed_postgres_urls_get_the_async_driver():
     assert Settings(DATABASE_URL="postgresql+asyncpg://u:p@h/d").DATABASE_URL == "postgresql+asyncpg://u:p@h/d"
     assert Settings(DATABASE_URL="postgresql+psycopg://u:p@h/d").DATABASE_URL == "postgresql+psycopg://u:p@h/d"
     assert Settings(TEST_DATABASE_URL="postgres://u@h/t").TEST_DATABASE_URL == "postgresql+asyncpg://u@h/t"
+
+
+def test_a_stray_newline_on_the_encryption_key_does_not_change_it():
+    """`openssl rand -base64 32 | pbcopy` puts a trailing newline on the clipboard. A 44-character
+    key is used verbatim while anything else is hashed into one, so that newline used to send the
+    same secret down the other branch and derive a *different* key — silently, because encryption
+    still worked. The damage showed up later, when the whitespace was tidied up and every stored
+    provider token had become undecryptable."""
+    from backend.app.core import crypto
+    from backend.app.core.config import settings
+
+    key = "qzzZwn6/0LQglGiCvtormRXIfA/tcRYez0h2k4l+jBI="   # exactly what openssl prints
+    before = settings.ENCRYPTION_KEY
+    try:
+        settings.ENCRYPTION_KEY = key
+        clean = crypto._key()
+        token = crypto.encrypt("square-access-token")
+        for messy in (key + "\n", key + " ", "\n" + key, f"  {key}\t"):
+            settings.ENCRYPTION_KEY = messy
+            assert crypto._key() == clean
+            # the decisive part: a token written with the clean key is still readable
+            assert crypto.decrypt(token) == "square-access-token"
+    finally:
+        settings.ENCRYPTION_KEY = before
