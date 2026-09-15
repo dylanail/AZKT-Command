@@ -116,6 +116,43 @@ def availability_map_for(profile: dict | None) -> dict:
     return base
 
 
+def product_taxonomy(package: dict, profile: dict | None) -> dict:
+    """Category and attribute fields for a WooCommerce product, or {} when nothing is mapped.
+
+    A product created with no category does not appear in any shop category page, and specs that live
+    only in AZKT meta are invisible to the theme. Both are therefore mappable — but only from what
+    discovery actually found on the site, and only once the owner has chosen. When nothing is mapped
+    the keys are left out entirely, which also means an AZKT update never wipes categories or
+    attributes an editor set by hand.
+    """
+    out: dict[str, Any] = {}
+    category_ids = [c for c in ((profile or {}).get("category_ids") or []) if c not in (None, "")]
+    if category_ids:
+        out["categories"] = [{"id": _as_media_id(c)} for c in category_ids]
+    amap = (profile or {}).get("attribute_map") or {}
+    if amap:
+        by_key = {}
+        for spec in (package.get("specs") or []):
+            key, value = spec.get("key"), spec.get("value")
+            if key and value not in (None, "") and key not in by_key:
+                by_key[key] = str(value)
+        attributes = []
+        for position, (key, cfg) in enumerate(amap.items()):
+            value = by_key.get(key)
+            if not value or not isinstance(cfg, dict):
+                continue
+            attr: dict[str, Any] = {"options": [value], "visible": cfg.get("visible", True),
+                                    "variation": False, "position": position}
+            if cfg.get("id"):
+                attr["id"] = _as_media_id(cfg["id"])
+            else:
+                attr["name"] = cfg.get("name") or key.replace("_", " ").title()
+            attributes.append(attr)
+        if attributes:
+            out["attributes"] = attributes
+    return out
+
+
 def sku_strategy_for(profile: dict | None) -> str:
     strategy = ((profile or {}).get("sku_strategy") or DEFAULT_SKU_STRATEGY)
     return strategy if strategy in SKU_STRATEGIES else DEFAULT_SKU_STRATEGY
@@ -209,6 +246,8 @@ def render_payload(package: dict, profile: dict | None) -> dict:
         meta["azkt_disclosures"] = list(package["disclosures"])
     if package.get("specs"):
         meta["azkt_specs"] = list(package["specs"])
+    if content_shape(profile) == "product":
+        out.update(product_taxonomy(package, profile))
     meta["azkt_package_hash"] = package.get("package_hash")
     meta["azkt_vehicle_id"] = package.get("vehicle_id")
     if meta:
@@ -240,6 +279,10 @@ def validate_package(package: dict, profile: dict | None) -> dict:
     if missing:
         # not an error: validation also runs on a preview, before anything is uploaded
         warnings.append(f"{len(missing)} photo(s) are not in the site media library yet")
+    if content_shape(profile) == "product" and not ((profile or {}).get("category_ids") or []):
+        known = (profile or {}).get("discovered", {}).get("product_categories") or []
+        if known:
+            warnings.append("no shop category is mapped, so a new product will not appear in any category page")
     return {"ok": not errors, "errors": errors, "warnings": warnings, "payload": payload}
 
 
@@ -663,6 +706,10 @@ def _media_entry(row: dict, *, reused: bool) -> dict:
 
 def _normalize_product(p: dict) -> dict:
     return {"external_id": str(p.get("id")), "kind": "product", "sku": p.get("sku"), "title": p.get("name"),
+            "categories": [{"id": str(c.get("id")), "name": c.get("name")} for c in (p.get("categories") or [])
+                           if isinstance(c, dict)],
+            "attributes": [{"id": a.get("id"), "name": a.get("name"), "options": list(a.get("options") or [])}
+                           for a in (p.get("attributes") or []) if isinstance(a, dict)],
             "status": p.get("status"), "price": p.get("regular_price"), "sale_price": p.get("sale_price"),
             "stock_status": p.get("stock_status"), "visibility": p.get("catalog_visibility"),
             "url": p.get("permalink"), "body": p.get("description"), "short_description": p.get("short_description"),
@@ -827,6 +874,11 @@ class FakeWordPress:
                 merged = {m.get("key"): m.get("value") for m in (row.get("meta_data") or []) if isinstance(m, dict)}
                 merged.update(v)
                 row["meta_data"] = [{"key": mk, "value": mv} for mk, mv in merged.items()]
+            elif k == "categories":
+                row["categories"] = [{"id": str(c.get("id")), "name": c.get("name") or f"cat-{c.get('id')}"}
+                                     for c in (v or []) if isinstance(c, dict)]
+            elif k == "attributes":
+                row["attributes"] = [dict(a) for a in (v or []) if isinstance(a, dict)]
             elif k == "images":
                 # WooCommerce resolves each entry to a media row: an id keeps the library's own URL,
                 # and an entry without an id is what a real site would try (and fail) to side-load.

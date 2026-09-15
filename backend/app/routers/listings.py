@@ -102,7 +102,7 @@ async def profile_action(action: str, payload: dict = Body(default={}),
                          ctx: CommandContext = Depends(command_context)) -> dict:
     commands = {"discover": "site.discover", "validate": "site.validate", "activate": "site.activate",
                 "resume": "site.resume_writes", "gates": "site.set_listing_gates",
-                "sku": "site.set_sku_strategy"}
+                "sku": "site.set_sku_strategy", "product-mapping": "site.set_product_mapping"}
     name = commands.get(action)
     if name is None:
         raise HTTPException(404, f"unknown site profile action {action}")

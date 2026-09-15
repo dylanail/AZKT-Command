@@ -939,3 +939,65 @@ async def test_a_photo_missing_from_storage_blocks_the_publish_instead_of_publis
         assert pub.state == "failed" and pub.error_kind == "unreadable_media"
         assert "no readable image bytes" in (pub.error or "")
         assert site.items == {} and site.uploads == []
+
+
+async def test_a_published_product_lands_in_the_mapped_category_with_its_specs_as_attributes(db, owner):
+    """A WooCommerce product with no category never shows on a shop category page, and specs kept only
+    in AZKT meta are invisible to the theme. Both are mapped from what discovery found on the site."""
+    site = wordpress_fake(with_existing=False)
+    await wordpress_connections(db)
+    with install_wordpress(site):
+        profile = await _profile(db, owner)
+        await dispatch(ctx_for(db, owner), "site.set_product_mapping", {
+            "profile_id": profile.id, "category_ids": [9],
+            "attribute_map": {"model_year": {"id": 1, "visible": True}, "color": {"name": "Colour"}}})
+        v = await _vehicle(db, owner)
+        pkg = (await _build(db, owner, v["id"]))["package"]
+        await _approve_publish(db, owner, pkg["id"], package_hash=pkg["package_hash"])
+        await run_jobs()
+        pub = await _publication(db, v["id"])
+        product = site.items[pub.external_id]
+        assert [c["id"] for c in product["categories"]] == ["9"]
+        attrs = {a.get("id") or a.get("name"): a["options"] for a in product["attributes"]}
+        assert attrs[1] == ["2018"] and attrs["Colour"] == ["white"]
+
+
+async def test_an_unmapped_shop_leaves_the_editors_categories_and_attributes_alone(db, owner):
+    """Mapping nothing is a valid answer: AZKT then sends neither field, so updating a product the
+    shop already categorised never wipes that work."""
+    site = wordpress_fake(with_existing=False)
+    site.add_product(sku="WEB-7", name="2018 Daihatsu Hijet", price="1.00", external_id="7701")
+    site.items["7701"]["categories"] = [{"id": "9", "name": "Kei Trucks"}]
+    site.items["7701"]["attributes"] = [{"id": 1, "name": "Transmission", "options": ["Manual"]}]
+    await wordpress_connections(db)
+    with install_wordpress(site):
+        await _profile(db, owner)
+        v = await _vehicle(db, owner)
+        await dispatch(ctx_for(db, owner), "listings.link_existing",
+                       {"vehicle_id": v["id"], "external_id": "7701"})
+        pkg = (await _build(db, owner, v["id"]))["package"]
+        await _approve_publish(db, owner, pkg["id"], package_hash=pkg["package_hash"])
+        await run_jobs()
+        product = site.items["7701"]
+        assert [c["name"] for c in product["categories"]] == ["Kei Trucks"]
+        assert product["attributes"][0]["options"] == ["Manual"]
+        assert product["regular_price"] == "12500.00"      # AZKT's own fields still landed
+
+
+async def test_product_mapping_refuses_taxonomy_the_site_does_not_have(db, owner):
+    from backend.app.core.errors import ValidationFailed
+    site = wordpress_fake(with_existing=False)
+    await wordpress_connections(db)
+    with install_wordpress(site):
+        profile = await _profile(db, owner)
+        with pytest.raises(ValidationFailed):
+            await dispatch(ctx_for(db, owner), "site.set_product_mapping",
+                           {"profile_id": profile.id, "category_ids": [4242]})
+        with pytest.raises(ValidationFailed):
+            await dispatch(ctx_for(db, owner), "site.set_product_mapping",
+                           {"profile_id": profile.id, "attribute_map": {"color": {"id": 99}}})
+        with pytest.raises(ValidationFailed):
+            await dispatch(ctx_for(db, owner), "site.set_product_mapping",
+                           {"profile_id": profile.id, "attribute_map": {"color": {}}})
+        await db.refresh(profile)
+        assert list(profile.category_ids or []) == [] and dict(profile.attribute_map or {}) == {}

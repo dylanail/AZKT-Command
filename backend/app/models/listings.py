@@ -42,6 +42,10 @@ class SiteProfile(Base, BusinessRow):
     # `preserve` (the default) never writes that column and identifies listings by `azkt_vehicle_id`.
     sku_strategy: Mapped[str] = mapped_column(String, default="preserve")   # preserve|stock_no|prefix
     sku_prefix: Mapped[str | None] = mapped_column(String, nullable=True)
+    # Which shop categories a published vehicle belongs to, and which recorded specs become product
+    # attributes. Empty means AZKT sends neither key, so an editor's own values are never wiped.
+    category_ids: Mapped[list] = mapped_column(JSON, default=list)          # WooCommerce category ids
+    attribute_map: Mapped[dict] = mapped_column(JSON, default=dict)         # spec key -> {id|name, visible}
 
 
 class SiteMedia(Base, BusinessRow):
