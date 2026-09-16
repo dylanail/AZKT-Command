@@ -218,7 +218,6 @@ refresh().catch(e => show("err", (e && e.message) ? e.message : String(e)));
 """
 
 
-@router.get("/", response_class=HTMLResponse)
 @router.get("/enroll", response_class=HTMLResponse)
 async def enroll_page() -> HTMLResponse:
     return HTMLResponse(_PAGE)

@@ -106,6 +106,10 @@ def create_app() -> FastAPI:
             with contextlib.suppress(asyncio.CancelledError):
                 await task
 
+    # Register the SPA last so API, auth, health and enrollment routes win.
+    from .frontend import mount_frontend
+    from .core.config import REPO_ROOT
+    mount_frontend(app, REPO_ROOT / "frontend" / "dist")
     return app
 
 
