@@ -34,7 +34,13 @@
   transition: border-color .15s ease, background .15s ease;
 }
 .ag-rolecard:hover { background: var(--surface2); }
-.ag-rolecard--on { border-color: var(--text); background: var(--surface2); }
+/* Who you are talking to: an accent ring and wash in both themes. Also wins over :hover, which
+   otherwise takes the tint off the card under the pointer — the one you are most likely on. */
+.ag-rolecard--on, .ag-rolecard--on:hover {
+  border-color: var(--sel);
+  box-shadow: inset 0 0 0 1px var(--sel);
+  background: linear-gradient(0deg, var(--sel-wash), var(--sel-wash)), var(--surface2);
+}
 .ag-rolecard__top { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-width: 0; }
 .ag-rolecard__name { font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ag-rolecard__blurb { font-size: 12px; color: var(--t3); line-height: 1.4; }
