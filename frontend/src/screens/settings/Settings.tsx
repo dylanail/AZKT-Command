@@ -33,7 +33,7 @@ const SECTIONS = [
   { id: "external-agents", label: "External agents", blurb: "Scoped clients that talk to the Manager." },
   { id: "procedures", label: "Procedures", blurb: "Teach AZKT how you do things." },
   { id: "knowledge", label: "Knowledge", blurb: "What AZKT knows and where it came from." },
-  { id: "recovery", label: "Recovery", blurb: "System health, passkeys and sign out." },
+  { id: "recovery", label: "Recovery", blurb: "Every way you sign in — a passkey per device, added from here — plus system health and sign out." },
   { id: "usage", label: "Usage", blurb: "Model budget and spend." },
 ] as const;
 type SectionId = (typeof SECTIONS)[number]["id"];

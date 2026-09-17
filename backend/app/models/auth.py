@@ -56,9 +56,33 @@ class Credential(Base):
     credential_id: Mapped[bytes] = mapped_column(LargeBinary, unique=True)
     public_key: Mapped[bytes] = mapped_column(LargeBinary)
     sign_count: Mapped[int] = mapped_column(Integer, default=0)
-    transports: Mapped[str] = mapped_column(String, default="")
+    transports: Mapped[str] = mapped_column(String, default="")  # comma-separated hints: internal,hybrid,usb…
     label: Mapped[str] = mapped_column(String, default="passkey")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class DeviceEnrollment(Base):
+    """A one-time link that lets a second device register its own passkey for an existing person.
+
+    Passkeys never leave the device that made them, so a phone cannot use the passkey on a desktop:
+    it registers one of its own. The person mints this link while signed in; it is shown once, only
+    its hash is stored, it expires in minutes, and it dies the moment a passkey is registered with it
+    (or the person's access changes). Same shape as `Invitation`, but it adds a device to an account
+    that already exists instead of creating a person.
+    """
+    __tablename__ = "device_enrollments"
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    token_hash: Mapped[str] = mapped_column(String, unique=True, index=True)
+    label: Mapped[str] = mapped_column(String, default="")  # what the new passkey will be called
+    status: Mapped[str] = mapped_column(String, default="pending", index=True)  # pending|used|revoked|expired
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    credential_id: Mapped[str | None] = mapped_column(String, nullable=True)  # the passkey it created
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    revoked_reason: Mapped[str | None] = mapped_column(String, nullable=True)
 
 
 class Invitation(Base):

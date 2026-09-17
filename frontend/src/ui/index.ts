@@ -35,4 +35,6 @@ export type { PageHeaderProps, Crumb } from "./PageHeader";
 export { Notice } from "./Notice";
 export type { NoticeProps } from "./Notice";
 export { Avatar } from "./Avatar";
+export { QrCode } from "./QrCode";
+export type { QrCodeProps } from "./QrCode";
 export * from "./Icons";

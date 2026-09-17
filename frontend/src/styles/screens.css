@@ -38,6 +38,9 @@
   border: 1px solid var(--amber); border-radius: 14px; padding: 10px 12px; background: var(--sheet-soft);
 }
 .copybox code { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
+/* Add-a-device QR: always on white, in both themes, or a camera cannot read it. */
+.qr-wrap { display: flex; justify-content: center; padding: 4px 0; }
+.qr { border-radius: 12px; background: #fff; max-width: 100%; height: auto; }
 .kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; }
 .kpi { border: 1px solid var(--line2); border-radius: 14px; padding: 12px 14px; display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .kpi__label { font-size: 12px; color: var(--t3); }

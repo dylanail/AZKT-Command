@@ -168,9 +168,11 @@ def _perms_lost(before: dict[str, bool], after: dict[str, bool]) -> list[str]:
 
 async def _invalidate_queued_authorization(ctx: CommandContext, user: User, reason: str, *, perms: list[str] | None = None) -> dict:
     """Access changed: this person's pending/approved/queued approvals are invalidated (their external
-    action intents are cancelled by approvals.invalidate) and their user-scoped standing permissions
-    are revoked. `perms=None` means every grant; a list limits standing-permission revocation to
-    commands guarded by those perms."""
+    action intents are cancelled by approvals.invalidate), their user-scoped standing permissions are
+    revoked and any live add-a-device link dies with the sessions it would have created.
+    `perms=None` means every grant; a list limits standing-permission revocation to commands guarded
+    by those perms."""
+    from ..auth.passkey import revoke_device_links
     from . import approvals as approvals_svc
     invalidated: list[str] = []
     rows = (await ctx.db.execute(select(Approval).where(
@@ -196,7 +198,9 @@ async def _invalidate_queued_authorization(ctx: CommandContext, user: User, reas
         revoked.append(p.id)
         ctx.emit("permission.revoked", aggregate_type="permission", aggregate_id=p.id, aggregate_version=p.version,
                  payload={"permission_id": p.id, "subject_kind": "user", "subject_id": user.id, "reason": reason})
-    return {"approvals_invalidated": invalidated, "standing_permissions_revoked": revoked}
+    device_links = await revoke_device_links(ctx.db, user.id, reason)
+    return {"approvals_invalidated": invalidated, "standing_permissions_revoked": revoked,
+            "device_links_revoked": device_links}
 
 
 def _pattern_matches(pattern: str, name: str) -> bool:
@@ -392,7 +396,7 @@ async def team_update_person(ctx: CommandContext, inp: PersonUpdateIn) -> dict:
         u.perms = overrides
     after = effective_perms(u.role, u.perms)
     lost = _perms_lost(before, after)
-    cleanup: dict = {"approvals_invalidated": [], "standing_permissions_revoked": []}
+    cleanup: dict = {"approvals_invalidated": [], "standing_permissions_revoked": [], "device_links_revoked": []}
     if access_fields:
         _access_changed(ctx, u)
         if "role" in changes or "scope" in changes:

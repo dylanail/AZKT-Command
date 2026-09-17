@@ -11,7 +11,7 @@ for _m in pkgutil.iter_modules(__path__):
     if not _m.name.startswith("_"):
         importlib.import_module(f"{__name__}.{_m.name}")
 
-from .auth import Credential, Invitation, User  # noqa: E402,F401
+from .auth import Credential, DeviceEnrollment, Invitation, User  # noqa: E402,F401
 from .legacy import (  # noqa: E402,F401
     IRQ,
     AgentState,

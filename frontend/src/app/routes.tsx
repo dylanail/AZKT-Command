@@ -28,6 +28,7 @@ const ApprovalReview = lazy(() => import("../screens/approvals/ApprovalReview"))
 const ApprovalsList = lazy(() => import("../screens/approvals/ApprovalsList"));
 const Login = lazy(() => import("../screens/auth/Login"));
 const Invite = lazy(() => import("../screens/auth/Invite"));
+const AddDevice = lazy(() => import("../screens/auth/AddDevice"));
 const Denied = lazy(() => import("../screens/auth/Denied"));
 const Expired = lazy(() => import("../screens/auth/Expired"));
 const Shipments = lazy(() => import("../screens/shipments/Shipments"));
@@ -86,6 +87,7 @@ export default function AppRoutes() {
       <Routes>
         <Route path="/login" element={<PublicOnly><Login /></PublicOnly>} />
         <Route path="/invite/:token" element={<Invite />} />
+        <Route path="/add-device/:token" element={<AddDevice />} />
         <Route path="/denied" element={<Denied />} />
         <Route path="/expired" element={<Expired />} />
 

@@ -31,6 +31,14 @@ cd frontend && npm ci && npm run dev        # Vite dev server proxying /api and 
 First owner bootstrap: open `/` (or `/enroll`), enter `SETUP_TOKEN`, create the first passkey.
 Invite people from Settings → Team; they register a passkey via `/invite/<token>`.
 
+Adding a second device to your own account (a passkey cannot be copied off the device that made it):
+Settings → Recovery → **Add another device** mints a one-time link at `/add-device/<token>`, shown as
+a QR to scan. It is valid for 15 minutes, works once, and is killed by a new link, by Cancel, or by any
+change to that person's access. The server stores only its hash, and issues it only to a signed-in
+session — never through an agent or an approval. `Add to this device` is the same thing without a link,
+and a desktop browser's own "use a phone or tablet" QR also works, because registration does not
+restrict the authenticator.
+
 Tests (real Postgres): `PYTHONPATH=. pytest -q`.
 
 ## 3. Deploying on Railway
