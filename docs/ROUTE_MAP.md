@@ -8,6 +8,7 @@ screens below. Every record has a stable deep link; list filters live in the URL
 |---|---|---|
 | Sign-in (passkey) | `/login` | WebAuthn passkeys; setup token bootstraps the first owner (`/api/enroll`). No production role picker. |
 | Invitation accept | `/invite/:token` | One-time link; the device creates a passkey. Expired/revoked links say so. |
+| Add this device | `/add-device/:token` | One-time link (15 min, one use) minted in Settings → Recovery by the person themselves: this device registers its own passkey for an account that already exists, and is signed in. Used/expired/cancelled links say so. |
 | Expired session / Denied | `/expired`, `/denied` | Denied pages never reveal whether a record exists. |
 | Home | `/` (`?period=month|7d|30d|custom&start=&end=&horizon=`) | Status line (H11), Business overview + drill-downs, Needs your decision, Needs attention, Today, Vehicle timeline, In progress, Completed. Employees are redirected to `/tasks`. |
 | Vehicles list / board | `/vehicles` (`?view=all|sourcing|shipping|shop|sales&layout=list|board`) | Saved views; Move stage from the keyboard. |
@@ -37,7 +38,7 @@ screens below. Every record has a stable deep link; list filters live in the URL
 | Settings → Knowledge | `/settings/knowledge` | Corpus manifests, admissions, retrieval check, re-index one source. |
 | Settings → Website | `/settings/website` | Site profile (WordPress/WooCommerce mapping), the SKU rule (`site.set_sku_strategy`), publications and failures. |
 | Settings → Drive importer | `/settings/drive` | Importer root folder, scan, matches, import. |
-| Settings → Recovery | `/settings/recovery` | System health (owner), passkeys, sign out. |
+| Settings → Recovery | `/settings/recovery` | System health (owner); ways to sign in — every passkey with its last use, add one to this device, add another device (QR + one-time link), rename, revoke; sign out. |
 | Settings → Usage | `/settings/usage` | Model budget and spend (owner). |
 | More (mobile) | `/more`, `/more/:section` | Everything not on the tab bar, as permitted. |
 

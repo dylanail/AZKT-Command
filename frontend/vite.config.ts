@@ -15,8 +15,8 @@ export default defineConfig({
         short_name: "AZKT",
         description: "Arizona Kei Trucks operations",
         // Light canvas is the default theme; dark is a persisted toggle (#07080d) applied at runtime.
-        theme_color: "#dfe6f3",
-        background_color: "#dfe6f3",
+        theme_color: "#e9edf5",
+        background_color: "#e9edf5",
         display: "standalone",
         orientation: "portrait",
         start_url: "/",

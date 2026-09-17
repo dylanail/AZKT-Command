@@ -63,7 +63,7 @@ Rules every contributor (human or agent) must follow:
 
 ## Tables shared across domains (stable names for FKs)
 
-`users`, `credentials`, `invitations`, `contacts`, `contact_identities`, `opportunities`, `tasks`,
+`users`, `credentials`, `device_enrollments`, `invitations`, `contacts`, `contact_identities`, `opportunities`, `tasks`,
 `cases`, `commitments`, `vehicles`, `vehicle_facts`, `vehicle_milestones`, `recon_issues`,
 `work_orders`, `parts`, `assets`, `asset_links`, `upload_sessions`, `vehicle_intakes`,
 `intake_observations`, `shipments`, `shipment_legs`, `shipment_quotes`, `import_requests`,

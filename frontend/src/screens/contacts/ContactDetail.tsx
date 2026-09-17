@@ -186,7 +186,7 @@ export default function ContactDetail() {
             {d.opportunities.length === 0 ? <span className="not-recorded">No leads yet.</span> : d.opportunities.map((o) => (
               <div key={o.id} className="cd-item">
                 <div className="cd-item__main">
-                  <Link to={`/sales?lead=${encodeURIComponent(o.id)}&pipeline=${o.pipeline === "irq" ? "irq" : "vehicle"}`}>{pipelineLabel(o.pipeline)}{o.enquiry ? ` · ${o.enquiry}` : o.vehicle_id ? ` · vehicle ${o.vehicle_id.slice(0, 8)}` : ""}</Link>
+                  <Link to={`/sales?lead=${encodeURIComponent(o.id)}`}>{pipelineLabel(o.pipeline)}{o.enquiry ? ` · ${o.enquiry}` : o.vehicle_id ? ` · vehicle ${o.vehicle_id.slice(0, 8)}` : ""}</Link>
                   <span className="cd-item__meta">{o.created_at ? `opened ${relativeTime(o.created_at)}` : ""}{o.lost_reason ? ` · ${o.lost_reason}` : ""}</span>
                 </div>
                 <Chip size="sm" tone={o.stage === "deposit_paid" ? "ok" : o.stage === "lost" ? "soft" : "neutral"}>{o.stage_label || stageLabel(o.stage)}</Chip>

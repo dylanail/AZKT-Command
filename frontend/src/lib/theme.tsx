@@ -8,7 +8,7 @@ export const THEME_KEY = "azkt-theme";
 export const GLASS_KEY = "azkt-glass";
 export const MOTION_KEY = "azkt-motion";
 
-const CANVAS_LIGHT = "#dfe6f3";
+const CANVAS_LIGHT = "#e9edf5";
 const CANVAS_DARK = "#07080d";
 
 function readStored<T extends string>(key: string, allowed: readonly T[]): T | null {

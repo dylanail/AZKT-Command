@@ -26,6 +26,30 @@ export interface InvitationPreview {
   role: Role;
   expires_at: string;
 }
+/** What a second device is told before it is asked for a passkey. */
+export interface DeviceLinkPreview {
+  display_name: string;
+  label: string;
+  expires_at: string;
+}
+export interface DeviceEnrollment {
+  id: string;
+  label: string;
+  status: "pending" | "used" | "revoked" | "expired" | string;
+  created_at: string | null;
+  expires_at: string | null;
+  used_at: string | null;
+}
+/** POST /auth/device-link — the token is handed over once and never stored. */
+export interface DeviceLink {
+  enrollment: DeviceEnrollment;
+  token: string;
+  url: string;
+  path: string;
+  qr: { rows: string[] } | null;
+  replaced: string[];
+  expires_in_minutes: number;
+}
 
 export interface AuthContextValue {
   /** First /auth/state probe finished. */
@@ -47,6 +71,9 @@ export interface AuthContextValue {
   registerWithInvite: (inviteToken: string, label?: string) => Promise<void>;
   previewInvitation: (token: string) => Promise<InvitationPreview>;
   addPasskey: (label?: string) => Promise<void>;
+  /** On a second device, with the one-time link from the dash. Signs that device in. */
+  registerWithDeviceLink: (deviceToken: string, label?: string) => Promise<void>;
+  previewDeviceLink: (deviceToken: string) => Promise<DeviceLinkPreview>;
   logout: () => Promise<void>;
   clearError: () => void;
 }
@@ -149,6 +176,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const previewInvitation = useCallback((token: string) =>
     api.get<InvitationPreview>(`/auth/invitation/${encodeURIComponent(token)}`), []);
 
+  // A passkey cannot be copied from the desktop, so this device registers its own against the
+  // account the link names. The server only accepts the link once, and only before it expires.
+  const registerWithDeviceLink = useCallback((deviceToken: string, label?: string) =>
+    registerWith({ device_token: deviceToken, label }), [registerWith]);
+
+  const previewDeviceLink = useCallback((deviceToken: string) =>
+    api.get<DeviceLinkPreview>(`/auth/device-link/${encodeURIComponent(deviceToken)}`), []);
+
   // Signed in already: the server gates on the session cookie, no token is sent.
   const addPasskey = useCallback((label?: string) => run(async () => {
     const options = await api.post<PublicKeyCredentialCreationOptionsJSON>("/auth/register/options", { label: label || "passkey" });
@@ -167,8 +202,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const value = useMemo<AuthContextValue>(() => ({
     ready, registered, authed, expired, probeFailed, user, error, busy,
-    refresh, login, registerWithSetupToken, registerWithInvite, previewInvitation, addPasskey, logout, clearError,
-  }), [ready, registered, authed, expired, probeFailed, user, error, busy, refresh, login, registerWithSetupToken, registerWithInvite, previewInvitation, addPasskey, logout, clearError]);
+    refresh, login, registerWithSetupToken, registerWithInvite, previewInvitation, addPasskey,
+    registerWithDeviceLink, previewDeviceLink, logout, clearError,
+  }), [ready, registered, authed, expired, probeFailed, user, error, busy, refresh, login, registerWithSetupToken, registerWithInvite, previewInvitation, addPasskey, registerWithDeviceLink, previewDeviceLink, logout, clearError]);
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 }

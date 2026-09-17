@@ -1,4 +1,5 @@
-/* Sales: Vehicle Sales | IRQ pipelines from GET /api/sales/board; Board | List | Tasks views.
+/* Sales: both pipelines from GET /api/sales/board — Vehicle Sales above IRQ, each its own board, no
+   pipeline switcher; Board | List | Tasks chooses how both are drawn (Tasks merges them into one list).
    Board columns New Lead → In Conversation → Awaiting Deposit → Deposit Paid (fixed order) with HTML5 drag and a
    keyboard Move menu on every card; drop → POST /api/sales/opportunities/{id}/move-stage. Deposit Paid is never a
    free checkbox: the API's blocked reason is shown with a Record payment link. Lost is a separate toggle.
@@ -8,11 +9,11 @@ import { Link, useSearchParams } from "react-router-dom";
 import { api } from "../../lib/api";
 import { useAuth } from "../../lib/auth";
 import { can, whyNot } from "../../lib/perms";
-import { useQuery } from "../../lib/useQuery";
+import { useQuery, type QueryState } from "../../lib/useQuery";
 import { TZ } from "../../lib/format";
 import { useIsMobile } from "../../lib/viewport";
 import { useInspector } from "../../app/Inspector";
-import { Button, Chip, EmptyState, ErrorState, GlassPanel, Loading, Menu, PageHeader, PlusIcon, SegmentedControl, Sheet, Table, Tr, When, useToast, type MenuItem } from "../../ui";
+import { Button, Chip, EmptyState, ErrorState, GlassPanel, Loading, Menu, PageHeader, PlusIcon, Section, SegmentedControl, Sheet, Table, Tr, When, useToast, type MenuItem } from "../../ui";
 import { ReasonDialog, RescheduleSheet, taskPath, useTaskCommand } from "../tasks/TaskSheets";
 import { isOverdue, reminderLabel, showsTokyo, typeLabel, withinNextHours, type TaskListResp, type TaskView } from "../tasks/types";
 import { moveStage, reopenLead } from "./api";
@@ -53,9 +54,7 @@ export default function Sales() {
   const { user } = useAuth();
   const mobile = useIsMobile();
   const insp = useInspector();
-  const { toast } = useToast();
   const [params, setParams] = useSearchParams();
-  const pipeline: Pipeline = params.get("pipeline") === "irq" ? "irq" : "vehicle";
   const view: View = isView(params.get("view")) ? (params.get("view") as View) : "board";
   const setParam = useCallback((k: string, v: string | null) => {
     const p = new URLSearchParams(params);
@@ -66,19 +65,15 @@ export default function Sales() {
 
   const [tick, setTick] = useState(0);
   const reload = useCallback(() => setTick((t) => t + 1), []);
-  const board = useQuery<BoardResp | null>((signal) => api.get<BoardResp | null>(`/api/sales/board?pipeline=${pipeline}`, { signal, tolerate: [404, 501] }), [pipeline, tick]);
-  const otherPipe: Pipeline = pipeline === "irq" ? "vehicle" : "irq";
-  const other = useQuery<BoardResp | null>((signal) => api.get<BoardResp | null>(`/api/sales/board?pipeline=${otherPipe}&lost_limit=0`, { signal, tolerate: [403, 404, 501] }).catch(() => null), [otherPipe, tick]);
-  const [local, setLocal] = useState<BoardResp | null>(null);
-  useEffect(() => { setLocal(board.data); }, [board.data]);
+  // Both pipelines are loaded and shown, Vehicle Sales above IRQ. Neither hides behind the other:
+  // a lead you are not looking for is exactly the one that goes stale.
+  const vehicle = useQuery<BoardResp | null>((signal) => api.get<BoardResp | null>("/api/sales/board?pipeline=vehicle", { signal, tolerate: [404, 501] }), [tick]);
+  const irq = useQuery<BoardResp | null>((signal) => api.get<BoardResp | null>("/api/sales/board?pipeline=irq", { signal, tolerate: [403, 404, 501] }), [tick]);
+  const boards: Record<Pipeline, QueryState<BoardResp | null>> = { vehicle, irq };
 
-  const [showLost, setShowLost] = useState(false);
   const [newOpen, setNewOpen] = useState(params.get("new") === "1");
   useEffect(() => { if (params.get("new") === "1") setNewOpen(true); }, [params]);
   const [sheetLead, setSheetLead] = useState<{ id: string; taskType?: "call" | "meeting" | "follow_up" | null } | null>(null);
-  const [lostFor, setLostFor] = useState<LeadCard | null>(null);
-  const [mStage, setMStage] = useState<Stage>("new");
-  const { gate, setGate, handle } = useMoveOutcome();
 
   // ?lead=<id> stays in the URL while the pane is open, so a refresh or Back returns to the same lead.
   const openLead = useCallback((id: string, taskType?: "call" | "meeting" | "follow_up" | null) => {
@@ -124,9 +119,79 @@ export default function Sales() {
     if (leadParam) setParam("lead", null);
   }, [mobile, inspectorShowsLead, leadParam, setParam]);
 
-  /* ---------- stage moves ---------- */
+  /* ---------- derived across both pipelines ---------- */
+  const cards = useMemo(() => [...allCards(vehicle.data), ...allCards(irq.data)], [vehicle.data, irq.data]);
+  const overdueCount = cards.filter((c) => c.overdue && c.stage !== "lost").length;
+  const totalOpen = openCount(vehicle.data) + openCount(irq.data);
+  const loading = (vehicle.loading || irq.loading) && !vehicle.data && !irq.data;
+  const connected = !!vehicle.data || !!irq.data;
+  const subtitle = loading ? "Loading…"
+    : connected ? `${totalOpen} open${overdueCount ? ` · ${overdueCount} overdue` : ""} · calls, meetings and follow-ups are timed tasks, not stages`
+    : "Calls, meetings and follow-ups are timed tasks, not stages.";
+
+  const header = (
+    <PageHeader
+      title="Sales"
+      subtitle={subtitle}
+      actions={<Button variant="primary" iconLeft={<PlusIcon />} onClick={() => setNewOpen(true)} disabled={!write} disabledReason={whyNot("sales.write")}>New lead</Button>}
+    >
+      <div className="sb-toolbar">
+        <SegmentedControl<View> label="View" size="sm" block={mobile} value={view} onChange={(v) => setParam("view", v === "board" ? null : v)}
+          options={[{ value: "board", label: "Board" }, { value: "list", label: "List" }, { value: "tasks", label: "Tasks", count: overdueCount || undefined }]} />
+      </div>
+    </PageHeader>
+  );
+
+  const body = loading ? <GlassPanel clip><Loading label="Loading leads" rows={4} /></GlassPanel>
+    : vehicle.error && irq.error ? <ErrorState error={vehicle.error} onRetry={() => { vehicle.reload(); irq.reload(); }} />
+    : !connected ? <GlassPanel clip><EmptyState title="Sales isn't connected yet" body="Leads appear here once the sales API is live." /></GlassPanel>
+    : view === "tasks" ? <SalesTasks cards={cards} onOpenLead={(id) => openLead(id)} onChanged={reload} />
+    : (
+      <div className="stack-lg">
+        {PIPELINES.map((p) => (
+          <PipelineSection key={p.id} pipeline={p.id} q={boards[p.id]} view={view} mobile={mobile} write={write}
+                           onOpenLead={openLead} onChanged={reload} />
+        ))}
+        {view === "board" && !mobile ? (
+          <div className="sb-foot"><span>Drag a card to move stage, or use Move on the card. A lead stays in its own pipeline, and Deposit Paid is set from payment evidence.</span></div>
+        ) : null}
+      </div>
+    );
+
+  return (
+    <div className="page page-wide">
+      {header}
+      {body}
+
+      <NewLeadDialog open={newOpen} onClose={() => { setNewOpen(false); if (params.get("new")) setParam("new", null); }} defaultPipeline="vehicle"
+        onCreated={(r) => {
+          reload();  // both boards are on screen, so there is no pipeline to switch to
+          openLead(r.opportunity.id, r.created ? "call" : null);
+        }} />
+      {mobile ? (
+        <Sheet open={!!sheetLead} onClose={closeLead} title={cards.find((c) => c.id === sheetLead?.id)?.name || "Lead"}>
+          {sheetLead ? <LeadPane leadId={sheetLead.id} onChanged={reload} initialTaskType={sheetLead.taskType} /> : null}
+        </Sheet>
+      ) : null}
+    </div>
+  );
+}
+
+/* ---------- one pipeline: its own board, its own drag, its own Lost drawer ---------- */
+function PipelineSection({ pipeline, q, view, mobile, write, onOpenLead, onChanged }: {
+  pipeline: Pipeline; q: QueryState<BoardResp | null>; view: Exclude<View, "tasks">; mobile: boolean; write: boolean;
+  onOpenLead: (id: string, taskType?: "call" | "meeting" | "follow_up" | null) => void; onChanged: () => void;
+}) {
+  const { toast } = useToast();
+  const [local, setLocal] = useState<BoardResp | null>(null);
+  useEffect(() => { setLocal(q.data); }, [q.data]);
+  const [showLost, setShowLost] = useState(false);
+  const [mStage, setMStage] = useState<Stage>("new");
   const [dragId, setDragId] = useState<string | null>(null);
   const [dragOver, setDragOver] = useState<string | null>(null);
+  const [lostFor, setLostFor] = useState<LeadCard | null>(null);
+  const { gate, setGate, handle } = useMoveOutcome();
+
   const findCard = (id: string) => allCards(local).find((c) => c.id === id) || null;
 
   const applyLocal = (id: string, stage: Stage) => {
@@ -153,14 +218,14 @@ export default function Sales() {
     if (stage === "lost" && !reason) { setLostFor(card); return false; }
     if (card.stage === "lost") {
       const out = await reopenLead(id, { stage: stage === "deposit_paid" ? "new" : stage, expected_version: card.version });
-      if (handle(out, `${card.name} reopened → ${stageLabel(stage === "deposit_paid" ? "new" : stage)}`)) reload();
+      if (handle(out, `${card.name} reopened → ${stageLabel(stage === "deposit_paid" ? "new" : stage)}`)) onChanged();
       return out.kind === "ok";
     }
     const optimistic = stage !== "deposit_paid";
     if (optimistic) applyLocal(id, stage);
     const out = await moveStage(id, stage, { reason, expected_version: card.version });
     const ok = handle(out, `${card.name} → ${stageLabel(stage)}${stage === "deposit_paid" ? " · handed off" : ""}`);
-    if (ok) reload(); else if (optimistic) setLocal(board.data);
+    if (ok) onChanged(); else if (optimistic) setLocal(q.data);
     return ok;
   };
 
@@ -177,7 +242,10 @@ export default function Sales() {
     const id = dragId || e.dataTransfer.getData("text/plain");
     setDragId(null);
     setDragOver(null);
-    if (id) void move(id, stage);
+    if (!id) return;
+    // With both boards on screen a card can be dragged into the other one; say why nothing happened.
+    if (!findCard(id)) { toast({ message: `A lead stays in its own pipeline. Open it to change what it is.`, tone: "risk" }); return; }
+    void move(id, stage);
   };
 
   const moveItems = (card: LeadCard): MenuItem[] => {
@@ -196,90 +264,66 @@ export default function Sales() {
     return items;
   };
 
-  /* ---------- derived ---------- */
-  const cards = useMemo(() => allCards(local), [local]);
-  const overdueCount = cards.filter((c) => c.overdue && c.stage !== "lost").length;
-  const counts: Record<Pipeline, number> = { [pipeline]: openCount(local), [otherPipe]: openCount(other.data) } as Record<Pipeline, number>;
-  const subtitle = board.loading ? "Loading…" : local ? `${openCount(local)} open in ${pipelineLabel(pipeline)}${overdueCount ? ` · ${overdueCount} overdue` : ""} · calls, meetings and follow-ups are timed tasks, not stages` : "Calls, meetings and follow-ups are timed tasks, not stages.";
+  // A tolerated 403/404/501 means this pipeline is not this person's to see, or is not built yet:
+  // that is not a hole to draw an empty panel in, so the section is simply absent.
+  if (!q.loading && !q.error && !local) return null;
 
-  const header = (
-    <PageHeader
-      title="Sales"
-      subtitle={subtitle}
-      actions={<Button variant="primary" iconLeft={<PlusIcon />} onClick={() => setNewOpen(true)} disabled={!write} disabledReason={whyNot("sales.write")}>New lead</Button>}
-    >
-      <div className="sb-toolbar">
-        <SegmentedControl<Pipeline> label="Pipeline" block={mobile} value={pipeline} onChange={(v) => { setParam("pipeline", v === "vehicle" ? null : v); setMStage("new"); }}
-          options={PIPELINES.map((p) => ({ value: p.id, label: p.label, count: other.loading && p.id !== pipeline ? undefined : counts[p.id] }))} />
-        <SegmentedControl<View> label="View" size="sm" block={mobile} value={view} onChange={(v) => setParam("view", v === "board" ? null : v)}
-          options={[{ value: "board", label: "Board" }, { value: "list", label: "List" }, { value: "tasks", label: "Tasks", count: overdueCount || undefined }]} />
-      </div>
-    </PageHeader>
-  );
-
-  const body = board.loading && !local ? <GlassPanel clip><Loading label="Loading leads" rows={4} /></GlassPanel>
-    : board.error ? <ErrorState error={board.error} onRetry={board.reload} />
-    : !local ? <GlassPanel clip><EmptyState title="Sales isn't connected yet" body="Leads appear here once the sales API is live." /></GlassPanel>
-    : view === "tasks" ? <SalesTasks cards={cards} onOpenLead={(id) => openLead(id)} onChanged={reload} />
-    : view === "list" ? <LeadList board={local} showLost={showLost} onOpen={(id) => openLead(id)} />
-    : mobile ? (
-      <MobileBoard board={local} stage={mStage} setStage={setMStage} onOpen={(id, tt) => openLead(id, tt)} />
-    ) : (
-      <div className="stack" style={{ gap: 10 }}>
-        <div className="sb-board">
-          {local.columns.map((col) => (
-            <div key={col.stage} className={["sb-col", dragOver === col.stage ? "sb-col--over" : ""].filter(Boolean).join(" ")}
-              onDragOver={(e) => onDragOverCol(e, col.stage)} onDragLeave={onDragLeaveCol} onDrop={(e) => onDropCol(e, col.stage as Stage)} aria-label={col.label}>
-              <div className="sb-col__head"><span className="sb-col__label">{col.label}</span><span className="sb-col__count">{col.count}</span></div>
-              {col.items.map((c) => (
-                <BoardCard key={c.id} card={c} dragging={dragId === c.id} onOpen={() => openLead(c.id)} onAddTask={() => openLead(c.id, "call")} onDragStart={(e) => onDragStart(e, c)} onDragEnd={onDragEnd} moveItems={moveItems(c)} write={write} />
-              ))}
-              {col.items.length === 0 ? <div className="sb-col__empty">{col.stage === "new" ? "New enquiries land here" : col.stage === "deposit_paid" ? "Set from matched payment evidence" : "Drop a lead here"}</div> : null}
-              {col.stage === "deposit_paid" ? <div className="sb-col__note">{PAID_HANDOFF_NOTE}</div> : null}
-            </div>
-          ))}
-          {showLost ? (
-            <div className={["sb-col", "sb-col--lost", dragOver === "lost" ? "sb-col--over" : ""].filter(Boolean).join(" ")}
-              onDragOver={(e) => onDragOverCol(e, "lost")} onDragLeave={onDragLeaveCol} onDrop={(e) => onDropCol(e, "lost")} aria-label="Lost / Not moving forward">
-              <div className="sb-col__head"><span className="sb-col__label">Lost / Not moving forward</span><span className="sb-col__count">{local.lost.length}</span></div>
-              {local.lost.map((c) => (
-                <BoardCard key={c.id} card={c} lost dragging={dragId === c.id} onOpen={() => openLead(c.id)} onDragStart={(e) => onDragStart(e, c)} onDragEnd={onDragEnd} moveItems={moveItems(c)} write={write} />
-              ))}
-              {local.lost.length === 0 ? <div className="sb-col__empty">Drop a lead here to park it</div> : null}
-            </div>
-          ) : null}
-        </div>
-        <div className="sb-foot">
-          <button type="button" className="linklike fs13" onClick={() => setShowLost((v) => !v)}>{showLost ? "Hide Lost" : `Show Lost / Not moving forward (${local.lost.length})`}</button>
-          <span>Drag a card to move stage, or use Move on the card. Deposit Paid is set from payment evidence.</span>
-        </div>
-      </div>
-    );
+  const open = openCount(local);
+  const overdue = allCards(local).filter((c) => c.overdue && c.stage !== "lost").length;
+  const lostToggle = local ? (
+    <button type="button" className="linklike fs13" onClick={() => setShowLost((v) => !v)}>
+      {showLost ? "Hide Lost" : `Show Lost / Not moving forward (${local.lost.length})`}
+    </button>
+  ) : null;
 
   return (
-    <div className="page page-wide">
-      {header}
-      {body}
-      {view === "list" && local ? (
-        <div className="sb-foot"><button type="button" className="linklike fs13" onClick={() => setShowLost((v) => !v)}>{showLost ? "Hide Lost" : `Show Lost / Not moving forward (${local.lost.length})`}</button></div>
-      ) : null}
+    <Section title={pipelineLabel(pipeline)} count={q.loading && !local ? undefined : open}
+             link={overdue ? <span className="fs13" style={{ color: "var(--blocked)" }}>{overdue} overdue</span> : undefined}>
+      {q.loading && !local ? <GlassPanel clip><Loading label={`Loading ${pipelineLabel(pipeline)}`} rows={3} /></GlassPanel>
+        : q.error ? <ErrorState error={q.error} onRetry={q.reload} />
+        : !local ? null
+        : view === "list" ? (
+          <div className="stack" style={{ gap: 10 }}>
+            <LeadList board={local} showLost={showLost} onOpen={(id) => onOpenLead(id)} />
+            <div className="sb-foot">{lostToggle}</div>
+          </div>
+        ) : mobile ? (
+          <div className="stack" style={{ gap: 10 }}>
+            <MobileBoard board={local} stage={mStage} setStage={setMStage} onOpen={(id, tt) => onOpenLead(id, tt)} />
+          </div>
+        ) : (
+          <div className="stack" style={{ gap: 10 }}>
+            <div className="sb-board">
+              {local.columns.map((col) => (
+                <div key={col.stage} className={["sb-col", dragOver === col.stage ? "sb-col--over" : ""].filter(Boolean).join(" ")}
+                  onDragOver={(e) => onDragOverCol(e, col.stage)} onDragLeave={onDragLeaveCol} onDrop={(e) => onDropCol(e, col.stage as Stage)} aria-label={`${pipelineLabel(pipeline)} · ${col.label}`}>
+                  <div className="sb-col__head"><span className="sb-col__label">{col.label}</span><span className="sb-col__count">{col.count}</span></div>
+                  {col.items.map((c) => (
+                    <BoardCard key={c.id} card={c} dragging={dragId === c.id} onOpen={() => onOpenLead(c.id)} onAddTask={() => onOpenLead(c.id, "call")} onDragStart={(e) => onDragStart(e, c)} onDragEnd={onDragEnd} moveItems={moveItems(c)} write={write} />
+                  ))}
+                  {col.items.length === 0 ? <div className="sb-col__empty">{col.stage === "new" ? "New enquiries land here" : col.stage === "deposit_paid" ? "Set from matched payment evidence" : "Drop a lead here"}</div> : null}
+                  {col.stage === "deposit_paid" ? <div className="sb-col__note">{PAID_HANDOFF_NOTE}</div> : null}
+                </div>
+              ))}
+              {showLost ? (
+                <div className={["sb-col", "sb-col--lost", dragOver === "lost" ? "sb-col--over" : ""].filter(Boolean).join(" ")}
+                  onDragOver={(e) => onDragOverCol(e, "lost")} onDragLeave={onDragLeaveCol} onDrop={(e) => onDropCol(e, "lost")} aria-label={`${pipelineLabel(pipeline)} · Lost / Not moving forward`}>
+                  <div className="sb-col__head"><span className="sb-col__label">Lost / Not moving forward</span><span className="sb-col__count">{local.lost.length}</span></div>
+                  {local.lost.map((c) => (
+                    <BoardCard key={c.id} card={c} lost dragging={dragId === c.id} onOpen={() => onOpenLead(c.id)} onDragStart={(e) => onDragStart(e, c)} onDragEnd={onDragEnd} moveItems={moveItems(c)} write={write} />
+                  ))}
+                  {local.lost.length === 0 ? <div className="sb-col__empty">Drop a lead here to park it</div> : null}
+                </div>
+              ) : null}
+            </div>
+            <div className="sb-foot">{lostToggle}</div>
+          </div>
+        )}
 
-      <NewLeadDialog open={newOpen} onClose={() => { setNewOpen(false); if (params.get("new")) setParam("new", null); }} defaultPipeline={pipeline}
-        onCreated={(r) => {
-          const p = (r.opportunity.pipeline === "irq" ? "irq" : "vehicle") as Pipeline;
-          if (p !== pipeline) setParam("pipeline", p === "vehicle" ? null : p);
-          reload();
-          openLead(r.opportunity.id, r.created ? "call" : null);
-        }} />
       <ReasonDialog open={!!lostFor} onClose={() => setLostFor(null)} title="Mark lost / not moving forward" description={lostFor?.name} label="Why" placeholder="e.g. bought elsewhere, no reply for 3 weeks" confirmLabel="Mark lost" required tone="danger"
         onConfirm={async (reason) => { if (!lostFor) return false; return move(lostFor.id, "lost", reason); }} />
       <DepositGateDialog message={gate} onClose={() => setGate(null)} />
-      {mobile ? (
-        <Sheet open={!!sheetLead} onClose={closeLead} title={findCard(sheetLead?.id || "")?.name || "Lead"}>
-          {sheetLead ? <LeadPane leadId={sheetLead.id} onChanged={reload} initialTaskType={sheetLead.taskType} /> : null}
-        </Sheet>
-      ) : null}
-    </div>
+    </Section>
   );
 }
 

@@ -1,19 +1,20 @@
 /* Mobile "More": the destinations not in the bottom nav, appearance toggles, help and account.
-   Mechanic: Help (how to complete a task, evidence, blockers) and Account (passkeys, sign out).
+   Mechanic: Help (how to complete a task, evidence, blockers) and Account, which shares the same
+   passkey block as Settings › Recovery — everyone adds a second device the same way.
    TODO(screen builder): counts per row (GET /api/counts), help content. */
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { useAuth } from "../../lib/auth";
 import { useTheme } from "../../lib/theme";
 import { isEmployeeRole, ROLE_LABELS, type Role } from "../../lib/perms";
 import { navFor } from "../../app/nav";
-import { Button, GlassPanel, PageHeader, Switch, useToast } from "../../ui";
+import { Button, GlassPanel, PageHeader, Switch } from "../../ui";
+import { PasskeysBlock } from "../settings/components/PasskeysBlock";
 
 export default function More() {
   const { section } = useParams();
-  const { user, logout, addPasskey, busy } = useAuth();
+  const { user, logout } = useAuth();
   const { theme, toggleTheme, glass, toggleGlass } = useTheme();
   const nav = useNavigate();
-  const { toast } = useToast();
   const role = (user?.role || "mechanic") as Role;
   const employee = isEmployeeRole(role);
   const items = navFor(role).more;
@@ -28,10 +29,7 @@ export default function More() {
             <Switch checked={glass === "off"} onChange={toggleGlass} label="Reduce transparency" />
           </div>
         </GlassPanel>
-        <div className="row-wrap">
-          <Button variant="glass" loading={busy} onClick={() => addPasskey().then(() => toast({ message: "Passkey added.", tone: "ok" })).catch((e: Error) => toast({ message: e.message, tone: "risk" }))}>Add passkey to this device</Button>
-          <Button variant="ghost" onClick={() => { void logout().then(() => nav("/login", { replace: true })); }}>Sign out</Button>
-        </div>
+        <PasskeysBlock />
       </div>
     );
   }
@@ -60,7 +58,7 @@ export default function More() {
         {employee ? (
           <>
             <Link to="/more/help" className="more-row"><span>Help</span><span className="more-row__meta">›</span></Link>
-            <Link to="/more/account" className="more-row"><span>Account</span><span className="more-row__meta">Passkeys · sign out</span></Link>
+            <Link to="/more/account" className="more-row"><span>Account</span><span className="more-row__meta">Ways to sign in · sign out</span></Link>
           </>
         ) : items.map((n) => (
           <Link key={n.key} to={n.to} className="more-row"><span>{n.label}</span><span className="more-row__meta">›</span></Link>

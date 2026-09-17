@@ -117,7 +117,9 @@
 .chip--sm { height: 26px; padding: 0 9px; font-size: 12px; }
 .chip--soft { background: var(--soft); border-color: var(--line2); }
 .chip--selected { border-color: var(--text); background: var(--soft); }
-.chip--act { background: var(--act); color: var(--act-fg); border-color: transparent; box-shadow: var(--acts); font-weight: 600; }
+/* Solid accent, but not the primary button's glow: on a filter row of eight, var(--acts) casts a
+   blue pool under the chosen one that reads as a floating button. */
+.chip--act { background: var(--act); color: var(--act-fg); border-color: transparent; box-shadow: inset 0 1px 0 rgba(255,255,255,.22); font-weight: 600; }
 .chip--amber { background: var(--amber); color: #1d1d1f; border-color: transparent; font-weight: 600; }
 .chip--blocked, .chip--risk, .chip--ok, .chip--wait { border-color: transparent; background: var(--soft); font-weight: 500; }
 .chip--blocked { color: var(--blocked); }
@@ -125,6 +127,7 @@
 .chip--ok { color: var(--ok); }
 .chip--wait { color: var(--wait); }
 .chip__count { opacity: .65; font-variant-numeric: tabular-nums; }
+.chip--act .chip__count { opacity: .8; }  /* white on accent needs more than a grey-on-white count does */
 .chip__x { border: 0; background: transparent; padding: 0; color: var(--t4); font-size: 14px; line-height: 1; margin-left: 2px; }
 button.chip:hover:not(:disabled) { background: var(--soft); }
 button.chip.chip--act:hover:not(:disabled) { background: var(--act); }
@@ -196,8 +199,10 @@ button.chip:disabled { opacity: .55; cursor: not-allowed; }
 
 /* ---------- Tabs (pill tablist) ---------- */
 .tabs {
-  display: inline-flex; gap: 2px; padding: 3px;
-  border-radius: 999px; background: var(--soft);
+  display: inline-flex; gap: 2px; row-gap: 3px; padding: 3px;
+  /* 20px is exactly half a one-row tablist (3 + 34 + 3), so a row that fits is still a pill —
+     and a row that wraps is a rounded panel instead of a stadium whose ends bow into the tabs. */
+  border-radius: 20px; background: var(--soft);
   box-shadow: inset 0 0 0 1px var(--line2);
   align-self: flex-start; flex-wrap: wrap;
   max-width: 100%;

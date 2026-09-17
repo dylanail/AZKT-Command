@@ -5,13 +5,16 @@
 
 :root {
   color-scheme: light;
-  --canvas: #dfe6f3;
+  --canvas: #e9edf5;
+  /* The first layer is a white veil over the four bursts: the corners stayed saturated enough that
+     #1d1d1f text sat on colour rather than on a page. Dark mode needs no such veil. */
   --wall:
+    linear-gradient(0deg, rgba(255,255,255,.4), rgba(255,255,255,.4)),
     radial-gradient(140% 90% at 0% 0%, #a4c0f5 0%, rgba(164,192,245,0) 60%),
     radial-gradient(120% 95% at 100% 0%, #f7c4a8 0%, rgba(247,196,168,0) 55%),
     radial-gradient(140% 110% at 100% 100%, #eab2d3 0%, rgba(234,178,211,0) 55%),
     radial-gradient(140% 100% at 0% 100%, #acdfd3 0%, rgba(172,223,211,0) 55%),
-    #e2e7f1;
+    #edf0f6;
 
   --surface: rgba(255,255,255,.55);
   --surface2: rgba(255,255,255,.82);
@@ -50,6 +53,10 @@
 
   /* hover tint used by the prototype on rows */
   --row-hover: rgba(10,122,255,.06);
+  /* "this one is active": an accent ring and wash. var(--text) reads as a hard black outline in
+     light mode, which is louder than the thing it marks. */
+  --sel: var(--act);
+  --sel-wash: rgba(10,122,255,.09);
 }
 
 [data-theme="dark"] {
@@ -96,6 +103,8 @@
   --shadow: var(--gs2);
   --dim: rgba(0,0,0,.4);
   --row-hover: rgba(10,132,255,.1);
+  --sel: var(--act);
+  --sel-wash: rgba(10,132,255,.18);
 }
 
 /* Reduced transparency: opaque surfaces, no backdrop blur. */

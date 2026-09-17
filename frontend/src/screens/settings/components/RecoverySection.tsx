@@ -1,5 +1,6 @@
 /* Settings › Recovery. System health from GET /api/health (owner): worker heartbeat, queue, outbox, external actions
-   with unknown/failed results, overdue reminders, connections, storage. Plus passkeys and Sign out for everyone. */
+   with unknown/failed results, overdue reminders, connections, storage. Plus, for everyone, the ways they sign in —
+   a passkey per device, added here or on another device with a one-time link — and Sign out. */
 import { api } from "../../../lib/api";
 import { useAuth } from "../../../lib/auth";
 import { useQuery } from "../../../lib/useQuery";
