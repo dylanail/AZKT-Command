@@ -86,6 +86,8 @@ export function MissionPanel({ runId, missionId, startCursor, onChanged }: Missi
       </div>
 
       {mission?.outcome ? <div className="fs14 t2">{mission.outcome}</div> : null}
+      {mission ? <div className="fs13 t3">Instructions: {s.instructionVersion ? <>version {s.instructionVersion.version_no} · pinned when this mission started<details><summary>View instructions used for this work</summary><pre style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{JSON.stringify(s.instructionVersion.content, null, 2)}</pre></details></> : "No custom instruction version recorded (built-in defaults)."}</div> : null}
+      {s.steps.length ? <details><summary>Recorded actions and results ({s.steps.length})</summary>{s.steps.map((step, i) => <div key={i}><strong>{String(step.tool || step.kind || "Step")} · {String(step.decision || (step.ok ? "completed" : "recorded"))}</strong><pre style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{JSON.stringify(step.output, null, 2)}</pre></div>)}</details> : null}
 
       {connectionLine ? <div className="fs12 t4">{connectionLine}</div> : null}
 

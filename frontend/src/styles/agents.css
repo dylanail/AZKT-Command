@@ -142,9 +142,21 @@
 /* ---------- coverage ---------- */
 .ag-cov__name { font-weight: 500; overflow-wrap: anywhere; }
 
+/* ---------- editable instructions ---------- */
+.ag-instructions { min-width: 0; }
+.ag-section-title { margin: 0; font-size: 15px; }
+.ag-import-summary { display: flex; align-items: center; min-height: 44px; overflow-wrap: anywhere; }
+.ag-version {
+  display: flex; align-items: center; justify-content: space-between; gap: 16px;
+  padding: 14px 16px; border-bottom: 1px solid var(--line2); min-width: 0;
+}
+.ag-version:last-child { border-bottom: 0; }
+.ag-version .risk { color: var(--risk); margin-top: 4px; }
+
 @media (max-width: 767px) {
   .ag-thread__scroll { padding: 14px; max-height: 56vh; min-height: 200px; }
   .ag-composer__row .btn, .ag-composer__row .iconbtn { min-height: 44px; min-width: 44px; }
   .ag-turn--me > *, .ag-turn--agent > * { max-width: 100%; }
   .ag-updates__state { min-width: 0; }
+  .ag-version { align-items: flex-start; flex-direction: column; }
 }

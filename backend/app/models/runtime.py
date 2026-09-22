@@ -33,6 +33,7 @@ class Mission(Base, BusinessRow):
     stop_conditions: Mapped[list] = mapped_column(JSON, default=list)
     budget: Mapped[dict] = mapped_column(JSON, default=dict)  # {steps, seconds, usd}
     procedure_version: Mapped[str | None] = mapped_column(String, nullable=True)
+    agent_profile_version: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
     policy_version: Mapped[str] = mapped_column(String, default="v1")
     status: Mapped[str] = mapped_column(String, default="open", index=True)  # open|running|waiting_approval|waiting_external|waiting_until|needs_information|succeeded|failed|cancelled|paused
     next_check_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)

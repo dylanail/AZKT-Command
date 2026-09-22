@@ -4,7 +4,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { describeError } from "../../lib/api";
 import { getRun, streamRunEvents } from "./api";
-import type { MissionBrief, MissionUpdate, RunBrief } from "./types";
+import type { MissionBrief, MissionUpdate, RunBrief, AgentProfileVersion } from "./types";
 import { RESTING_RUN, TERMINAL_MISSION, TERMINAL_RUN } from "./types";
 
 export type RunConnection = "idle" | "connecting" | "live" | "reconnecting" | "finished" | "lost";
@@ -13,6 +13,8 @@ export interface RunFollowState {
   mission: MissionBrief | null;
   run: RunBrief | null;
   updates: MissionUpdate[];
+  instructionVersion: AgentProfileVersion | null;
+  steps: Array<Record<string, unknown>>;
   cursor: number;
   connection: RunConnection;
   /** Plain-language note for "lost"; never shown as a red error while work may still be running. */
@@ -26,6 +28,8 @@ export function useRunEvents(runId: string | null | undefined, startCursor = 0):
   const [mission, setMission] = useState<MissionBrief | null>(null);
   const [run, setRun] = useState<RunBrief | null>(null);
   const [updates, setUpdates] = useState<MissionUpdate[]>([]);
+  const [instructionVersion, setInstructionVersion] = useState<AgentProfileVersion | null>(null);
+  const [steps, setSteps] = useState<Array<Record<string, unknown>>>([]);
   const [connection, setConnection] = useState<RunConnection>("idle");
   const [note, setNote] = useState<string | null>(null);
   const [attempt, setAttempt] = useState(0);
@@ -33,7 +37,7 @@ export function useRunEvents(runId: string | null | undefined, startCursor = 0):
 
   const retry = useCallback(() => { setNote(null); setAttempt((a) => a + 1); }, []);
 
-  useEffect(() => { cursorRef.current = startCursor; setUpdates([]); setMission(null); setRun(null); }, [runId, startCursor]);
+  useEffect(() => { cursorRef.current = startCursor; setUpdates([]); setMission(null); setRun(null); setSteps([]); setInstructionVersion(null); }, [runId, startCursor]);
 
   useEffect(() => {
     if (!runId) { setConnection("idle"); return; }
@@ -57,6 +61,9 @@ export function useRunEvents(runId: string | null | undefined, startCursor = 0):
         if (stopped) return;
         setRun(snap.run);
         setMission(snap.mission);
+        setSteps(snap.steps);
+        setInstructionVersion(snap.instruction_version);
+        (snap.updates || []).forEach(addUpdate);
         if (settled(snap.run, snap.mission)) { setConnection("finished"); return; }
       } catch (e) {
         if (stopped) return;
@@ -80,6 +87,13 @@ export function useRunEvents(runId: string | null | undefined, startCursor = 0):
           }, ctrl.signal);
           if (stopped) return;
           failures = 0;
+          const snapshot = await getRun(runId, ctrl.signal);
+          if (stopped) return;
+          setSteps(snapshot.steps);
+          setInstructionVersion(snapshot.instruction_version);
+          setRun(snapshot.run);
+          setMission(snapshot.mission);
+          (snapshot.updates || []).forEach(addUpdate);
           const last = done[done.length - 1];
           if (last) {
             if (last.mission) setMission(last.mission);
@@ -107,7 +121,7 @@ export function useRunEvents(runId: string | null | undefined, startCursor = 0):
 
     void loop();
     return () => { stopped = true; ctrl.abort(); };
-  }, [runId, attempt]);
+  }, [runId, attempt, startCursor]);
 
-  return { mission, run, updates, cursor: cursorRef.current, connection, note, retry };
+  return { mission, run, updates, instructionVersion, steps, cursor: cursorRef.current, connection, note, retry };
 }

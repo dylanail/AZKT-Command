@@ -143,7 +143,11 @@ async def get_run(run_id: str, actor: Actor = Depends(current_actor), db: AsyncS
     from ..models.runtime import RunStep
     steps = (await db.execute(select(RunStep).where(RunStep.run_id == r.id).order_by(RunStep.seq,
                                                                                      RunStep.created_at))).scalars().all()
-    return {"run": rt.run_brief(r), "mission": rt.brief(m),
+    from ..models.agent_profiles import AgentProfileVersion
+    from ..services.agent_profiles import serialize_version
+    profile = await db.get(AgentProfileVersion, m.agent_profile_version) if m.agent_profile_version else None
+    return {"run": rt.run_brief(r), "mission": rt.brief(m), "updates": rt.updates_since(m),
+            "instruction_version": serialize_version(profile) if profile else None,
             "steps": [{"seq": s.seq, "kind": s.kind, "tool": s.tool_name, "ok": s.ok, "decision": s.decision,
                        "started_at": s.started_at.isoformat() if s.started_at else None,
                        "output": s.output} for s in steps]}

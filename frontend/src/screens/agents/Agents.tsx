@@ -16,13 +16,14 @@ import { getStatus } from "./api";
 import { contextDiffers, parsePinnedContext } from "./context";
 import { Composer } from "./components/Composer";
 import { Coverage } from "./components/Coverage";
+import { Instructions } from "./components/Instructions";
 import { MissionPanel } from "./components/MissionPanel";
 import { RoleRail, RoleStatusPanel } from "./components/RoleRail";
 import { Turn } from "./components/Turn";
 import { useChat } from "./useChat";
 import { AGENT_ROLES, ROLE_META, isAgentRole, type AgentRole, type AgentStatus } from "./types";
 
-type TabId = "chat" | "coverage";
+type TabId = "chat" | "instructions" | "coverage";
 const STATUS_REFRESH_MS = 30000;
 
 /** One plain sentence about the model, taken from /api/agent/status — never a red error. */
@@ -46,9 +47,11 @@ export default function Agents() {
   const owner = user?.role === "owner";
   const mayChat = can(user, "agents.chat");
   const role: AgentRole = isAgentRole(agentId) ? agentId : "manager";
-  const tab: TabId = params.get("tab") === "coverage" && owner ? "coverage" : "chat";
+  const requestedTab = params.get("tab");
+  const tab: TabId = owner && (requestedTab === "coverage" || requestedTab === "instructions") ? requestedTab : "chat";
 
   const [pinnedCleared, setPinnedCleared] = useState(false);
+  const [instructionsDirty, setInstructionsDirty] = useState(false);
   const pinned = useMemo(
     () => (pinnedCleared ? null : parsePinnedContext(params.get("context"), params.get("label"))),
     [params, pinnedCleared],
@@ -87,15 +90,21 @@ export default function Agents() {
   }, [chat.live]);
 
   const selectRole = useCallback((next: AgentRole) => {
+    if (next === role) return;
+    if (instructionsDirty && !window.confirm("Discard unsaved instruction edits?")) return;
+    setInstructionsDirty(false);
     const q = params.toString();
     nav(`/agents/${next}${q ? `?${q}` : ""}`);
-  }, [nav, params]);
+  }, [nav, params, role, instructionsDirty]);
 
   const setTab = useCallback((next: TabId) => {
+    if (next === tab) return;
+    if (instructionsDirty && !window.confirm("Discard unsaved instruction edits?")) return;
+    setInstructionsDirty(false);
     const p = new URLSearchParams(params);
     if (next === "chat") p.delete("tab"); else p.set("tab", next);
     setParams(p, { replace: true });
-  }, [params, setParams]);
+  }, [params, setParams, tab, instructionsDirty]);
 
   const clearPinned = useCallback(() => {
     setPinnedCleared(true);
@@ -128,7 +137,7 @@ export default function Agents() {
   const echoDiffers = !!live && contextDiffers(pinned?.context, live.context);
 
   const tabs = owner
-    ? [{ id: "chat" as const, label: "Chat" }, { id: "coverage" as const, label: "Coverage" }]
+    ? [{ id: "chat" as const, label: "Chat" }, { id: "instructions" as const, label: "Instructions" }, { id: "coverage" as const, label: "Coverage" }]
     : [{ id: "chat" as const, label: "Chat" }];
 
   return (
@@ -162,9 +171,10 @@ export default function Agents() {
             {!isMobile ? <RoleStatusPanel role={role} status={status ?? null} /> : null}
           </div>
 
-          <section className="ag-main" aria-label={`Conversation with ${ROLE_META[role].label}`}>
+          <section className="ag-main" aria-label={tab === "instructions" ? `${ROLE_META[role].label} instructions` : `Conversation with ${ROLE_META[role].label}`}>
             {isMobile ? <RoleStatusPanel role={role} status={status ?? null} /> : null}
 
+            {tab === "instructions" ? <Instructions key={role} role={role} owner={owner} onDirty={setInstructionsDirty} /> : <>
             {echoDiffers ? (
               <Notice tone="risk" lead="Different record">
                 The answer is about a different record than the one pinned above. Check the links on the reply before acting on it.
@@ -211,6 +221,7 @@ export default function Agents() {
               focusSignal={focusSignal}
               onSend={handleSend}
             />
+            </>}
           </section>
         </div>
       )}

@@ -208,6 +208,10 @@ async def create_mission(db, actor: Actor, *, outcome: str, trigger: str = "chat
             m.procedure_version = pv.id
     except Exception:  # noqa: BLE001
         pass
+    from ..services import agent_profiles
+    av = await agent_profiles.current_version_for(db, role)
+    if av is not None:
+        m.agent_profile_version = av.id
     return m
 
 
@@ -304,6 +308,7 @@ def brief(m: Mission) -> dict:
             "waiting_on": m.waiting_on, "next_check_at": _iso(m.next_check_at), "case_id": m.case_id,
             "result": dict(m.result or {}), "depth": int(m.depth or 0), "client_id": m.client_id,
             "delegated_request_id": m.delegated_request_id, "correlation_id": m.correlation_id,
+            "agent_profile_version": m.agent_profile_version,
             "created_at": _iso(m.created_at), "finished_at": _iso(m.finished_at),
             "paused_reason": m.paused_reason, "version": m.version}
 
@@ -347,6 +352,10 @@ async def assemble_context(db, mission: Mission, actor: Actor) -> tuple[str, lis
     facts = await _current_facts(db, mission, actor)
     if facts:
         lines.append("<current_facts>" + json.dumps(facts, default=str)[:20000] + "</current_facts>")
+
+    profile = await _agent_profile_text(db, mission)
+    if profile:
+        lines.append("<agent_profile>" + profile + "</agent_profile>")
 
     proc = await _procedure_text(db, mission, actor)
     if proc:
@@ -429,6 +438,11 @@ async def _procedure_text(db, mission: Mission, actor: Actor) -> str | None:
         return json.dumps(procedures.redact_for(procedures.serialize_version(v), actor), default=str)
     except Exception:  # noqa: BLE001
         return None
+
+
+async def _agent_profile_text(db, mission: Mission) -> str | None:
+    from ..services import agent_profiles
+    return await agent_profiles.version_text(db, mission.agent_profile_version)
 
 
 async def _conversation(db, mission: Mission, limit: int = 12) -> list[dict]:

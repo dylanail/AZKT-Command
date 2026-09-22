@@ -4,7 +4,7 @@
 import { ApiError, api, newIdempotencyKey } from "../../lib/api";
 import type {
   AgentRole, AgentStatus, ApprovalBrief, ChatReply, ChatRequest, CoverageResp, MissionBrief, MissionUpdate,
-  RunBrief, ThreadResp,
+  RunBrief, ThreadResp, AgentProfileVersion,
 } from "./types";
 
 /* ---------- SSE ---------- */
@@ -193,7 +193,7 @@ export const getMission = (id: string, cursor = 0, signal?: AbortSignal) =>
     `/api/missions/${encodeURIComponent(id)}?cursor=${cursor}`, { signal });
 
 export const getRun = (id: string, signal?: AbortSignal) =>
-  api.get<{ run: RunBrief; mission: MissionBrief; steps: Array<Record<string, unknown>> }>(
+  api.get<{ run: RunBrief; mission: MissionBrief; updates: MissionUpdate[]; instruction_version: AgentProfileVersion | null; steps: Array<Record<string, unknown>> }>(
     `/api/runs/${encodeURIComponent(id)}`, { signal });
 
 /* ---------- run progress stream ---------- */
