@@ -132,6 +132,50 @@ export interface AgentStatus {
   as_of: string;
 }
 
+/* ---------- editable agent instructions ---------- */
+export interface AgentProfileContent {
+  mission: string;
+  voice: string;
+  core_rules: string[];
+  operating_instructions: string;
+  reporting_expectations: string;
+  escalation_rules: string[];
+  tool_guidance: string;
+  schedule_guidance: string;
+}
+export interface AgentProfileVersion {
+  created_by?: string | null;
+  activated_by?: string | null;
+  id: string;
+  version_no: number;
+  content: AgentProfileContent;
+  stage: "draft" | "validated" | "active" | "superseded" | string;
+  validation: { ok?: boolean; failures?: string[]; warnings?: string[]; checked_at?: string };
+  source_kind: string;
+  source_ref?: string | null;
+  source_manifest?: Record<string, unknown>;
+  change_note?: string;
+  activated_at?: string | null;
+  created_at?: string | null;
+}
+export interface AgentProfile {
+  id: string | null;
+  role: AgentRole;
+  label: string;
+  status: string;
+  current_version_id: string | null;
+  current_version: AgentProfileVersion | null;
+  effective_content: AgentProfileContent;
+  versions: AgentProfileVersion[];
+  change_history: Array<Record<string, unknown>>;
+}
+export interface OpenClawImportAgent {
+  source_agent: string;
+  documents: string[];
+  missing: string[];
+  paths: Record<string, string>;
+}
+
 /* ---------- coverage (owner) ---------- */
 export interface CoverageCommand {
   command: string;
@@ -160,6 +204,7 @@ export interface CoverageResp {
 /* ---------- missions and runs ---------- */
 export interface MissionUpdate { seq: number; at?: string; state?: string; text?: string; [k: string]: unknown }
 export interface MissionBrief {
+  agent_profile_version?: string | null;
   id: string;
   outcome: string;
   status: string;
